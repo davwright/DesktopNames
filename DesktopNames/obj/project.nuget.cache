@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "yT+ZP194zRs=",
+  "success": true,
+  "projectFilePath": "C:\\git\\tools\\DesktopNames\\DesktopNames\\DesktopNames.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\dwrigh\\.nuget\\packages\\microsoft.windows.sdk.net.ref\\10.0.22621.57\\microsoft.windows.sdk.net.ref.10.0.22621.57.nupkg.sha512"
+  ],
+  "logs": []
+}
