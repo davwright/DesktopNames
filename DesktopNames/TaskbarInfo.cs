@@ -15,16 +15,8 @@ internal static class TaskbarInfo
         var hPrimary = NativeMethods.FindWindow("Shell_TrayWnd", null);
         if (hPrimary != IntPtr.Zero)
         {
-            NativeMethods.GetWindowRect(hPrimary, out var rect);
-            var hMonitor = NativeMethods.MonitorFromWindow(hPrimary, NativeMethods.MONITOR_DEFAULTTONEAREST);
-            taskbars.Add(new TaskbarData
-            {
-                Handle = hPrimary,
-                Bounds = rect,
-                MonitorHandle = hMonitor,
-                IsPrimary = true,
-                Edge = GetTaskbarEdge(rect, hMonitor)
-            });
+            var data = BuildTaskbarData(hPrimary, isPrimary: true);
+            if (data != null) taskbars.Add(data);
         }
 
         // Secondary taskbars (multi-monitor)
@@ -36,16 +28,8 @@ internal static class TaskbarInfo
 
             if (name == "Shell_SecondaryTrayWnd")
             {
-                NativeMethods.GetWindowRect(hWnd, out var rect);
-                var hMonitor = NativeMethods.MonitorFromWindow(hWnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-                taskbars.Add(new TaskbarData
-                {
-                    Handle = hWnd,
-                    Bounds = rect,
-                    MonitorHandle = hMonitor,
-                    IsPrimary = false,
-                    Edge = GetTaskbarEdge(rect, hMonitor)
-                });
+                var data = BuildTaskbarData(hWnd, isPrimary: false);
+                if (data != null) taskbars.Add(data);
             }
             return true;
         }, IntPtr.Zero);
@@ -53,22 +37,57 @@ internal static class TaskbarInfo
         return taskbars;
     }
 
-    private static uint GetTaskbarEdge(NativeMethods.RECT taskbarRect, IntPtr hMonitor)
+    private static TaskbarData? BuildTaskbarData(IntPtr hWnd, bool isPrimary)
     {
+        var hMonitor = NativeMethods.MonitorFromWindow(hWnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
         var mi = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>() };
-        NativeMethods.GetMonitorInfo(hMonitor, ref mi);
+        if (!NativeMethods.GetMonitorInfo(hMonitor, ref mi)) return null;
 
-        // Determine edge based on taskbar position relative to monitor
-        if (taskbarRect.Height < taskbarRect.Width)
+        // Derive the taskbar's visible strip from the difference between
+        // the monitor's full bounds and its work area. This is authoritative —
+        // GetWindowRect on the tray hwnd can return the whole monitor rect
+        // on Win11, which we cannot trust to infer edge or position.
+        var mon = mi.rcMonitor;
+        var work = mi.rcWork;
+        NativeMethods.RECT strip;
+        uint edge;
+
+        if (work.Bottom < mon.Bottom)
         {
-            // Horizontal taskbar
-            return taskbarRect.Top <= mi.rcMonitor.Top + 10 ? NativeMethods.ABE_TOP : NativeMethods.ABE_BOTTOM;
+            edge = NativeMethods.ABE_BOTTOM;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = work.Bottom, Right = mon.Right, Bottom = mon.Bottom };
+        }
+        else if (work.Top > mon.Top)
+        {
+            edge = NativeMethods.ABE_TOP;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = mon.Top, Right = mon.Right, Bottom = work.Top };
+        }
+        else if (work.Left > mon.Left)
+        {
+            edge = NativeMethods.ABE_LEFT;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = mon.Top, Right = work.Left, Bottom = mon.Bottom };
+        }
+        else if (work.Right < mon.Right)
+        {
+            edge = NativeMethods.ABE_RIGHT;
+            strip = new NativeMethods.RECT { Left = work.Right, Top = mon.Top, Right = mon.Right, Bottom = mon.Bottom };
         }
         else
         {
-            // Vertical taskbar
-            return taskbarRect.Left <= mi.rcMonitor.Left + 10 ? NativeMethods.ABE_LEFT : NativeMethods.ABE_RIGHT;
+            // Work area equals monitor — taskbar is auto-hidden or unreservered.
+            // Fall back to GetWindowRect and default to bottom edge.
+            NativeMethods.GetWindowRect(hWnd, out strip);
+            edge = NativeMethods.ABE_BOTTOM;
         }
+
+        return new TaskbarData
+        {
+            Handle = hWnd,
+            Bounds = strip,
+            MonitorHandle = hMonitor,
+            IsPrimary = isPrimary,
+            Edge = edge
+        };
     }
 }
 

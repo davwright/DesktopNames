@@ -19,10 +19,10 @@ internal sealed class TaskbarOverlay : Form
     private readonly ContextMenuStrip _contextMenu;
 
     // Win11 taskbar style constants
-    private static readonly Font ButtonFont = new("Segoe UI Variable Text", 12f, FontStyle.Regular);
-    private static readonly Font ButtonFontBold = new("Segoe UI Variable Text", 12f, FontStyle.Bold);
-    private const int ButtonPaddingH = 8;
-    private const int ButtonPaddingV = 6;
+    private static readonly Font ButtonFont = new("Segoe UI Variable Text", 10f, FontStyle.Regular);
+    private static readonly Font ButtonFontBold = new("Segoe UI Variable Text", 10f, FontStyle.Bold);
+    private const int ButtonPaddingH = 6;
+    private const int ButtonPaddingV = 3;
     private const int ButtonSpacing = 1;
     private const int ButtonRadius = 4;
 
@@ -101,9 +101,14 @@ internal sealed class TaskbarOverlay : Form
         }
 
         var newDesktops = _desktopService.GetDesktops();
-        bool changed = DesktopsChanged(newDesktops);
+        bool desktopsChanged = DesktopsChanged(newDesktops);
+        int prevStripHeight = _taskbar.Bounds.Height;
 
-        if (changed)
+        // Always reposition — picks up taskbar edge/move changes without waiting for a desktop change.
+        RepositionOnTaskbar();
+        bool stripChanged = _taskbar.Bounds.Height != prevStripHeight;
+
+        if (desktopsChanged || stripChanged)
         {
             _desktops = newDesktops;
             RecalculateLayout();
@@ -168,60 +173,88 @@ internal sealed class TaskbarOverlay : Form
     private void RecalculateLayout()
     {
         _buttons.Clear();
-        int x = ButtonSpacing;
 
-        int maxHeight = 0;
+        int stripHeight = Math.Max(_taskbar.Bounds.Height, 24);
+        // Each button is half the taskbar height so two rows fit stacked.
+        int buttonHeight = Math.Max(stripHeight / 2, 14);
 
+        // Measure each label's width (height is fixed at buttonHeight).
+        var widths = new List<int>(_desktops.Count);
         foreach (var desktop in _desktops)
         {
             string label = GetButtonLabel(desktop);
-            // Use bold font for measurement so switching active state doesn't resize
             var textSize = TextRenderer.MeasureText(label, ButtonFontBold,
                 new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-            int w = textSize.Width + ButtonPaddingH * 2;
-            int h = textSize.Height + ButtonPaddingV * 2;
-            maxHeight = Math.Max(maxHeight, h);
+            widths.Add(textSize.Width + ButtonPaddingH * 2);
+        }
+
+        // Split into two rows, front-loaded, so the total block width = max(row1, row2)
+        // is as small as possible while keeping order. With N buttons, row1 gets
+        // ceil(N/2), row2 gets the rest. This keeps the block leftmost and compact.
+        int n = _desktops.Count;
+        int row1Count = (n + 1) / 2;
+
+        int row1Width = ButtonSpacing;
+        int row2Width = ButtonSpacing;
+        for (int i = 0; i < n; i++)
+        {
+            int w = widths[i];
+            int row = i < row1Count ? 0 : 1;
+            int xStart = row == 0 ? row1Width : row2Width;
+            int y = row * buttonHeight;
 
             _buttons.Add(new DesktopButton
             {
-                Desktop = desktop,
-                Bounds = new Rectangle(x, 0, w, h)
+                Desktop = _desktops[i],
+                Bounds = new Rectangle(xStart, y, w, buttonHeight)
             });
 
-            x += w + ButtonSpacing;
+            if (row == 0) row1Width += w + ButtonSpacing;
+            else row2Width += w + ButtonSpacing;
         }
 
-        // Vertically center buttons
-        foreach (var btn in _buttons)
-        {
-            int y = (_taskbar.Bounds.Height - btn.Bounds.Height) / 2;
-            btn.Bounds = new Rectangle(btn.Bounds.X, y, btn.Bounds.Width, btn.Bounds.Height);
-        }
-
-        // Total width needed
-        int totalWidth = x;
-        ClientSize = new Size(totalWidth, _taskbar.Bounds.Height);
+        int totalWidth = Math.Max(row1Width, row2Width);
+        ClientSize = new Size(totalWidth, stripHeight);
     }
 
     private void RepositionOnTaskbar()
     {
-        // Refresh taskbar rect in case it moved
-        NativeMethods.GetWindowRect(_taskbar.Handle, out var tbRect);
+        // Re-derive the taskbar strip from monitor work area each refresh,
+        // so changes to taskbar position (top/bottom) are picked up.
+        var monInfo = new NativeMethods.MONITORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFO>() };
+        NativeMethods.GetMonitorInfo(_taskbar.MonitorHandle, ref monInfo);
 
-        int overlayX;
-        int overlayY = tbRect.Top;
+        var mon = monInfo.rcMonitor;
+        var work = monInfo.rcWork;
+        NativeMethods.RECT strip = _taskbar.Bounds;
+        uint edge = _taskbar.Edge;
 
-        if (_taskbar.Edge == NativeMethods.ABE_BOTTOM || _taskbar.Edge == NativeMethods.ABE_TOP)
+        if (work.Bottom < mon.Bottom)
         {
-            // Left edge of taskbar
-            overlayX = tbRect.Left;
+            edge = NativeMethods.ABE_BOTTOM;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = work.Bottom, Right = mon.Right, Bottom = mon.Bottom };
         }
-        else
+        else if (work.Top > mon.Top)
         {
-            // Vertical taskbar (rare on Win11)
-            overlayX = tbRect.Left;
-            overlayY = tbRect.Top;
+            edge = NativeMethods.ABE_TOP;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = mon.Top, Right = mon.Right, Bottom = work.Top };
         }
+        else if (work.Left > mon.Left)
+        {
+            edge = NativeMethods.ABE_LEFT;
+            strip = new NativeMethods.RECT { Left = mon.Left, Top = mon.Top, Right = work.Left, Bottom = mon.Bottom };
+        }
+        else if (work.Right < mon.Right)
+        {
+            edge = NativeMethods.ABE_RIGHT;
+            strip = new NativeMethods.RECT { Left = work.Right, Top = mon.Top, Right = mon.Right, Bottom = mon.Bottom };
+        }
+
+        _taskbar.Bounds = strip;
+        _taskbar.Edge = edge;
+
+        int overlayX = strip.Left;
+        int overlayY = strip.Top;
 
         NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST,
             overlayX, overlayY, Width, Height,

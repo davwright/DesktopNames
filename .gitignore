@@ -1,6 +1,8 @@
 bin/
 obj/
 publish/
+release-output/
+*.zip
 *.user
 *.suo
 .vs/
