@@ -1,8 +1,23 @@
-# DesktopNames
+<p align="center">
+  <img src="brand/logo-256.png" alt="DesktopNames" width="128" height="128" />
+</p>
+
+<h1 align="center">DesktopNames</h1>
+
+<p align="center">
+  <em>Your virtual desktop names, right on the Windows 11 taskbar.</em>
+</p>
 
 ![DesktopNames on a Windows 11 taskbar](screenshot.png)
 
-A lightweight Windows 11 utility that displays your virtual desktop names directly on the taskbar as clickable buttons. Switch desktops with a single click.
+DesktopNames puts all your named virtual desktops directly on the taskbar as clickable buttons. Click one to **switch instantly** — no Win11 scroll animation, no Task View, no waiting.
+
+Windows 11 only ships `Win+Ctrl+Left/Right` to scroll one desktop at a time — and has no built-in hotkey to jump to a specific desktop or move a window to one. The included [AutoHotkey companion script](#companion-autohotkey-hotkeys) fills that gap and is fully user-configurable. As shipped it gives you:
+
+- **`Win+1..0`** — jump directly to desktops 1 through 10.
+- **`Win+Ctrl+1..0`** — move the focused window to desktop 1 through 10.
+
+Edit the script to remap keys, add more desktops, or wire in your own actions.
 
 ## Features
 
@@ -58,9 +73,9 @@ The app uses undocumented Windows COM interfaces (`IVirtualDesktopManagerInterna
 
 The overlay is a borderless, topmost WinForms window positioned over each taskbar using `Shell_TrayWnd` / `Shell_SecondaryTrayWnd` window detection.
 
-## Companion: Win+1..9 hotkeys via AutoHotkey
+## Companion: AutoHotkey hotkeys
 
-DesktopNames shows you which virtual desktop you're on. Pair it with a small AutoHotkey v2 script to jump between desktops with `Win+1..9` and move the active window with `Win+Ctrl+1..9`. Windows 11 itself does not ship these hotkeys.
+DesktopNames shows which virtual desktop you're on. The script below adds the hotkeys Windows 11 doesn't: jump straight to a numbered desktop, and move the focused window to one. It's plain AutoHotkey v2 — edit it to remap keys, add desktops, or trigger your own logic.
 
 ### Setup
 

@@ -56,11 +56,14 @@ static class Program
             }
         };
 
+        // Load the embedded app icon for tray + form identity
+        var appIcon = LoadAppIcon() ?? SystemIcons.Application;
+
         // Create a system tray icon for exit
         var trayIcon = new NotifyIcon
         {
-            Text = "DesktopNames - Click to exit",
-            Icon = SystemIcons.Application,
+            Text = "DesktopNames - Right-click to exit",
+            Icon = appIcon,
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip()
         };
@@ -79,7 +82,8 @@ static class Program
             ShowInTaskbar = false,
             WindowState = FormWindowState.Minimized,
             FormBorderStyle = FormBorderStyle.None,
-            Opacity = 0
+            Opacity = 0,
+            Icon = appIcon
         };
 
         hiddenForm.FormClosing += (_, _) =>
@@ -90,5 +94,19 @@ static class Program
         };
 
         Application.Run(hiddenForm);
+    }
+
+    private static Icon? LoadAppIcon()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var name = asm.GetManifestResourceNames()
+                          .FirstOrDefault(n => n.EndsWith("app.ico", StringComparison.OrdinalIgnoreCase));
+            if (name is null) return null;
+            using var s = asm.GetManifestResourceStream(name);
+            return s is null ? null : new Icon(s);
+        }
+        catch { return null; }
     }
 }

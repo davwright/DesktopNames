@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>DesktopNames</title>
+  <!-- Rounded squircle backdrop so the icon reads at 16x16 -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#1F2430"/>
+
+  <!-- Three "desktop tiles" representing named virtual desktops.
+       Middle tile is the active desktop (accent blue, brighter fill,
+       with the underline bar that the live app draws). -->
+
+  <!-- Left tile -->
+  <rect x="36"  y="80" width="56" height="96" rx="12" fill="#3A4151"/>
+  <rect x="48"  y="96" width="32" height="6"  rx="3"  fill="#7F8AA0"/>
+  <rect x="48"  y="110" width="24" height="6" rx="3"  fill="#565E72"/>
+
+  <!-- Middle tile (active) -->
+  <rect x="100" y="64" width="56" height="112" rx="12" fill="#2A6DF4"/>
+  <rect x="112" y="82" width="32" height="6"  rx="3"  fill="#FFFFFF"/>
+  <rect x="112" y="96" width="24" height="6"  rx="3"  fill="#C7D6FF"/>
+  <!-- underline indicator (echoes the in-app active bar) -->
+  <rect x="114" y="160" width="28" height="6" rx="3" fill="#FFFFFF"/>
+
+  <!-- Right tile -->
+  <rect x="164" y="80" width="56" height="96" rx="12" fill="#3A4151"/>
+  <rect x="176" y="96" width="32" height="6"  rx="3"  fill="#7F8AA0"/>
+  <rect x="176" y="110" width="24" height="6" rx="3"  fill="#565E72"/>
+
+  <!-- Taskbar ground line — thin rule that anchors the tiles to a "bar" -->
+  <rect x="36" y="196" width="184" height="6" rx="3" fill="#2A6DF4" opacity="0.45"/>
+</svg>
