@@ -1,5 +1,7 @@
 # DesktopNames
 
+![DesktopNames on a Windows 11 taskbar](screenshot.png)
+
 A lightweight Windows 11 utility that displays your virtual desktop names directly on the taskbar as clickable buttons. Switch desktops with a single click.
 
 ## Features
