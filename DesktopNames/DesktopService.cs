@@ -10,20 +10,226 @@ namespace DesktopNames;
 internal sealed class DesktopService : IDisposable
 {
     private IVirtualDesktopManagerInternal? _manager;
+    private IVirtualDesktopManager? _managerPublic;
+    private IApplicationViewCollection? _appViewCollection;
 
     public event Action? DesktopsChanged;
 
     public bool Initialize()
     {
+        try { _manager = VirtualDesktopInterop.GetManagerInternal(); } catch { }
+        try { _managerPublic = VirtualDesktopInterop.GetManagerPublic(); } catch { }
+        try { _appViewCollection = VirtualDesktopInterop.GetAppViewCollection(); } catch { }
+        return true;
+    }
+
+    public void CreateDesktop()
+    {
+        if (_manager == null) return;
+        try { _manager.CreateDesktop(); DesktopsChanged?.Invoke(); } catch { }
+    }
+
+    public void RemoveCurrentDesktop()
+    {
+        if (_manager == null) return;
         try
         {
-            _manager = VirtualDesktopInterop.GetManagerInternal();
+            int count = _manager.GetCount();
+            if (count <= 1) return;
+            var current = _manager.GetCurrentDesktop();
+            var iidDesktop = typeof(IVirtualDesktop).GUID;
+            IObjectArray desktops = _manager.GetDesktops();
+            int currentIdx = GetCurrentDesktopIndex();
+            int fallbackIdx = currentIdx > 0 ? currentIdx - 1 : 1;
+            var fallback = (IVirtualDesktop)desktops.GetAt((uint)fallbackIdx, ref iidDesktop);
+            _manager.RemoveDesktop(current, fallback);
+            DesktopsChanged?.Invoke();
         }
-        catch
+        catch { }
+    }
+
+    public void RenameDesktop(Guid desktopId, string newName)
+    {
+        if (_manager == null) return;
+        try
         {
-            // COM not available, fall back to registry
+            var target = _manager.FindDesktop(ref desktopId);
+            if (target == null) return;
+            _manager.SetDesktopName(target, newName);
+            DesktopsChanged?.Invoke();
         }
+        catch { }
+    }
+
+    /// <summary>
+    /// Move an arbitrary window to a given virtual desktop. Returns true on success.
+    /// Uses IApplicationViewCollection + IVirtualDesktopManagerInternal::MoveViewToDesktop —
+    /// the only path that works for windows we don't own.
+    /// </summary>
+    public bool MoveWindowToDesktop(IntPtr hwnd, Guid desktopId)
+    {
+        if (_manager == null || _appViewCollection == null || desktopId == Guid.Empty || hwnd == IntPtr.Zero)
+            return false;
+        try
+        {
+            int hr = _appViewCollection.GetViewForHwnd(hwnd, out var view);
+            if (hr != 0 || view == null) return false;
+            var target = _manager.FindDesktop(ref desktopId);
+            if (target == null) return false;
+            _manager.MoveViewToDesktop(view, target);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    public Guid GetDesktopForWindow(IntPtr hwnd)
+    {
+        if (_managerPublic == null || hwnd == IntPtr.Zero) return Guid.Empty;
+        try
+        {
+            int hr = _managerPublic.GetWindowDesktopId(hwnd, out var id);
+            return hr == 0 ? id : Guid.Empty;
+        }
+        catch { return Guid.Empty; }
+    }
+
+    public Guid GetCurrentDesktopId()
+    {
+        if (_manager != null)
+        {
+            try { return _manager.GetCurrentDesktop().GetID(); }
+            catch { }
+        }
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops");
+            if (key?.GetValue("CurrentVirtualDesktop") is byte[] bytes && bytes.Length == 16)
+                return new Guid(bytes);
+        }
+        catch { }
+        return Guid.Empty;
+    }
+
+    public int GetCurrentDesktopIndexPublic()
+    {
+        return GetCurrentDesktopIndex();
+    }
+
+    private IVirtualDesktop? GetCurrentDesktopCom()
+    {
+        if (_manager == null) return null;
+        try { return _manager.GetCurrentDesktop(); }
+        catch { return null; }
+    }
+
+    public void MoveCurrentDesktopBy(int delta)
+    {
+        if (_manager == null || delta == 0) return;
+        try
+        {
+            int count = _manager.GetCount();
+            int currentIdx = GetCurrentDesktopIndex();
+            if (currentIdx < 0) return;
+            int target = Math.Clamp(currentIdx + delta, 0, count - 1);
+            if (target == currentIdx) return;
+            MoveCurrentDesktopToIndex(target);
+        }
+        catch { }
+    }
+
+    public void MoveCurrentDesktopToFirst() => MoveCurrentDesktopToIndex(0);
+
+    public void MoveCurrentDesktopToLast()
+    {
+        if (_manager == null) return;
+        try { MoveCurrentDesktopToIndex(_manager.GetCount() - 1); }
+        catch { }
+    }
+
+    private void MoveCurrentDesktopToIndex(int targetIndex)
+    {
+        if (_manager == null) return;
+        try
+        {
+            var current = _manager.GetCurrentDesktop();
+            _manager.MoveDesktop(current, targetIndex);
+            DesktopsChanged?.Invoke();
+        }
+        catch { }
+    }
+
+    public void FocusTopmostWindowOnCurrentDesktop()
+    {
+        try
+        {
+            IntPtr top = NativeMethods.GetTopWindow(IntPtr.Zero);
+            while (top != IntPtr.Zero)
+            {
+                if (IsCandidateWindow(top) && IsOnCurrentDesktop(top))
+                {
+                    ForceForegroundWindow(top);
+                    return;
+                }
+                top = NativeMethods.GetWindow(top, NativeMethods.GW_HWNDNEXT);
+            }
+        }
+        catch { }
+    }
+
+    private bool IsOnCurrentDesktop(IntPtr hwnd)
+    {
+        if (_managerPublic == null) return true;
+        try
+        {
+            int hr = _managerPublic.IsWindowOnCurrentVirtualDesktop(hwnd, out bool on);
+            return hr == 0 && on;
+        }
+        catch { return false; }
+    }
+
+    private static bool IsCandidateWindow(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindowVisible(hwnd)) return false;
+
+        int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
+        if ((style & NativeMethods.WS_CHILD) != 0) return false;
+
+        int ex = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+        if ((ex & NativeMethods.WS_EX_TOOLWINDOW) != 0 &&
+            (ex & NativeMethods.WS_EX_APPWINDOW) == 0) return false;
+
+        // Skip cloaked windows (UWP suspended, on another desktop, etc.)
+        if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0
+            && cloaked != 0) return false;
+
+        if (NativeMethods.GetWindowTextLength(hwnd) == 0) return false;
+
+        var cls = new char[256];
+        int len = NativeMethods.GetClassName(hwnd, cls, cls.Length);
+        var name = new string(cls, 0, len);
+        if (name is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW") return false;
+
         return true;
+    }
+
+    private static void ForceForegroundWindow(IntPtr hwnd)
+    {
+        uint currentThread = NativeMethods.GetCurrentThreadId();
+        uint targetThread = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
+        bool attached = false;
+        try
+        {
+            if (currentThread != targetThread)
+                attached = NativeMethods.AttachThreadInput(currentThread, targetThread, true);
+            NativeMethods.BringWindowToTop(hwnd);
+            NativeMethods.SetForegroundWindow(hwnd);
+        }
+        finally
+        {
+            if (attached)
+                NativeMethods.AttachThreadInput(currentThread, targetThread, false);
+        }
     }
 
     public List<DesktopInfo> GetDesktops()
@@ -183,6 +389,7 @@ internal sealed class DesktopService : IDisposable
                 IObjectArray desktops = _manager.GetDesktops();
                 var target = (IVirtualDesktop)desktops.GetAt((uint)desktop.Index, ref iidDesktop);
                 _manager.SwitchDesktop(target); // Instant, no animation
+                FocusTopmostWindowOnCurrentDesktop();
                 return;
             }
             catch { }
@@ -190,6 +397,7 @@ internal sealed class DesktopService : IDisposable
 
         // Fallback: keyboard simulation
         SwitchViaKeyboard(desktop.Index);
+        FocusTopmostWindowOnCurrentDesktop();
     }
 
     private static void SwitchViaKeyboard(int targetIndex)

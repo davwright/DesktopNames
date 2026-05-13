@@ -11,6 +11,7 @@ internal sealed class TaskbarOverlay : Form
 {
     private readonly TaskbarData _taskbar;
     private readonly DesktopService _desktopService;
+    private readonly Settings _settings;
     private List<DesktopInfo> _desktops = new();
     private readonly List<DesktopButton> _buttons = new();
     private int _hoveredIndex = -1;
@@ -18,21 +19,24 @@ internal sealed class TaskbarOverlay : Form
     private bool _isDarkMode;
     private readonly ContextMenuStrip _contextMenu;
 
+    public TaskbarData Taskbar => _taskbar;
+
     // Win11 taskbar style constants
     private static readonly Font ButtonFont = new("Segoe UI Variable Text", 10f, FontStyle.Regular);
     private static readonly Font ButtonFontBold = new("Segoe UI Variable Text", 10f, FontStyle.Bold);
-    private const int ButtonPaddingH = 6;
+    private const int ButtonPaddingH = 3;
     private const int ButtonPaddingV = 3;
-    private const int ButtonSpacing = 1;
+    private const int ButtonSpacing = 0;
     private const int ButtonRadius = 4;
 
     // Transparent background - use a color key for true transparency
     private static readonly Color TransparencyColor = Color.FromArgb(1, 1, 1);
 
-    public TaskbarOverlay(TaskbarData taskbar, DesktopService desktopService)
+    public TaskbarOverlay(TaskbarData taskbar, DesktopService desktopService, Settings settings)
     {
         _taskbar = taskbar;
         _desktopService = desktopService;
+        _settings = settings;
         _isDarkMode = DetectDarkMode();
 
         FormBorderStyle = FormBorderStyle.None;
@@ -46,17 +50,97 @@ internal sealed class TaskbarOverlay : Form
         BackColor = TransparencyColor;
         TransparencyKey = TransparencyColor;
 
-        // Polling timer - refreshes desktops and repositions
-        _refreshTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        // Polling timer - safety net. Real refreshes come from WinEventHook + WM_DISPLAYCHANGE.
+        _refreshTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         _refreshTimer.Tick += (_, _) => RefreshDesktops();
         _refreshTimer.Start();
 
         _contextMenu = new ContextMenuStrip();
-        _contextMenu.Items.Add("Exit DesktopNames", null, (_, _) => Application.Exit());
+        _contextMenu.Opening += (_, _) => BuildContextMenu();
+
+        _settings.Changed += () =>
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) BeginInvoke(RefreshDesktops);
+            else RefreshDesktops();
+        };
 
         MouseMove += OnMouseMove;
         MouseLeave += (_, _) => { _hoveredIndex = -1; Invalidate(); };
         MouseUp += OnMouseUp;
+    }
+
+    private DesktopInfo? _rightClickedDesktop;
+
+    private void BuildContextMenu()
+    {
+        _contextMenu.Items.Clear();
+
+        // If the user right-clicked on a specific desktop's button, surface that desktop's options at the top.
+        if (_rightClickedDesktop != null)
+        {
+            var d = _rightClickedDesktop;
+            _contextMenu.Items.Add(new ToolStripMenuItem($"— {d.Name} —") { Enabled = false });
+
+            _contextMenu.Items.Add($"Rename \"{d.Name}\"...", null, (_, _) => PromptRename(d));
+
+            var hideOnThis = new ToolStripMenuItem("Hide overlay on this desktop")
+            {
+                Checked = _settings.IsDesktopHidden(d.Id),
+                CheckOnClick = false
+            };
+            hideOnThis.Click += (_, _) => _settings.ToggleDesktopHidden(d.Id);
+            _contextMenu.Items.Add(hideOnThis);
+
+            _contextMenu.Items.Add(new ToolStripSeparator());
+        }
+
+        var hideItem = new ToolStripMenuItem(_settings.Hidden ? "Show overlay (Win+Alt+H)" : "Hide overlay (Win+Alt+H)");
+        hideItem.Click += (_, _) => { _settings.Hidden = !_settings.Hidden; _settings.Save(); };
+        _contextMenu.Items.Add(hideItem);
+
+        _contextMenu.Items.Add(new ToolStripSeparator());
+
+        var allItem = new ToolStripMenuItem("Show on all desktops") { Checked = !_settings.OnlyOnMainDesktop, CheckOnClick = false };
+        allItem.Click += (_, _) => { _settings.OnlyOnMainDesktop = false; _settings.Save(); };
+        _contextMenu.Items.Add(allItem);
+
+        var mainOnlyItem = new ToolStripMenuItem("Only on main desktop") { Checked = _settings.OnlyOnMainDesktop, CheckOnClick = false };
+        mainOnlyItem.Click += (_, _) => { _settings.OnlyOnMainDesktop = true; _settings.Save(); };
+        _contextMenu.Items.Add(mainOnlyItem);
+
+        _contextMenu.Items.Add(new ToolStripSeparator());
+
+        _contextMenu.Items.Add("New desktop (Win+Ctrl+D)", null, (_, _) => _desktopService.CreateDesktop());
+        _contextMenu.Items.Add("Close current desktop (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
+
+        var renameCurrent = new ToolStripMenuItem("Rename current desktop...");
+        renameCurrent.Click += (_, _) =>
+        {
+            var current = _desktops.FirstOrDefault(d => d.IsCurrent);
+            if (current != null) PromptRename(current);
+        };
+        _contextMenu.Items.Add(renameCurrent);
+
+        _contextMenu.Items.Add(new ToolStripSeparator());
+
+        _contextMenu.Items.Add("Move desktop left (Win+Alt+←)",  null, (_, _) => _desktopService.MoveCurrentDesktopBy(-1));
+        _contextMenu.Items.Add("Move desktop right (Win+Alt+→)", null, (_, _) => _desktopService.MoveCurrentDesktopBy(1));
+        _contextMenu.Items.Add("Make desktop first (Win+Alt+Home)", null, (_, _) => _desktopService.MoveCurrentDesktopToFirst());
+        _contextMenu.Items.Add("Make desktop last (Win+Alt+End)",   null, (_, _) => _desktopService.MoveCurrentDesktopToLast());
+
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add("Keyboard shortcuts...", null, (_, _) => Program.ShowShortcuts());
+        _contextMenu.Items.Add("Open settings.json", null, (_, _) => Program.OpenSettingsFile());
+        _contextMenu.Items.Add($"About DesktopNames v{Program.GetAppVersion()}").Enabled = false;
+        _contextMenu.Items.Add("Exit DesktopNames", null, (_, _) => Program.Host?.Close());
+    }
+
+    private void PromptRename(DesktopInfo desktop)
+    {
+        var newName = InputDialog.Show("Rename desktop", $"Rename \"{desktop.Name}\" to:", desktop.Name);
+        if (!string.IsNullOrWhiteSpace(newName) && newName != desktop.Name)
+            _desktopService.RenameDesktop(desktop.Id, newName);
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -88,8 +172,20 @@ internal sealed class TaskbarOverlay : Form
 
     public void RefreshDesktops()
     {
-        // Hide if a fullscreen app is on this monitor
-        bool shouldHide = IsFullscreenOnMonitor();
+        var newDesktops = _desktopService.GetDesktops();
+
+        // Resolve current desktop for settings-based visibility checks
+        var currentDesktop = newDesktops.FirstOrDefault(d => d.IsCurrent);
+        bool hiddenByCurrentDesktop = currentDesktop != null && _settings.IsDesktopHidden(currentDesktop.Id);
+        bool hiddenByMainOnly = _settings.OnlyOnMainDesktop && currentDesktop != null && currentDesktop.Index != 0;
+        bool hiddenByFullscreen = IsFullscreenOnMonitor();
+
+        bool shouldHide = _settings.Hidden || hiddenByCurrentDesktop || hiddenByMainOnly || hiddenByFullscreen;
+
+        // Keep desktop list in sync even while hidden (menu still uses it)
+        bool desktopsChanged = DesktopsChanged(newDesktops);
+        if (desktopsChanged) _desktops = newDesktops;
+
         if (shouldHide && Visible)
         {
             Visible = false;
@@ -99,9 +195,7 @@ internal sealed class TaskbarOverlay : Form
         {
             Visible = true;
         }
-
-        var newDesktops = _desktopService.GetDesktops();
-        bool desktopsChanged = DesktopsChanged(newDesktops);
+        if (shouldHide) return;
         int prevStripHeight = _taskbar.Bounds.Height;
 
         // Always reposition — picks up taskbar edge/move changes without waiting for a desktop change.
@@ -346,6 +440,11 @@ internal sealed class TaskbarOverlay : Form
     {
         if (e.Button == MouseButtons.Right)
         {
+            _rightClickedDesktop = null;
+            foreach (var b in _buttons)
+            {
+                if (b.Bounds.Contains(e.Location)) { _rightClickedDesktop = b.Desktop; break; }
+            }
             // Show context menu manually since WS_EX_NOACTIVATE suppresses it
             _contextMenu.Show(this, e.Location);
             return;

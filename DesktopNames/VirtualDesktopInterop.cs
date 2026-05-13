@@ -10,6 +10,7 @@ internal static class VirtualDesktopInterop
 {
     private static readonly Guid CLSID_ImmersiveShell = new("C2F03A33-21F5-47FA-B4BB-156362A2F239");
     private static readonly Guid CLSID_VirtualDesktopManagerInternal = new("C5E0CDCA-7B6E-41B2-9FC4-D93975CC467B");
+    private static readonly Guid CLSID_VirtualDesktopManager = new("AA509086-5CA9-4C25-8F95-589D3C07B48A");
 
     public static IVirtualDesktopManagerInternal? GetManagerInternal()
     {
@@ -22,6 +23,59 @@ internal static class VirtualDesktopInterop
         shell.QueryService(ref clsid, ref iid, out var obj);
         return obj as IVirtualDesktopManagerInternal;
     }
+
+    public static IVirtualDesktopManager? GetManagerPublic()
+    {
+        try
+        {
+            return (IVirtualDesktopManager?)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(CLSID_VirtualDesktopManager)!);
+        }
+        catch { return null; }
+    }
+
+    public static IApplicationViewCollection? GetAppViewCollection()
+    {
+        try
+        {
+            var shell = (IServiceProvider10?)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(CLSID_ImmersiveShell)!);
+            if (shell == null) return null;
+            var iid = typeof(IApplicationViewCollection).GUID;
+            var clsid = iid; // for this service, clsid == iid
+            shell.QueryService(ref clsid, ref iid, out var obj);
+            return obj as IApplicationViewCollection;
+        }
+        catch { return null; }
+    }
+}
+
+// IApplicationViewCollection — needed to convert an HWND into an IApplicationView so it can
+// be moved to a desktop via IVirtualDesktopManagerInternal::MoveViewToDesktop. We only call
+// GetViewForHwnd (slot 4), but the earlier slots must be declared so the vtable lines up.
+[ComImport]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+[Guid("1841C6D7-4F9D-42C0-AF41-8747538F10E5")]
+internal interface IApplicationViewCollection
+{
+    [PreserveSig] int GetViews(out IObjectArray array);
+    [PreserveSig] int GetViewsByZOrder(out IObjectArray array);
+    [PreserveSig] int GetViewsByAppUserModelId([MarshalAs(UnmanagedType.LPWStr)] string id, out IObjectArray array);
+    [PreserveSig] int GetViewForHwnd(IntPtr hwnd, [MarshalAs(UnmanagedType.IUnknown)] out object view);
+}
+
+// Public shell IVirtualDesktopManager — stable across Windows builds.
+[ComImport]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+[Guid("A5CD92FF-29BE-454C-8D04-D82879FB3F1B")]
+internal interface IVirtualDesktopManager
+{
+    [PreserveSig]
+    int IsWindowOnCurrentVirtualDesktop(IntPtr topLevelWindow, out bool onCurrentDesktop);
+    [PreserveSig]
+    int GetWindowDesktopId(IntPtr topLevelWindow, out Guid desktopId);
+    [PreserveSig]
+    int MoveWindowToDesktop(IntPtr topLevelWindow, ref Guid desktopId);
 }
 
 [ComImport]

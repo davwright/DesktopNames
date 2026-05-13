@@ -41,14 +41,86 @@ internal static class NativeMethods
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetTopWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [DllImport("user32.dll")]
     public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
+        IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc,
+        uint idProcess, uint idThread, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+    public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
+        IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
+    public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    public const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
+    public const uint EVENT_SYSTEM_DESKTOPSWITCH = 0x0020;
+
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+
     public const int GWL_STYLE = -16;
+    public const int GWL_EXSTYLE = -20;
     public const int WS_MAXIMIZE = 0x01000000;
     public const int WS_CAPTION = 0x00C00000;
+    public const int WS_VISIBLE = 0x10000000;
+    public const int WS_CHILD = 0x40000000;
+    public const int WS_EX_TOOLWINDOW = 0x00000080;
+    public const int WS_EX_NOACTIVATE = 0x08000000;
+    public const int WS_EX_APPWINDOW = 0x00040000;
+
+    public const uint GW_HWNDNEXT = 2;
+
+    public const uint MOD_ALT = 0x0001;
+    public const uint MOD_CONTROL = 0x0002;
+    public const uint MOD_SHIFT = 0x0004;
+    public const uint MOD_WIN = 0x0008;
+    public const uint MOD_NOREPEAT = 0x4000;
+
+    public const int WM_HOTKEY = 0x0312;
+    public const int WM_DISPLAYCHANGE = 0x007E;
+    public const int WM_SETTINGCHANGE = 0x001A;
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -68,11 +140,19 @@ internal static class NativeMethods
     public const uint MONITOR_DEFAULTTONEAREST = 2;
 
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_CLOAKED = 14;
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int attrValue, int attrSize);
 
     public const byte VK_LCONTROL = 0xA2;
     public const byte VK_LWIN = 0x5B;
     public const byte VK_LEFT = 0x25;
     public const byte VK_RIGHT = 0x27;
+    public const byte VK_HOME = 0x24;
+    public const byte VK_END = 0x23;
+    public const byte VK_H = 0x48;
+    public const byte VK_MENU = 0x12;
 
     public static INPUT CreateKeyInput(byte vk, bool keyUp)
     {
