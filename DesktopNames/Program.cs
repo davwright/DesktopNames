@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 
 namespace DesktopNames;
@@ -9,13 +10,9 @@ static class Program
     {
         ApplicationConfiguration.Initialize();
 
-        using var mutex = new Mutex(true, "DesktopNames_SingleInstance", out bool createdNew);
-        if (!createdNew)
-        {
-            MessageBox.Show("DesktopNames is already running.", "DesktopNames",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
+        // Replace any existing instance. Settings live in %APPDATA%\DesktopNames\settings.json
+        // so nothing needs to be handed over — the old process can just die.
+        KillExistingInstances();
 
         var settings = Settings.Load();
 
@@ -55,7 +52,45 @@ static class Program
             desktopService.Dispose();
         };
 
+        // Surface visibility state at startup so the overlay can never silently "not appear"
+        // (the most likely causes: Hidden toggle, OnlyOnMainDesktop, no taskbar found).
+        hostForm.Shown += (_, _) => ShowStartupBalloon(trayIcon, hostForm, settings);
+
         Application.Run(hostForm);
+    }
+
+    private static void KillExistingInstances()
+    {
+        var me = Process.GetCurrentProcess();
+        foreach (var p in Process.GetProcessesByName(me.ProcessName))
+        {
+            if (p.Id == me.Id) { p.Dispose(); continue; }
+            try
+            {
+                p.Kill(entireProcessTree: false);
+                p.WaitForExit(2000);
+            }
+            catch { /* already gone, access denied, or zombie — proceed regardless */ }
+            finally { p.Dispose(); }
+        }
+    }
+
+    private static void ShowStartupBalloon(NotifyIcon tray, HostForm host, Settings settings)
+    {
+        string? hint = null;
+        if (settings.Hidden) hint = "Overlay is hidden (Win+Alt+H to show)";
+        else if (host.OverlayCount == 0) hint = "No taskbars found — overlay has nowhere to draw";
+        else if (settings.OnlyOnMainDesktop) hint = "Overlay shows only on main desktop (right-click tray to change)";
+
+        if (hint == null) return;
+        try
+        {
+            tray.BalloonTipTitle = $"DesktopNames v{GetAppVersion()}";
+            tray.BalloonTipText = hint;
+            tray.BalloonTipIcon = ToolTipIcon.Info;
+            tray.ShowBalloonTip(4000);
+        }
+        catch { }
     }
 
     private static Icon? LoadAppIcon()
@@ -245,6 +280,7 @@ internal sealed class HostForm : Form
     }
 
     public HotkeyManager? Hotkeys => _hotkeys;
+    public int OverlayCount => _overlays.Count;
 
     private void RegisterHotkeys()
     {

@@ -11,6 +11,10 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Version>1.1.0</Version>
+    <!-- Catch AccessViolationException from undocumented Win11 virtual-desktop COM calls
+         so a vtable-mismatch on a non-load-bearing call (e.g. MoveViewToDesktop) can't
+         kill the process. Without this, AVs are unhandled and Windows terminates the app. -->
+    <LegacyCorruptedStateExceptionsPolicy>true</LegacyCorruptedStateExceptionsPolicy>
   </PropertyGroup>
 
   <ItemGroup>

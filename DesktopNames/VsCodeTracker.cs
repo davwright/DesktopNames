@@ -66,12 +66,12 @@ internal sealed class VsCodeTracker : IDisposable
             bool firstSight = !_established.Contains(hwnd);
             if (firstSight)
             {
-                // First time seeing this hwnd: if we have a saved desktop, restore. Else record current.
                 if (_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
                 {
-                    if (saved != currentDesktop)
+                    // Auto-move is opt-in: the underlying MoveViewToDesktop COM call is
+                    // unstable across Windows builds and has been observed to AV.
+                    if (_settings.VsCodeAutoMove && saved != currentDesktop)
                     {
-                        // The window is freshly opened — usually still empty/loading, so moving is safe.
                         _desktop.MoveWindowToDesktop(hwnd, saved);
                     }
                 }

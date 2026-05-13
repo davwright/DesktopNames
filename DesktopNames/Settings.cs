@@ -13,7 +13,9 @@ internal sealed class Settings
     public bool OnlyOnMainDesktop { get; set; }
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
-    // VSCode workspace → desktop GUID. Tracked + auto-restored by VsCodeTracker.
+    // VSCode workspace → desktop GUID. Always tracked passively. The auto-move side
+    // uses an undocumented COM API that can fault on certain Windows builds — opt-in only.
+    public bool VsCodeAutoMove { get; set; } = false;
     public Dictionary<string, Guid> VsCodeWorkspaceDesktops { get; set; } = new();
 
     // Hotkey bindings. Strings parsed by HotkeyParser. Set a value to "" to disable a hotkey.
