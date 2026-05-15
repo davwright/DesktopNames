@@ -291,6 +291,22 @@ internal sealed class HostForm : Form
         TryRegister("MoveDesktopFirst", "Make desktop first", () => { _desktopService.MoveCurrentDesktopToFirst(); RefreshAllOverlays(); });
         TryRegister("MoveDesktopLast",  "Make desktop last",  () => { _desktopService.MoveCurrentDesktopToLast();  RefreshAllOverlays(); });
         TryRegister("ToggleHide",       "Toggle overlay hide", () => { _settings.Hidden = !_settings.Hidden; _settings.Save(); });
+
+        // Switch-to-desktop hotkeys. Loop variable must be captured into a local
+        // so each handler closure binds its own index.
+        for (int i = 1; i <= 20; i++)
+        {
+            int idx = i;
+            TryRegister($"SwitchToDesktop{idx}", $"Switch to desktop {idx}", () =>
+            {
+                var list = _desktopService.GetDesktops();
+                if (idx - 1 < list.Count)
+                {
+                    _desktopService.SwitchToDesktop(list[idx - 1]);
+                    RefreshAllOverlays();
+                }
+            });
+        }
     }
 
     private void TryRegister(string key, string description, Action handler)

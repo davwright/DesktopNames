@@ -19,14 +19,27 @@ internal sealed class Settings
     public Dictionary<string, Guid> VsCodeWorkspaceDesktops { get; set; } = new();
 
     // Hotkey bindings. Strings parsed by HotkeyParser. Set a value to "" to disable a hotkey.
-    public Dictionary<string, string> Hotkeys { get; set; } = new()
+    public Dictionary<string, string> Hotkeys { get; set; } = BuildDefaultHotkeys();
+
+    private static Dictionary<string, string> BuildDefaultHotkeys()
     {
-        ["MoveDesktopLeft"]  = "Win+Alt+Left",
-        ["MoveDesktopRight"] = "Win+Alt+Right",
-        ["MoveDesktopFirst"] = "Win+Alt+Home",
-        ["MoveDesktopLast"]  = "Win+Alt+End",
-        ["ToggleHide"]       = "Win+Alt+H",
-    };
+        var d = new Dictionary<string, string>
+        {
+            ["MoveDesktopLeft"]  = "Win+Alt+Left",
+            ["MoveDesktopRight"] = "Win+Alt+Right",
+            ["MoveDesktopFirst"] = "Win+Alt+Home",
+            ["MoveDesktopLast"]  = "Win+Alt+End",
+            ["ToggleHide"]       = "Win+Alt+H",
+        };
+        // Win+Ctrl+1..9,0 → desktops 1..10. Add Shift → desktops 11..20.
+        for (int i = 1; i <= 20; i++)
+        {
+            int digit = i % 10; // 1..9 then 0 for 10, 1..9 then 0 for 20
+            string shift = i > 10 ? "Shift+" : "";
+            d[$"SwitchToDesktop{i}"] = $"Win+Ctrl+{shift}{digit}";
+        }
+        return d;
+    }
 
     public event Action? Changed;
 

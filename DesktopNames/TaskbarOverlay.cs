@@ -68,6 +68,52 @@ internal sealed class TaskbarOverlay : Form
         MouseMove += OnMouseMove;
         MouseLeave += (_, _) => { _hoveredIndex = -1; Invalidate(); };
         MouseUp += OnMouseUp;
+        MouseDoubleClick += OnMouseDoubleClick;
+    }
+
+    private void OnMouseDoubleClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        foreach (var btn in _buttons)
+        {
+            if (btn.Bounds.Contains(e.Location))
+            {
+                BeginInlineRename(btn);
+                break;
+            }
+        }
+    }
+
+    private void BeginInlineRename(DesktopButton btn)
+    {
+        var desktop = btn.Desktop;
+        var screenRect = RectangleToScreen(btn.Bounds);
+
+        // Snapshot the desktop list at click time so validation doesn't shift
+        // mid-edit if a refresh happens.
+        var snapshot = _desktops;
+
+        bool IsValid(string candidate)
+        {
+            var trimmed = (candidate ?? "").Trim();
+            if (trimmed.Length == 0) return false;
+            if (trimmed.Equals(desktop.Name, StringComparison.Ordinal)) return true;
+            foreach (var d in snapshot)
+            {
+                if (d.Id == desktop.Id) continue;
+                if (d.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+
+        using var popup = new RenameEditPopup(desktop.Name, screenRect, IsValid, _isDarkMode);
+        if (popup.ShowDialog() == DialogResult.OK)
+        {
+            var newName = popup.Value;
+            if (newName.Length > 0 && newName != desktop.Name)
+                _desktopService.RenameDesktop(desktop.Id, newName);
+        }
     }
 
     private DesktopInfo? _rightClickedDesktop;
