@@ -239,6 +239,16 @@ internal sealed class HostForm : Form
             _vscodeTracker = new VsCodeTracker(_desktopService, _settings);
         };
 
+        // RenameDesktop / CreateDesktop / RemoveDesktop / MoveDesktop all fire this.
+        // Without it, a rename succeeds in the OS but the overlay keeps showing the
+        // old label until the next 1.5s safety-net refresh.
+        _desktopService.DesktopsChanged += () =>
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) BeginInvoke(RefreshAllOverlays);
+            else RefreshAllOverlays();
+        };
+
         // Quick poll for virtual-desktop switches (registry has no notification surface
         // we can hook from C# easily). Fires only when CurrentVirtualDesktop changes.
         _desktopPoll = new System.Windows.Forms.Timer { Interval = 200 };

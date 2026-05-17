@@ -19,6 +19,10 @@ internal sealed class TaskbarOverlay : Form
     private bool _isDarkMode;
     private readonly ContextMenuStrip _contextMenu;
 
+    // Defer single-click switching so a double-click can pre-empt it.
+    private readonly System.Windows.Forms.Timer _singleClickTimer = new();
+    private Action? _pendingSingleClickAction;
+
     public TaskbarData Taskbar => _taskbar;
 
     // Win11 taskbar style constants
@@ -69,10 +73,22 @@ internal sealed class TaskbarOverlay : Form
         MouseLeave += (_, _) => { _hoveredIndex = -1; Invalidate(); };
         MouseUp += OnMouseUp;
         MouseDoubleClick += OnMouseDoubleClick;
+
+        _singleClickTimer.Tick += (_, _) =>
+        {
+            _singleClickTimer.Stop();
+            var action = _pendingSingleClickAction;
+            _pendingSingleClickAction = null;
+            action?.Invoke();
+        };
     }
 
     private void OnMouseDoubleClick(object? sender, MouseEventArgs e)
     {
+        // Cancel any pending single-click switch — user is renaming, not switching.
+        _singleClickTimer.Stop();
+        _pendingSingleClickAction = null;
+
         if (e.Button != MouseButtons.Left) return;
         foreach (var btn in _buttons)
         {
@@ -267,30 +283,63 @@ internal sealed class TaskbarOverlay : Form
 
     private bool IsFullscreenOnMonitor()
     {
-        var fgWnd = NativeMethods.GetForegroundWindow();
-        if (fgWnd == IntPtr.Zero || fgWnd == Handle) return false;
+        // Walk the global Z-order from top. The topmost candidate that sits on this
+        // monitor decides. Cloaked windows (i.e. on another virtual desktop) are
+        // filtered out, so we only consider what's visible on the *current* desktop.
+        //
+        // Using GetForegroundWindow alone is wrong: on a multi-monitor setup, focus
+        // can be on monitor B while monitor A has a fullscreen app — monitor A's
+        // overlay must still hide. Walking Z-order makes the check per-monitor.
+        IntPtr hwnd = NativeMethods.GetTopWindow(IntPtr.Zero);
+        while (hwnd != IntPtr.Zero)
+        {
+            if (hwnd != Handle && IsRelevantTopWindow(hwnd))
+            {
+                var mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                if (mon == _taskbar.MonitorHandle)
+                    return CoversMonitor(hwnd, mon);
+            }
+            hwnd = NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDNEXT);
+        }
+        return false;
+    }
 
-        // Ignore desktop/shell windows
-        var className = new char[256];
-        int len = NativeMethods.GetClassName(fgWnd, className, className.Length);
-        var name = new string(className, 0, len);
-        if (name is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW")
-            return false;
+    private static bool IsRelevantTopWindow(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindowVisible(hwnd)) return false;
 
-        // Check if the foreground window is on the same monitor
-        var fgMonitor = NativeMethods.MonitorFromWindow(fgWnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-        if (fgMonitor != _taskbar.MonitorHandle) return false;
+        int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
+        if ((style & NativeMethods.WS_CHILD) != 0) return false;
 
-        // Get the full monitor rect (including taskbar area)
+        int ex = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+        if ((ex & NativeMethods.WS_EX_TOOLWINDOW) != 0 &&
+            (ex & NativeMethods.WS_EX_APPWINDOW) == 0) return false;
+
+        // Cloaked = on a different virtual desktop (or UWP suspended). Must skip,
+        // otherwise a fullscreen app on Desktop A would keep Desktop B's overlay hidden.
+        if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0
+            && cloaked != 0) return false;
+
+        var cls = new char[256];
+        int len = NativeMethods.GetClassName(hwnd, cls, cls.Length);
+        var name = new string(cls, 0, len);
+        if (name is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW") return false;
+
+        return true;
+    }
+
+    private static bool CoversMonitor(IntPtr hwnd, IntPtr mon)
+    {
         var mi = new NativeMethods.MONITORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFO>() };
-        NativeMethods.GetMonitorInfo(fgMonitor, ref mi);
-
-        // Check if the foreground window covers the entire monitor
-        NativeMethods.GetWindowRect(fgWnd, out var wndRect);
-        return wndRect.Left <= mi.rcMonitor.Left &&
-               wndRect.Top <= mi.rcMonitor.Top &&
-               wndRect.Right >= mi.rcMonitor.Right &&
-               wndRect.Bottom >= mi.rcMonitor.Bottom;
+        NativeMethods.GetMonitorInfo(mon, ref mi);
+        NativeMethods.GetWindowRect(hwnd, out var r);
+        // Compare against monitor rect (including taskbar area). A normal maximized
+        // window's rect stops at the work area, so this correctly excludes them —
+        // only true fullscreen (F11, exclusive, borderless) covers the whole monitor.
+        return r.Left <= mi.rcMonitor.Left &&
+               r.Top <= mi.rcMonitor.Top &&
+               r.Right >= mi.rcMonitor.Right &&
+               r.Bottom >= mi.rcMonitor.Bottom;
     }
 
     private bool DesktopsChanged(List<DesktopInfo> newDesktops)
@@ -497,6 +546,8 @@ internal sealed class TaskbarOverlay : Form
         }
 
         if (e.Button != MouseButtons.Left) return;
+        // Second click of a double-click: ignore here, MouseDoubleClick handles it.
+        if (e.Clicks >= 2) return;
 
         for (int i = 0; i < _buttons.Count; i++)
         {
@@ -505,13 +556,22 @@ internal sealed class TaskbarOverlay : Form
                 var desktop = _buttons[i].Desktop;
                 if (!desktop.IsCurrent)
                 {
-                    // Run switch on background thread to avoid blocking UI
-                    Task.Run(() =>
+                    // Defer the switch by the system double-click time so that a
+                    // pending double-click can cancel it. Otherwise the first click
+                    // would switch desktops before MouseDoubleClick fires, opening
+                    // rename on whatever desktop ended up under the cursor.
+                    _pendingSingleClickAction = () =>
                     {
-                        _desktopService.SwitchToDesktop(desktop);
-                        Thread.Sleep(300);
-                        BeginInvoke(RefreshDesktops);
-                    });
+                        Task.Run(() =>
+                        {
+                            _desktopService.SwitchToDesktop(desktop);
+                            Thread.Sleep(300);
+                            if (!IsDisposed) BeginInvoke(RefreshDesktops);
+                        });
+                    };
+                    _singleClickTimer.Interval = Math.Max(150, SystemInformation.DoubleClickTime);
+                    _singleClickTimer.Stop();
+                    _singleClickTimer.Start();
                 }
                 break;
             }

@@ -61,11 +61,9 @@ internal sealed class RenameEditPopup : Form
             _textBox.Focus();
         };
 
-        Deactivate += (_, _) =>
-        {
-            // Click-outside cancels. Use BeginInvoke so we don't dispose during the activation flip.
-            BeginInvoke(() => { DialogResult = DialogResult.Cancel; Close(); });
-        };
+        // No Deactivate-cancel: it races with ShowDialog's own activation flip on
+        // open and with WinEventHook-driven refreshes, causing the popup to close
+        // silently before the user has typed anything. Escape is enough to cancel.
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
