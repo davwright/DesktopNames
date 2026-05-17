@@ -14,9 +14,16 @@ internal sealed class Settings
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
     // VSCode workspace → desktop GUID. Always tracked passively. The auto-move side
-    // uses an undocumented COM API that can fault on certain Windows builds — opt-in only.
+    // routes through Ciantic's VirtualDesktopAccessor.dll (bundled / discovered at startup)
+    // because hand-rolled C# COM AVs on Chromium views.
     public bool VsCodeAutoMove { get; set; } = false;
     public Dictionary<string, Guid> VsCodeWorkspaceDesktops { get; set; } = new();
+
+    /// <summary>
+    /// Override path to VirtualDesktopAccessor.dll. Empty/null = auto-discover.
+    /// Set this if the DLL lives somewhere VdaDll.ResolveDllPath() doesn't search.
+    /// </summary>
+    public string? VdaDllPath { get; set; }
 
     // Hotkey bindings. Strings parsed by HotkeyParser. Set a value to "" to disable a hotkey.
     public Dictionary<string, string> Hotkeys { get; set; } = BuildDefaultHotkeys();

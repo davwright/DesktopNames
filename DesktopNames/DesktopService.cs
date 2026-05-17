@@ -3,46 +3,45 @@ using System.Runtime.InteropServices;
 namespace DesktopNames;
 
 /// <summary>
-/// Virtual desktop management using COM interfaces directly.
-/// SwitchDesktop is instant (no animation) - same method as VirtualDesktopAccessor.dll uses.
-/// Falls back to registry + keyboard if COM fails.
+/// Virtual desktop management. Three layers:
+///   1. <see cref="VdaDll"/> — flat-C P/Invoke to Ciantic's VirtualDesktopAccessor.dll.
+///      Used for everything risky (cross-process moves on Chromium views especially).
+///      Kept current upstream so vtable drift across Windows builds is upstream's problem.
+///   2. <see cref="VirtualDesktopInterop"/> — hand-rolled C# COM. Used only for the
+///      handful of operations VDA doesn't cover well: SetDesktopName (Unicode names —
+///      VDA's API is ANSI) and MoveDesktop (reorder — VDA has no equivalent).
+///   3. Registry — fallback for desktop names and current-id when the COM path fails.
 /// </summary>
 internal sealed class DesktopService : IDisposable
 {
-    private IVirtualDesktopManagerInternal? _manager;
-    private IVirtualDesktopManager? _managerPublic;
-    private IApplicationViewCollection? _appViewCollection;
+    private IVirtualDesktopManagerInternal? _manager;   // only used for SetDesktopName + MoveDesktop (reorder)
 
     public event Action? DesktopsChanged;
 
     public bool Initialize()
     {
+        // The interop COM object is still needed for the two operations VDA doesn't cover.
+        // VDA itself is initialized by Program.Main before this method runs.
         try { _manager = VirtualDesktopInterop.GetManagerInternal(); } catch { }
-        try { _managerPublic = VirtualDesktopInterop.GetManagerPublic(); } catch { }
-        try { _appViewCollection = VirtualDesktopInterop.GetAppViewCollection(); } catch { }
-        return true;
+        return VdaDll.IsLoaded;
     }
 
     public void CreateDesktop()
     {
-        if (_manager == null) return;
-        try { _manager.CreateDesktop(); DesktopsChanged?.Invoke(); } catch { }
+        if (!VdaDll.IsLoaded) return;
+        try { VdaDll.CreateDesktop(); DesktopsChanged?.Invoke(); } catch { }
     }
 
     public void RemoveCurrentDesktop()
     {
-        if (_manager == null) return;
+        if (!VdaDll.IsLoaded) return;
         try
         {
-            int count = _manager.GetCount();
+            int count = VdaDll.GetDesktopCount();
             if (count <= 1) return;
-            var current = _manager.GetCurrentDesktop();
-            var iidDesktop = typeof(IVirtualDesktop).GUID;
-            IObjectArray desktops = _manager.GetDesktops();
-            int currentIdx = GetCurrentDesktopIndex();
+            int currentIdx = VdaDll.GetCurrentDesktopNumber();
             int fallbackIdx = currentIdx > 0 ? currentIdx - 1 : 1;
-            var fallback = (IVirtualDesktop)desktops.GetAt((uint)fallbackIdx, ref iidDesktop);
-            _manager.RemoveDesktop(current, fallback);
+            VdaDll.RemoveDesktop(currentIdx, fallbackIdx);
             DesktopsChanged?.Invoke();
         }
         catch { }
@@ -50,6 +49,9 @@ internal sealed class DesktopService : IDisposable
 
     public void RenameDesktop(Guid desktopId, string newName)
     {
+        // VDA's SetDesktopName takes ANSI — would mangle "Mobilität" etc. So we keep this
+        // one operation on the hand-rolled COM. The slot for SetDesktopName hasn't been
+        // observed to AV; only MoveViewToDesktop has.
         if (_manager == null) return;
         try
         {
@@ -62,44 +64,42 @@ internal sealed class DesktopService : IDisposable
     }
 
     /// <summary>
-    /// Move an arbitrary window to a given virtual desktop. Returns true on success.
-    /// Uses IApplicationViewCollection + IVirtualDesktopManagerInternal::MoveViewToDesktop —
-    /// the only path that works for windows we don't own.
+    /// Move an arbitrary window to a given virtual desktop via VDA.
+    /// Routed through VirtualDesktopAccessor.dll because the equivalent hand-rolled COM
+    /// call (MoveViewToDesktop) AVs deterministically on Chromium views on Win11 26200+.
     /// </summary>
     public bool MoveWindowToDesktop(IntPtr hwnd, Guid desktopId)
     {
-        if (_manager == null || _appViewCollection == null || desktopId == Guid.Empty || hwnd == IntPtr.Zero)
+        if (!VdaDll.IsLoaded || desktopId == Guid.Empty || hwnd == IntPtr.Zero)
             return false;
         try
         {
-            int hr = _appViewCollection.GetViewForHwnd(hwnd, out var view);
-            if (hr != 0 || view == null) return false;
-            var target = _manager.FindDesktop(ref desktopId);
-            if (target == null) return false;
-            _manager.MoveViewToDesktop(view, target);
-            return true;
+            int targetIdx = IndexFromGuid(desktopId);
+            if (targetIdx < 0) return false;
+            return VdaDll.MoveWindowToDesktopNumber(hwnd, targetIdx) != 0;
         }
         catch { return false; }
     }
 
     public Guid GetDesktopForWindow(IntPtr hwnd)
     {
-        if (_managerPublic == null || hwnd == IntPtr.Zero) return Guid.Empty;
-        try
-        {
-            int hr = _managerPublic.GetWindowDesktopId(hwnd, out var id);
-            return hr == 0 ? id : Guid.Empty;
-        }
+        if (!VdaDll.IsLoaded || hwnd == IntPtr.Zero) return Guid.Empty;
+        try { return VdaDll.GetWindowDesktopId(hwnd); }
         catch { return Guid.Empty; }
     }
 
     public Guid GetCurrentDesktopId()
     {
-        if (_manager != null)
+        if (VdaDll.IsLoaded)
         {
-            try { return _manager.GetCurrentDesktop().GetID(); }
+            try
+            {
+                int idx = VdaDll.GetCurrentDesktopNumber();
+                if (idx >= 0) return VdaDll.GetDesktopIdByNumber(idx);
+            }
             catch { }
         }
+        // Registry fallback (also handles VDA not loaded case).
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
@@ -111,16 +111,30 @@ internal sealed class DesktopService : IDisposable
         return Guid.Empty;
     }
 
-    public int GetCurrentDesktopIndexPublic()
+    /// <summary>
+    /// Translate a desktop GUID to its zero-based index via VDA.
+    /// Returns -1 if not found.
+    /// </summary>
+    private static int IndexFromGuid(Guid id)
     {
-        return GetCurrentDesktopIndex();
+        if (!VdaDll.IsLoaded) return -1;
+        try
+        {
+            int count = VdaDll.GetDesktopCount();
+            for (int i = 0; i < count; i++)
+                if (VdaDll.GetDesktopIdByNumber(i) == id) return i;
+        }
+        catch { }
+        return -1;
     }
 
-    private IVirtualDesktop? GetCurrentDesktopCom()
+    public int GetCurrentDesktopIndexPublic()
     {
-        if (_manager == null) return null;
-        try { return _manager.GetCurrentDesktop(); }
-        catch { return null; }
+        if (VdaDll.IsLoaded)
+        {
+            try { return VdaDll.GetCurrentDesktopNumber(); } catch { }
+        }
+        return GetCurrentDesktopIndex();
     }
 
     public void MoveCurrentDesktopBy(int delta)
@@ -128,8 +142,8 @@ internal sealed class DesktopService : IDisposable
         if (_manager == null || delta == 0) return;
         try
         {
-            int count = _manager.GetCount();
-            int currentIdx = GetCurrentDesktopIndex();
+            int count = VdaDll.IsLoaded ? VdaDll.GetDesktopCount() : _manager.GetCount();
+            int currentIdx = GetCurrentDesktopIndexPublic();
             if (currentIdx < 0) return;
             int target = Math.Clamp(currentIdx + delta, 0, count - 1);
             if (target == currentIdx) return;
@@ -143,12 +157,18 @@ internal sealed class DesktopService : IDisposable
     public void MoveCurrentDesktopToLast()
     {
         if (_manager == null) return;
-        try { MoveCurrentDesktopToIndex(_manager.GetCount() - 1); }
+        try
+        {
+            int count = VdaDll.IsLoaded ? VdaDll.GetDesktopCount() : _manager.GetCount();
+            MoveCurrentDesktopToIndex(count - 1);
+        }
         catch { }
     }
 
     private void MoveCurrentDesktopToIndex(int targetIndex)
     {
+        // Reorder isn't exposed by VDA, so this stays on the hand-rolled COM path.
+        // The MoveDesktop slot hasn't been observed to AV; only MoveViewToDesktop has.
         if (_manager == null) return;
         try
         {
@@ -177,14 +197,10 @@ internal sealed class DesktopService : IDisposable
         catch { }
     }
 
-    private bool IsOnCurrentDesktop(IntPtr hwnd)
+    private static bool IsOnCurrentDesktop(IntPtr hwnd)
     {
-        if (_managerPublic == null) return true;
-        try
-        {
-            int hr = _managerPublic.IsWindowOnCurrentVirtualDesktop(hwnd, out bool on);
-            return hr == 0 && on;
-        }
+        if (!VdaDll.IsLoaded) return true;
+        try { return VdaDll.IsWindowOnCurrentVirtualDesktop(hwnd) != 0; }
         catch { return false; }
     }
 
@@ -234,61 +250,45 @@ internal sealed class DesktopService : IDisposable
 
     public List<DesktopInfo> GetDesktops()
     {
-        // Try COM first
-        if (_manager != null)
+        if (VdaDll.IsLoaded)
         {
-            try
-            {
-                return GetDesktopsViaCom();
-            }
+            try { return GetDesktopsViaVda(); }
             catch { }
         }
-
-        // Fall back to registry
         return GetDesktopsViaRegistry();
     }
 
-    private List<DesktopInfo> GetDesktopsViaCom()
+    private static List<DesktopInfo> GetDesktopsViaVda()
     {
         var result = new List<DesktopInfo>();
-        int count = _manager!.GetCount();
-        IObjectArray desktops = _manager.GetDesktops();
+        int count = VdaDll.GetDesktopCount();
+        int currentIdx = -1;
+        try { currentIdx = VdaDll.GetCurrentDesktopNumber(); } catch { }
 
-        Guid currentId = Guid.Empty;
-        try
-        {
-            var current = _manager.GetCurrentDesktop();
-            currentId = current.GetID();
-        }
-        catch { }
-
-        // Read names from registry - COM GetName() vtable position varies by build
+        // Names: VDA's GetDesktopName is ANSI and would mangle Unicode. Read from registry
+        // (same source the desktop control panel writes to) for correctness on names like
+        // "Mobilität". Falls back to "Desktop N" if registry doesn't have a name.
         var registryNames = ReadDesktopNamesFromRegistry();
 
-        var iidDesktop = typeof(IVirtualDesktop).GUID;
-        for (uint i = 0; i < count; i++)
+        for (int i = 0; i < count; i++)
         {
             try
             {
-                var desktop = (IVirtualDesktop)desktops.GetAt(i, ref iidDesktop);
-                var id = desktop.GetID();
-
-                // Look up name from registry by GUID
+                var id = VdaDll.GetDesktopIdByNumber(i);
                 string name = $"Desktop {i + 1}";
                 if (registryNames.TryGetValue(id, out var regName) && !string.IsNullOrEmpty(regName))
                     name = regName;
 
                 result.Add(new DesktopInfo
                 {
-                    Index = (int)i,
+                    Index = i,
                     Id = id,
                     Name = name,
-                    IsCurrent = id == currentId
+                    IsCurrent = i == currentIdx
                 });
             }
             catch { }
         }
-
         return result;
     }
 
@@ -380,15 +380,12 @@ internal sealed class DesktopService : IDisposable
 
     public void SwitchToDesktop(DesktopInfo desktop)
     {
-        // Try COM - instant switch, no animation
-        if (_manager != null)
+        // VDA path — instant, no animation. Same call AHK uses.
+        if (VdaDll.IsLoaded)
         {
             try
             {
-                var iidDesktop = typeof(IVirtualDesktop).GUID;
-                IObjectArray desktops = _manager.GetDesktops();
-                var target = (IVirtualDesktop)desktops.GetAt((uint)desktop.Index, ref iidDesktop);
-                _manager.SwitchDesktop(target); // Instant, no animation
+                VdaDll.GoToDesktopNumber(desktop.Index);
                 FocusTopmostWindowOnCurrentDesktop();
                 return;
             }

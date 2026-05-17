@@ -16,6 +16,23 @@ static class Program
 
         var settings = Settings.Load();
 
+        // Locate and load VirtualDesktopAccessor.dll before DesktopService starts —
+        // VdaDll P/Invokes are no-ops until this succeeds. If the DLL is missing, prompt
+        // the user to pick it (and persist the chosen path so we don't ask again).
+        if (!VdaDll.Initialize(settings.VdaDllPath))
+        {
+            string? picked = PromptForVdaDll(VdaDll.LoadError);
+            if (picked == null) return;     // user cancelled — abort startup
+            settings.VdaDllPath = picked;
+            settings.Save();
+            if (!VdaDll.Initialize(picked))
+            {
+                MessageBox.Show($"Could not load VirtualDesktopAccessor.dll from\n{picked}\n\n{VdaDll.LoadError}",
+                    "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+        }
+
         var desktopService = new DesktopService();
         if (!desktopService.Initialize())
         {
@@ -57,6 +74,30 @@ static class Program
         hostForm.Shown += (_, _) => ShowStartupBalloon(trayIcon, hostForm, settings);
 
         Application.Run(hostForm);
+    }
+
+    /// <summary>
+    /// Ask the user to locate VirtualDesktopAccessor.dll when auto-discovery fails.
+    /// Returns the chosen path, or null if the user cancels.
+    /// </summary>
+    private static string? PromptForVdaDll(string? loadError)
+    {
+        var prompt = "DesktopNames needs VirtualDesktopAccessor.dll to move windows between virtual desktops.\n\n" +
+                     "Auto-discovery looked next to DesktopNames.exe and in your AutoHotkey folder under Documents/Dokumente.\n\n" +
+                     (loadError ?? "") + "\n\n" +
+                     "Click OK to browse to the DLL, or Cancel to exit.\n" +
+                     "(Get it from https://github.com/Ciantic/VirtualDesktopAccessor/releases)";
+        var r = MessageBox.Show(prompt, "DesktopNames — DLL not found",
+            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+        if (r != DialogResult.OK) return null;
+
+        using var ofd = new OpenFileDialog
+        {
+            Title = "Select VirtualDesktopAccessor.dll",
+            Filter = "VirtualDesktopAccessor.dll|VirtualDesktopAccessor.dll|DLL files (*.dll)|*.dll",
+            CheckFileExists = true
+        };
+        return ofd.ShowDialog() == DialogResult.OK ? ofd.FileName : null;
     }
 
     private static void KillExistingInstances()
