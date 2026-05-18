@@ -63,6 +63,15 @@ static class Program
             (_, _) => { settings.Hidden = !settings.Hidden; settings.Save(); });
         trayIcon.ContextMenuStrip.Items.Add("Keyboard shortcuts...", null, (_, _) => ShowShortcuts());
         trayIcon.ContextMenuStrip.Items.Add("Open settings.json", null, (_, _) => OpenSettingsFile());
+
+        // VS Code workspaces submenu — populated lazily on DropDownOpening so it
+        // always reflects the current set of open VS Code windows.
+        var vscodeMenu = new ToolStripMenuItem("VS Code workspaces");
+        vscodeMenu.DropDownOpening += (_, _) => BuildVsCodeWorkspacesMenu(vscodeMenu, desktopService, settings);
+        // Seed with a placeholder so the arrow renders before first open.
+        vscodeMenu.DropDownItems.Add("(loading...)").Enabled = false;
+        trayIcon.ContextMenuStrip.Items.Add(vscodeMenu);
+
         trayIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         trayIcon.ContextMenuStrip.Items.Add("Exit", null, (_, _) => hostForm.Close());
 
@@ -79,6 +88,89 @@ static class Program
         hostForm.Shown += (_, _) => ShowStartupBalloon(trayIcon, hostForm, settings);
 
         Application.Run(hostForm);
+    }
+
+    /// <summary>
+    /// Repopulate the "VS Code workspaces" submenu from currently-open VS Code windows.
+    /// Each item is checked iff the workspace is pinned; clicking toggles the pin (pinning
+    /// to the window's current desktop). Footer item opens a full bindings overview.
+    /// </summary>
+    private static void BuildVsCodeWorkspacesMenu(ToolStripMenuItem root, DesktopService desktopService, Settings settings)
+    {
+        root.DropDownItems.Clear();
+        var workspaces = VsCodeTracker.EnumerateOpenWorkspaces();
+        if (workspaces.Count == 0)
+        {
+            root.DropDownItems.Add("(no VS Code windows open)").Enabled = false;
+        }
+        else
+        {
+            var desktops = desktopService.GetDesktops().ToDictionary(d => d.Id, d => d.Name);
+            foreach (var (workspace, hwnd) in workspaces.OrderBy(w => w.Workspace, StringComparer.OrdinalIgnoreCase))
+            {
+                bool pinned = settings.VsCodePinnedDesktops.TryGetValue(workspace, out var pinnedGuid);
+                string label;
+                if (pinned)
+                {
+                    desktops.TryGetValue(pinnedGuid, out var deskName);
+                    label = $"{workspace}  —  pinned to {deskName ?? "?"}";
+                }
+                else
+                {
+                    var current = desktopService.GetDesktopForWindow(hwnd);
+                    desktops.TryGetValue(current, out var deskName);
+                    label = $"{workspace}  (on {deskName ?? "?"})";
+                }
+
+                var item = new ToolStripMenuItem(label) { Checked = pinned, CheckOnClick = false };
+                item.Click += (_, _) => TogglePin(workspace, hwnd, desktopService, settings);
+                root.DropDownItems.Add(item);
+            }
+        }
+
+        root.DropDownItems.Add(new ToolStripSeparator());
+        root.DropDownItems.Add("Show all bindings...", null, (_, _) => ShowAllBindings(desktopService, settings));
+    }
+
+    private static void TogglePin(string workspace, IntPtr hwnd, DesktopService desktopService, Settings settings)
+    {
+        if (settings.VsCodePinnedDesktops.Remove(workspace))
+        {
+            // Was pinned → now unpinned. Done.
+        }
+        else
+        {
+            var current = desktopService.GetDesktopForWindow(hwnd);
+            if (current == Guid.Empty) return;     // can't pin a window whose desktop we can't read
+            settings.VsCodePinnedDesktops[workspace] = current;
+        }
+        settings.Save();
+    }
+
+    private static void ShowAllBindings(DesktopService desktopService, Settings settings)
+    {
+        var desktops = desktopService.GetDesktops().ToDictionary(d => d.Id, d => d.Name);
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("Pinned (authoritative)");
+        sb.AppendLine("──────────────────────────────────────────");
+        if (settings.VsCodePinnedDesktops.Count == 0) sb.AppendLine("  (none)");
+        else foreach (var kv in settings.VsCodePinnedDesktops.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            desktops.TryGetValue(kv.Value, out var deskName);
+            sb.AppendLine($"  {kv.Key,-40}  →  {deskName ?? "(unknown desktop)"}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("Observed (passive, may be overwritten by tracker)");
+        sb.AppendLine("──────────────────────────────────────────");
+        if (settings.VsCodeWorkspaceDesktops.Count == 0) sb.AppendLine("  (none)");
+        else foreach (var kv in settings.VsCodeWorkspaceDesktops.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            desktops.TryGetValue(kv.Value, out var deskName);
+            sb.AppendLine($"  {kv.Key,-40}  →  {deskName ?? "(unknown desktop)"}");
+        }
+
+        MessageBox.Show(sb.ToString(), $"DesktopNames v{GetAppVersion()} — VS Code bindings",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     // Set by RunBuildVerification when the self-test fails; surfaced by ShowStartupBalloon
