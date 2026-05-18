@@ -63,33 +63,27 @@ internal sealed class VsCodeTracker : IDisposable
             Guid currentDesktop = _desktop.GetDesktopForWindow(hwnd);
             if (currentDesktop == Guid.Empty) return true;
 
+            var currentMonitor = MonitorRef.FromHwnd(hwnd);
+
             bool firstSight = !_established.Contains(hwnd);
-            if (firstSight)
+
+            // First sight with a saved entry: restore to (desktop, monitor) if AutoMove on.
+            // Both moves are best-effort; either no-ops if target isn't present in this setup
+            // (deleted desktop, monitor missing at home).
+            if (firstSight &&
+                _settings.VsCodeAutoMove &&
+                _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
             {
-                if (_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
-                {
-                    // Auto-move is opt-in: the underlying MoveViewToDesktop COM call is
-                    // unstable across Windows builds and has been observed to AV.
-                    if (_settings.VsCodeAutoMove && saved != currentDesktop)
-                    {
-                        _desktop.MoveWindowToDesktop(hwnd, saved);
-                    }
-                }
-                else
-                {
-                    _settings.VsCodeWorkspaceDesktops[workspace] = currentDesktop;
-                    dirty = true;
-                }
+                if (saved.DesktopId != Guid.Empty && saved.DesktopId != currentDesktop)
+                    _desktop.MoveWindowToDesktop(hwnd, saved.DesktopId);
+                if (saved.MonitorDeviceId != null || saved.MonitorWidth > 0)
+                    _desktop.MoveWindowToMonitor(hwnd, saved);
             }
-            else
-            {
-                // Established window: update map if user manually moved it.
-                if (!_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved) || saved != currentDesktop)
-                {
-                    _settings.VsCodeWorkspaceDesktops[workspace] = currentDesktop;
-                    dirty = true;
-                }
-            }
+
+            // CRUD the observation to the now-current location. Manual moves (Win+Ctrl+N
+            // via the user's AHK) flow through this path and become the new binding.
+            if (UpdateEntry(workspace, currentDesktop, currentMonitor)) dirty = true;
+
             return true;
         }, IntPtr.Zero);
 
@@ -97,6 +91,35 @@ internal sealed class VsCodeTracker : IDisposable
         foreach (var h in seenThisScan) _established.Add(h);
 
         if (dirty) _settings.Save();
+    }
+
+    /// <summary>
+    /// Update (or insert) the workspace's entry to match the given desktop + monitor.
+    /// Returns true if the map changed (so the caller knows to save).
+    /// </summary>
+    private bool UpdateEntry(string workspace, Guid desktop, MonitorRef? monitor)
+    {
+        bool existed = _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved);
+        bool changed = !existed
+            || saved!.DesktopId != desktop
+            || saved.MonitorDeviceId != monitor?.DeviceId
+            || saved.MonitorX != (monitor?.RectX ?? 0)
+            || saved.MonitorY != (monitor?.RectY ?? 0)
+            || saved.MonitorWidth != (monitor?.RectWidth ?? 0)
+            || saved.MonitorHeight != (monitor?.RectHeight ?? 0);
+
+        if (!changed) return false;
+
+        _settings.VsCodeWorkspaceDesktops[workspace] = new WorkspaceLocation
+        {
+            DesktopId = desktop,
+            MonitorDeviceId = monitor?.DeviceId,
+            MonitorX = monitor?.RectX ?? 0,
+            MonitorY = monitor?.RectY ?? 0,
+            MonitorWidth = monitor?.RectWidth ?? 0,
+            MonitorHeight = monitor?.RectHeight ?? 0
+        };
+        return true;
     }
 
     private static string GetWindowTitle(IntPtr hwnd)

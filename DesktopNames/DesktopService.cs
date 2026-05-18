@@ -81,6 +81,58 @@ internal sealed class DesktopService : IDisposable
         catch { return false; }
     }
 
+    /// <summary>
+    /// Move a window to a different physical monitor. Looks the target monitor up by
+    /// hardware-stable device ID first, then by rect position as a fallback. If neither
+    /// matches in the current setup (different physical monitors at home vs. work),
+    /// returns false and leaves the window alone.
+    ///
+    /// The window keeps its size; only its position changes (translated by the delta
+    /// between the source and target monitor work areas).
+    /// </summary>
+    public bool MoveWindowToMonitor(IntPtr hwnd, WorkspaceLocation target)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        var ref_ = new MonitorRef
+        {
+            DeviceId = target.MonitorDeviceId,
+            RectX = target.MonitorX,
+            RectY = target.MonitorY,
+            RectWidth = target.MonitorWidth,
+            RectHeight = target.MonitorHeight
+        };
+        IntPtr targetMon = ref_.ResolveCurrentHandle();
+        if (targetMon == IntPtr.Zero) return false;
+
+        // Where is the window now? Compute its offset within its current monitor so we
+        // can keep the same relative position on the target.
+        IntPtr currentMon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (currentMon == targetMon) return true;       // already there
+
+        if (!NativeMethods.GetWindowRect(hwnd, out var wndRect)) return false;
+        var srcMi = new NativeMethods.MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+        var dstMi = new NativeMethods.MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+        if (!NativeMethods.GetMonitorInfo(currentMon, ref srcMi)) return false;
+        if (!NativeMethods.GetMonitorInfo(targetMon, ref dstMi)) return false;
+
+        int dx = dstMi.rcWork.Left - srcMi.rcWork.Left;
+        int dy = dstMi.rcWork.Top - srcMi.rcWork.Top;
+        int newX = wndRect.Left + dx;
+        int newY = wndRect.Top + dy;
+        int w = wndRect.Right - wndRect.Left;
+        int h = wndRect.Bottom - wndRect.Top;
+
+        // If the window would land off-screen on the target (e.g. target is smaller),
+        // clamp to the work area.
+        if (newX + w > dstMi.rcWork.Right) newX = dstMi.rcWork.Right - w;
+        if (newY + h > dstMi.rcWork.Bottom) newY = dstMi.rcWork.Bottom - h;
+        if (newX < dstMi.rcWork.Left) newX = dstMi.rcWork.Left;
+        if (newY < dstMi.rcWork.Top) newY = dstMi.rcWork.Top;
+
+        return NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, newX, newY, w, h,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_ASYNCWINDOWPOS);
+    }
+
     public Guid GetDesktopForWindow(IntPtr hwnd)
     {
         if (!VdaDll.IsLoaded || hwnd == IntPtr.Zero) return Guid.Empty;

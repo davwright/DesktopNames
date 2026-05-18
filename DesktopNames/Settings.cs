@@ -13,11 +13,12 @@ internal sealed class Settings
     public bool OnlyOnMainDesktop { get; set; }
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
-    // VSCode workspace → desktop GUID. Always tracked passively. The auto-move side
-    // routes through Ciantic's VirtualDesktopAccessor.dll (bundled / discovered at startup)
-    // because hand-rolled C# COM AVs on Chromium views.
+    // VSCode workspace → last observed location (desktop + monitor). Always tracked
+    // passively: every scan CRUDs the entry to match where the window currently lives,
+    // so manual moves via the user's AHK script (Win+Ctrl+N) become the new binding.
+    // Auto-move on first sight restores from this map.
     public bool VsCodeAutoMove { get; set; } = false;
-    public Dictionary<string, Guid> VsCodeWorkspaceDesktops { get; set; } = new();
+    public Dictionary<string, WorkspaceLocation> VsCodeWorkspaceDesktops { get; set; } = new();
 
     /// <summary>
     /// Override path to VirtualDesktopAccessor.dll. Empty/null = auto-discover.
@@ -68,6 +69,13 @@ internal sealed class Settings
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "DesktopNames", "settings.json");
 
+    private static JsonSerializerOptions JsonOptions()
+    {
+        var o = new JsonSerializerOptions { WriteIndented = true };
+        o.Converters.Add(new WorkspaceLocationJsonConverter());
+        return o;
+    }
+
     public static Settings Load()
     {
         Settings s;
@@ -76,7 +84,7 @@ internal sealed class Settings
             if (File.Exists(FilePath))
             {
                 var json = File.ReadAllText(FilePath);
-                s = JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
+                s = JsonSerializer.Deserialize<Settings>(json, JsonOptions()) ?? new Settings();
             }
             else s = new Settings();
         }
@@ -97,7 +105,7 @@ internal sealed class Settings
         {
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
-            var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(this, JsonOptions());
             File.WriteAllText(FilePath, json);
         }
         catch { }
