@@ -40,6 +40,59 @@ internal sealed class MonitorRef
     }
 
     /// <summary>
+    /// Capture window placement relative to its current monitor's work area.
+    /// Writes offset/size/maximized fields onto the supplied location.
+    /// </summary>
+    public static void CaptureWindowPlacement(IntPtr hwnd, WorkspaceLocation loc)
+    {
+        IntPtr hMon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (hMon == IntPtr.Zero) return;
+        var mi = new NativeMethods.MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+        if (!NativeMethods.GetMonitorInfo(hMon, ref mi)) return;
+
+        var wp = new NativeMethods.WINDOWPLACEMENT { length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>() };
+        if (!NativeMethods.GetWindowPlacement(hwnd, ref wp)) return;
+
+        // rcNormalPosition is in workspace coordinates (relative to the work area of
+        // the primary monitor — slightly weird but stable). Subtract the primary
+        // work-area origin if needed; in practice on a multi-monitor setup the values
+        // are screen-space, so subtracting the source monitor's work area gives offset.
+        loc.WindowMaximized = wp.showCmd == NativeMethods.SW_MAXIMIZE;
+        loc.WindowOffsetX = wp.rcNormalPosition.Left - mi.rcWork.Left;
+        loc.WindowOffsetY = wp.rcNormalPosition.Top  - mi.rcWork.Top;
+        loc.WindowWidth   = wp.rcNormalPosition.Right - wp.rcNormalPosition.Left;
+        loc.WindowHeight  = wp.rcNormalPosition.Bottom - wp.rcNormalPosition.Top;
+    }
+
+    /// <summary>
+    /// Apply a previously-captured window placement to the given window on its current
+    /// monitor (caller has already moved it to the right monitor). Returns false if the
+    /// location carries no placement data.
+    /// </summary>
+    public static bool ApplyWindowPlacement(IntPtr hwnd, WorkspaceLocation loc)
+    {
+        if (loc.WindowWidth <= 0 && loc.WindowHeight <= 0 && !loc.WindowMaximized) return false;
+
+        IntPtr hMon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (hMon == IntPtr.Zero) return false;
+        var mi = new NativeMethods.MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+        if (!NativeMethods.GetMonitorInfo(hMon, ref mi)) return false;
+
+        var wp = new NativeMethods.WINDOWPLACEMENT { length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>() };
+        if (!NativeMethods.GetWindowPlacement(hwnd, ref wp)) return false;
+
+        int left = mi.rcWork.Left + loc.WindowOffsetX;
+        int top  = mi.rcWork.Top  + loc.WindowOffsetY;
+        wp.rcNormalPosition.Left   = left;
+        wp.rcNormalPosition.Top    = top;
+        wp.rcNormalPosition.Right  = left + loc.WindowWidth;
+        wp.rcNormalPosition.Bottom = top  + loc.WindowHeight;
+        wp.showCmd = loc.WindowMaximized ? NativeMethods.SW_MAXIMIZE : NativeMethods.SW_SHOWNORMAL;
+
+        return NativeMethods.SetWindowPlacement(hwnd, ref wp);
+    }
+
+    /// <summary>
     /// Find an HMONITOR matching this reference on the current setup. Preference order:
     ///   1. By DeviceId (hardware-stable)
     ///   2. By rect position+size (fallback when DeviceId not present in this setup)

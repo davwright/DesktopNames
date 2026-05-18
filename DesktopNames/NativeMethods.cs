@@ -231,6 +231,30 @@ internal static class NativeMethods
     public const uint SWP_ASYNCWINDOWPOS = 0x4000;
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public uint length;
+        public uint flags;
+        public uint showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPlacement(IntPtr hWnd, [In] ref WINDOWPLACEMENT lpwndpl);
+
+    public const uint SW_SHOWNORMAL   = 1;
+    public const uint SW_SHOWMINIMIZED = 2;
+    public const uint SW_MAXIMIZE     = 3;
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct INPUT
     {
         public uint type;

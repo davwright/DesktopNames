@@ -24,6 +24,20 @@ internal sealed class WorkspaceLocation
     public int MonitorY { get; set; }
     public int MonitorWidth { get; set; }
     public int MonitorHeight { get; set; }
+
+    /// <summary>
+    /// Window position relative to the source monitor's *work area* top-left.
+    /// On restore: target_monitor.work.Left + WindowOffsetX, target_monitor.work.Top + WindowOffsetY.
+    /// Using relative-to-work-area (not raw screen coords) keeps the data portable
+    /// across machines with different monitor positions in the virtual screen.
+    /// </summary>
+    public int WindowOffsetX { get; set; }
+    public int WindowOffsetY { get; set; }
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
+
+    /// <summary>True if the window was maximized at observation time.</summary>
+    public bool WindowMaximized { get; set; }
 }
 
 /// <summary>
@@ -57,6 +71,11 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
                 case "MonitorY":        result.MonitorY        = reader.GetInt32(); break;
                 case "MonitorWidth":    result.MonitorWidth    = reader.GetInt32(); break;
                 case "MonitorHeight":   result.MonitorHeight   = reader.GetInt32(); break;
+                case "WindowOffsetX":   result.WindowOffsetX   = reader.GetInt32(); break;
+                case "WindowOffsetY":   result.WindowOffsetY   = reader.GetInt32(); break;
+                case "WindowWidth":     result.WindowWidth     = reader.GetInt32(); break;
+                case "WindowHeight":    result.WindowHeight    = reader.GetInt32(); break;
+                case "WindowMaximized": result.WindowMaximized = reader.GetBoolean(); break;
                 default:                reader.Skip();         break;
             }
         }
@@ -74,6 +93,14 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
             writer.WriteNumber("MonitorY", value.MonitorY);
             writer.WriteNumber("MonitorWidth", value.MonitorWidth);
             writer.WriteNumber("MonitorHeight", value.MonitorHeight);
+        }
+        if (value.WindowWidth > 0 || value.WindowHeight > 0 || value.WindowMaximized)
+        {
+            writer.WriteNumber("WindowOffsetX", value.WindowOffsetX);
+            writer.WriteNumber("WindowOffsetY", value.WindowOffsetY);
+            writer.WriteNumber("WindowWidth",   value.WindowWidth);
+            writer.WriteNumber("WindowHeight",  value.WindowHeight);
+            if (value.WindowMaximized) writer.WriteBoolean("WindowMaximized", true);
         }
         writer.WriteEndObject();
     }

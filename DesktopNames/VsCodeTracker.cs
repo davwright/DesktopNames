@@ -67,9 +67,8 @@ internal sealed class VsCodeTracker : IDisposable
 
             bool firstSight = !_established.Contains(hwnd);
 
-            // First sight with a saved entry: restore to (desktop, monitor) if AutoMove on.
-            // Both moves are best-effort; either no-ops if target isn't present in this setup
-            // (deleted desktop, monitor missing at home).
+            // First sight with a saved entry: restore (desktop, monitor, window placement)
+            // if AutoMove on. Each step is best-effort; failures don't gate the next.
             if (firstSight &&
                 _settings.VsCodeAutoMove &&
                 _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
@@ -78,11 +77,23 @@ internal sealed class VsCodeTracker : IDisposable
                     _desktop.MoveWindowToDesktop(hwnd, saved.DesktopId);
                 if (saved.MonitorDeviceId != null || saved.MonitorWidth > 0)
                     _desktop.MoveWindowToMonitor(hwnd, saved);
+                if (saved.WindowWidth > 0 || saved.WindowHeight > 0 || saved.WindowMaximized)
+                    MonitorRef.ApplyWindowPlacement(hwnd, saved);
             }
 
-            // CRUD the observation to the now-current location. Manual moves (Win+Ctrl+N
-            // via the user's AHK) flow through this path and become the new binding.
-            if (UpdateEntry(workspace, currentDesktop, currentMonitor)) dirty = true;
+            // CRUD the observation to the now-current (desktop, monitor, placement).
+            // Manual moves via the user's AHK Win+Ctrl+N flow through this path.
+            var observed = new WorkspaceLocation
+            {
+                DesktopId = currentDesktop,
+                MonitorDeviceId = currentMonitor?.DeviceId,
+                MonitorX = currentMonitor?.RectX ?? 0,
+                MonitorY = currentMonitor?.RectY ?? 0,
+                MonitorWidth = currentMonitor?.RectWidth ?? 0,
+                MonitorHeight = currentMonitor?.RectHeight ?? 0
+            };
+            MonitorRef.CaptureWindowPlacement(hwnd, observed);
+            if (UpdateEntry(workspace, observed)) dirty = true;
 
             return true;
         }, IntPtr.Zero);
@@ -94,33 +105,29 @@ internal sealed class VsCodeTracker : IDisposable
     }
 
     /// <summary>
-    /// Update (or insert) the workspace's entry to match the given desktop + monitor.
-    /// Returns true if the map changed (so the caller knows to save).
+    /// Replace the workspace's entry if the observed location differs from the saved one.
+    /// Returns true if the map changed.
     /// </summary>
-    private bool UpdateEntry(string workspace, Guid desktop, MonitorRef? monitor)
+    private bool UpdateEntry(string workspace, WorkspaceLocation observed)
     {
-        bool existed = _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved);
-        bool changed = !existed
-            || saved!.DesktopId != desktop
-            || saved.MonitorDeviceId != monitor?.DeviceId
-            || saved.MonitorX != (monitor?.RectX ?? 0)
-            || saved.MonitorY != (monitor?.RectY ?? 0)
-            || saved.MonitorWidth != (monitor?.RectWidth ?? 0)
-            || saved.MonitorHeight != (monitor?.RectHeight ?? 0);
-
-        if (!changed) return false;
-
-        _settings.VsCodeWorkspaceDesktops[workspace] = new WorkspaceLocation
-        {
-            DesktopId = desktop,
-            MonitorDeviceId = monitor?.DeviceId,
-            MonitorX = monitor?.RectX ?? 0,
-            MonitorY = monitor?.RectY ?? 0,
-            MonitorWidth = monitor?.RectWidth ?? 0,
-            MonitorHeight = monitor?.RectHeight ?? 0
-        };
+        if (_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved) && SameLocation(saved, observed))
+            return false;
+        _settings.VsCodeWorkspaceDesktops[workspace] = observed;
         return true;
     }
+
+    private static bool SameLocation(WorkspaceLocation a, WorkspaceLocation b) =>
+        a.DesktopId == b.DesktopId
+        && a.MonitorDeviceId == b.MonitorDeviceId
+        && a.MonitorX == b.MonitorX
+        && a.MonitorY == b.MonitorY
+        && a.MonitorWidth == b.MonitorWidth
+        && a.MonitorHeight == b.MonitorHeight
+        && a.WindowOffsetX == b.WindowOffsetX
+        && a.WindowOffsetY == b.WindowOffsetY
+        && a.WindowWidth == b.WindowWidth
+        && a.WindowHeight == b.WindowHeight
+        && a.WindowMaximized == b.WindowMaximized;
 
     private static string GetWindowTitle(IntPtr hwnd)
     {
