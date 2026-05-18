@@ -409,6 +409,16 @@ internal sealed class HostForm : Form
         TryRegister("MoveDesktopFirst", "Make desktop first", () => { _desktopService.MoveCurrentDesktopToFirst(); RefreshAllOverlays(); });
         TryRegister("MoveDesktopLast",  "Make desktop last",  () => { _desktopService.MoveCurrentDesktopToLast();  RefreshAllOverlays(); });
         TryRegister("ToggleHide",       "Toggle overlay hide", () => { _settings.Hidden = !_settings.Hidden; _settings.Save(); });
+        TryRegister("RenameCurrentDesktop", "Rename current desktop", () =>
+        {
+            // Try each overlay; the first one with a button for the current desktop opens
+            // the inline rename popup. On multi-monitor setups, that's typically the overlay
+            // on whichever monitor the active window is on.
+            foreach (var o in _overlays.ToArray())
+            {
+                if (!o.IsDisposed && o.TryBeginRenameCurrentDesktop()) return;
+            }
+        });
 
         // Switch-to-desktop hotkeys. Loop variable must be captured into a local
         // so each handler closure binds its own index.

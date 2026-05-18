@@ -100,6 +100,23 @@ internal sealed class TaskbarOverlay : Form
         }
     }
 
+    /// <summary>
+    /// Hotkey entry point: open inline rename for the desktop that's currently active
+    /// (matches IsCurrent=true). Returns true if this overlay handled it.
+    /// </summary>
+    public bool TryBeginRenameCurrentDesktop()
+    {
+        foreach (var btn in _buttons)
+        {
+            if (btn.Desktop.IsCurrent)
+            {
+                BeginInlineRename(btn);
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void BeginInlineRename(DesktopButton btn)
     {
         var desktop = btn.Desktop;

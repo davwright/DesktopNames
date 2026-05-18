@@ -52,6 +52,7 @@ internal sealed class Settings
             ["MoveDesktopFirst"] = "Win+Alt+Home",
             ["MoveDesktopLast"]  = "Win+Alt+End",
             ["ToggleHide"]       = "Win+Alt+H",
+            ["RenameCurrentDesktop"] = "Win+Insert",
         };
         // Win+Ctrl+1..9,0 → desktops 1..10. Add Shift → desktops 11..20.
         for (int i = 1; i <= 20; i++)
