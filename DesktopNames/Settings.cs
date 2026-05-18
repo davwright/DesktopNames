@@ -32,6 +32,20 @@ internal sealed class Settings
     /// </summary>
     public string? VdaDllPath { get; set; }
 
+    /// <summary>
+    /// Windows build (CurrentBuild.UBR, e.g. "26200.8457") that the VDA self-test
+    /// last passed on. If the current build differs at startup, VdaDll.SelfTest()
+    /// runs again before destructive operations are trusted.
+    /// </summary>
+    public string? VerifiedBuild { get; set; }
+
+    /// <summary>
+    /// True if the VDA self-test passed on <see cref="VerifiedBuild"/>. Falsified
+    /// when a self-test fails so the next startup retries even if the build hasn't
+    /// changed (transient failures get a second chance).
+    /// </summary>
+    public bool LastTestedBuildOk { get; set; }
+
     // Hotkey bindings. Strings parsed by HotkeyParser. Set a value to "" to disable a hotkey.
     public Dictionary<string, string> Hotkeys { get; set; } = BuildDefaultHotkeys();
 

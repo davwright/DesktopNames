@@ -33,6 +33,11 @@ static class Program
             }
         }
 
+        // Gate destructive operations on a build-versioned read-only self-test. If the
+        // Windows build hasn't changed since last successful test, trust. Otherwise re-run.
+        // If the test fails, disable AutoMove until the user (or a newer DLL) resolves it.
+        _buildVerificationHint = RunBuildVerification(settings);
+
         var desktopService = new DesktopService();
         if (!desktopService.Initialize())
         {
@@ -74,6 +79,60 @@ static class Program
         hostForm.Shown += (_, _) => ShowStartupBalloon(trayIcon, hostForm, settings);
 
         Application.Run(hostForm);
+    }
+
+    // Set by RunBuildVerification when the self-test fails; surfaced by ShowStartupBalloon
+    // so the user sees one balloon, not two.
+    private static string? _buildVerificationHint;
+
+    /// <summary>
+    /// Compare current Windows build against settings.VerifiedBuild and run VdaDll.SelfTest
+    /// if it changed (or if the last test failed). On pass, record the new build. On fail,
+    /// flip VsCodeAutoMove off so destructive calls don't fire against a wrong-layout DLL.
+    /// Returns a one-line hint to show in the startup balloon, or null on clean pass.
+    /// </summary>
+    private static string? RunBuildVerification(Settings settings)
+    {
+        var currentBuild = ReadCurrentWindowsBuild();
+        bool buildMatches = !string.IsNullOrEmpty(settings.VerifiedBuild) &&
+                            string.Equals(settings.VerifiedBuild, currentBuild, StringComparison.Ordinal);
+
+        if (buildMatches && settings.LastTestedBuildOk) return null;   // already trusted
+
+        var result = VdaDll.SelfTest();
+        if (result.Passed)
+        {
+            settings.VerifiedBuild = currentBuild;
+            settings.LastTestedBuildOk = true;
+            settings.Save();
+            return buildMatches ? null : $"Windows build {currentBuild}: VDA self-test passed";
+        }
+
+        settings.LastTestedBuildOk = false;
+        if (settings.VsCodeAutoMove)
+        {
+            settings.VsCodeAutoMove = false;   // safer default until the DLL is updated
+            settings.Save();
+            return $"VDA self-test failed on Windows {currentBuild}: {result.FailureReason}. " +
+                   "Auto-move disabled. Update VirtualDesktopAccessor.dll " +
+                   "(github.com/Ciantic/VirtualDesktopAccessor/releases).";
+        }
+        settings.Save();
+        return $"VDA self-test failed on Windows {currentBuild}: {result.FailureReason}.";
+    }
+
+    private static string ReadCurrentWindowsBuild()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+            if (key == null) return "?";
+            var build = key.GetValue("CurrentBuild") as string ?? "?";
+            var ubr = key.GetValue("UBR")?.ToString() ?? "?";
+            return $"{build}.{ubr}";
+        }
+        catch { return "?"; }
     }
 
     /// <summary>
@@ -118,18 +177,26 @@ static class Program
 
     private static void ShowStartupBalloon(NotifyIcon tray, HostForm host, Settings settings)
     {
-        string? hint = null;
-        if (settings.Hidden) hint = "Overlay is hidden (Win+Alt+H to show)";
-        else if (host.OverlayCount == 0) hint = "No taskbars found — overlay has nowhere to draw";
-        else if (settings.OnlyOnMainDesktop) hint = "Overlay shows only on main desktop (right-click tray to change)";
+        // Build-verification result takes precedence: a failed self-test is more
+        // urgent than overlay-visibility hints.
+        string? hint = _buildVerificationHint;
+        var icon = ToolTipIcon.Info;
+        if (hint != null && !settings.LastTestedBuildOk) icon = ToolTipIcon.Warning;
+
+        if (hint == null)
+        {
+            if (settings.Hidden) hint = "Overlay is hidden (Win+Alt+H to show)";
+            else if (host.OverlayCount == 0) hint = "No taskbars found — overlay has nowhere to draw";
+            else if (settings.OnlyOnMainDesktop) hint = "Overlay shows only on main desktop (right-click tray to change)";
+        }
 
         if (hint == null) return;
         try
         {
             tray.BalloonTipTitle = $"DesktopNames v{GetAppVersion()}";
             tray.BalloonTipText = hint;
-            tray.BalloonTipIcon = ToolTipIcon.Info;
-            tray.ShowBalloonTip(4000);
+            tray.BalloonTipIcon = icon;
+            tray.ShowBalloonTip(icon == ToolTipIcon.Warning ? 8000 : 4000);
         }
         catch { }
     }

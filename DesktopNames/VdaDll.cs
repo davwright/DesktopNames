@@ -117,4 +117,52 @@ internal static class VdaDll
     [DllImport(DLL_NAME)] public static extern void GoToDesktopNumber(int n);
     [DllImport(DLL_NAME)] public static extern int CreateDesktop();
     [DllImport(DLL_NAME)] public static extern void RemoveDesktop(int removeIdx, int fallbackIdx);
+
+    /// <summary>
+    /// Read-only battery of calls that exercises the same vtable slots destructive
+    /// operations would use. Caller uses the result to gate AutoMove on a fresh
+    /// Windows build before risking <see cref="MoveWindowToDesktopNumber"/>.
+    /// </summary>
+    public static SelfTestResult SelfTest()
+    {
+        var r = new SelfTestResult();
+        try
+        {
+            r.DesktopCount = GetDesktopCount();
+            if (r.DesktopCount < 1 || r.DesktopCount > 100)
+            { r.FailureReason = $"GetDesktopCount returned {r.DesktopCount}"; return r; }
+
+            r.CurrentDesktop = GetCurrentDesktopNumber();
+            if (r.CurrentDesktop < 0 || r.CurrentDesktop >= r.DesktopCount)
+            { r.FailureReason = $"GetCurrentDesktopNumber returned {r.CurrentDesktop} (count={r.DesktopCount})"; return r; }
+
+            // Each desktop must have a distinct non-empty GUID. A misaligned vtable
+            // typically surfaces here — wrong slot returns Guid.Empty or duplicates.
+            var seen = new HashSet<Guid>();
+            for (int i = 0; i < r.DesktopCount; i++)
+            {
+                var g = GetDesktopIdByNumber(i);
+                if (g == Guid.Empty)
+                { r.FailureReason = $"GetDesktopIdByNumber({i}) returned Guid.Empty"; return r; }
+                if (!seen.Add(g))
+                { r.FailureReason = $"Duplicate GUID at index {i}"; return r; }
+            }
+
+            r.Passed = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.FailureReason = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    public sealed class SelfTestResult
+    {
+        public bool Passed { get; set; }
+        public string? FailureReason { get; set; }
+        public int DesktopCount { get; set; }
+        public int CurrentDesktop { get; set; }
+    }
 }
