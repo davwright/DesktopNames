@@ -119,31 +119,6 @@ internal sealed class VsCodeTracker : IDisposable
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Enumerate currently-visible VS Code (-Insiders / Cursor) windows and return
-    /// their (workspace, HWND) pairs. Workspaces with the same title-derived name
-    /// are deduplicated to the first window seen. Used by the tray menu to build
-    /// the "VS Code workspaces" submenu without depending on the tracker's scan cycle.
-    /// </summary>
-    internal static List<(string Workspace, IntPtr Hwnd)> EnumerateOpenWorkspaces()
-    {
-        var seen = new HashSet<string>();
-        var result = new List<(string, IntPtr)>();
-        NativeMethods.EnumWindows((hwnd, _) =>
-        {
-            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
-            var clsBuf = new char[64];
-            int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
-            if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
-            string title = GetWindowTitle(hwnd);
-            string? ws = ExtractWorkspace(title);
-            if (ws == null) return true;
-            if (seen.Add(ws)) result.Add((ws, hwnd));
-            return true;
-        }, IntPtr.Zero);
-        return result;
-    }
-
     internal static string? ExtractWorkspace(string title)
     {
         if (string.IsNullOrEmpty(title)) return null;
