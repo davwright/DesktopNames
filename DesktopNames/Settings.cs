@@ -20,6 +20,13 @@ internal sealed class Settings
     public Dictionary<string, Guid> VsCodeWorkspaceDesktops { get; set; } = new();
 
     /// <summary>
+    /// Authoritative pins (workspace → desktop GUID). These are never overwritten by
+    /// the tracker — only by explicit user action (extension command, or hand-edit).
+    /// Auto-move on first sight respects pins ahead of the passive observation map.
+    /// </summary>
+    public Dictionary<string, Guid> VsCodePinnedDesktops { get; set; } = new();
+
+    /// <summary>
     /// Override path to VirtualDesktopAccessor.dll. Empty/null = auto-discover.
     /// Set this if the DLL lives somewhere VdaDll.ResolveDllPath() doesn't search.
     /// </summary>

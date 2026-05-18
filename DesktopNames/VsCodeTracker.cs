@@ -63,13 +63,24 @@ internal sealed class VsCodeTracker : IDisposable
             Guid currentDesktop = _desktop.GetDesktopForWindow(hwnd);
             if (currentDesktop == Guid.Empty) return true;
 
+
             bool firstSight = !_established.Contains(hwnd);
-            if (firstSight)
+            bool isPinned = _settings.VsCodePinnedDesktops.TryGetValue(workspace, out var pinned);
+
+            if (isPinned)
+            {
+                // Authoritative pin: never touch any map. Auto-move only on first sight,
+                // so a user who manually moves a pinned window during a session keeps it
+                // where they put it until the window closes and reopens.
+                if (firstSight && _settings.VsCodeAutoMove && pinned != currentDesktop)
+                {
+                    _desktop.MoveWindowToDesktop(hwnd, pinned);
+                }
+            }
+            else if (firstSight)
             {
                 if (_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
                 {
-                    // Auto-move is opt-in: the underlying MoveViewToDesktop COM call is
-                    // unstable across Windows builds and has been observed to AV.
                     if (_settings.VsCodeAutoMove && saved != currentDesktop)
                     {
                         _desktop.MoveWindowToDesktop(hwnd, saved);
@@ -83,7 +94,7 @@ internal sealed class VsCodeTracker : IDisposable
             }
             else
             {
-                // Established window: update map if user manually moved it.
+                // Established, not pinned: update passive observation if window moved.
                 if (!_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved) || saved != currentDesktop)
                 {
                     _settings.VsCodeWorkspaceDesktops[workspace] = currentDesktop;
