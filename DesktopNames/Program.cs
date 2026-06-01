@@ -15,6 +15,7 @@ static class Program
         KillExistingInstances();
 
         var settings = Settings.Load();
+        Log.Configure(settings.AlertLogEnabled);
 
         // Locate and load VirtualDesktopAccessor.dll before DesktopService starts —
         // VdaDll P/Invokes are no-ops until this succeeds. If the DLL is missing, prompt
@@ -63,6 +64,7 @@ static class Program
             (_, _) => { settings.Hidden = !settings.Hidden; settings.Save(); });
         trayIcon.ContextMenuStrip.Items.Add("Keyboard shortcuts...", null, (_, _) => ShowShortcuts());
         trayIcon.ContextMenuStrip.Items.Add("Open settings.json", null, (_, _) => OpenSettingsFile());
+        if (settings.AlertListenerEnabled) AddClaudeStatusMenu(trayIcon, hostForm);
         trayIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         trayIcon.ContextMenuStrip.Items.Add("Exit", null, (_, _) => hostForm.Close());
 
@@ -306,6 +308,117 @@ static class Program
             $"DesktopNames v{GetAppVersion()} — Keyboard shortcuts",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
+
+    /// <summary>
+    /// Add the "Claude status" submenu to the tray icon. The status header refreshes
+    /// each time the submenu opens. Test items inject synthetic states directly into
+    /// SessionState (no pipe), the "Echo via pipe" item does a real round-trip so the
+    /// listener itself can be smoke-tested.
+    /// </summary>
+    private static void AddClaudeStatusMenu(NotifyIcon tray, HostForm host)
+    {
+        var settings = host.SessionState is null ? new Settings() : host.Settings;
+        var menu = new ToolStripMenuItem("Claude status");
+        var status = new ToolStripMenuItem("(loading...)") { Enabled = false };
+
+        // Color legend — sits at top of the submenu so the user can glance and know what
+        // each color means. Items are kept enabled (clickable) so the swatch Image renders
+        // at full saturation — Windows desaturates images on disabled menu items, which
+        // defeats the whole point of a color legend.
+        Color busyC   = TaskbarOverlay.ParseColorOrFallback(settings.AlertBusyColor,   Color.FromArgb(244, 180, 131));
+        Color askingC = TaskbarOverlay.ParseColorOrFallback(settings.AlertAskingColor, Color.FromArgb(255, 230, 128));
+        Color errorC  = TaskbarOverlay.ParseColorOrFallback(settings.AlertErrorColor,  Color.FromArgb(224, 133, 133));
+        Color readyC  = TaskbarOverlay.ParseColorOrFallback(settings.AlertReadyColor,  Color.FromArgb(168, 216, 176));
+        var legendHeader = new ToolStripMenuItem("Color legend");
+        var legendAsking = new ToolStripMenuItem("Asking — needs your input (act!)")  { Image = MakeColorSwatch(askingC) };
+        var legendBusy   = new ToolStripMenuItem("Busy — Claude is working")          { Image = MakeColorSwatch(busyC) };
+        var legendError  = new ToolStripMenuItem("Error — Claude stopped with an error") { Image = MakeColorSwatch(errorC) };
+        var legendReady  = new ToolStripMenuItem("Ready — finished / awaiting prompt") { Image = MakeColorSwatch(readyC) };
+        // No-op clicks — the legend is informational only.
+        legendHeader.Click += (_, _) => { };
+        legendAsking.Click += (_, _) => { };
+        legendBusy.Click   += (_, _) => { };
+        legendError.Click  += (_, _) => { };
+        legendReady.Click  += (_, _) => { };
+
+        var jumpNext = new ToolStripMenuItem("Next waiting (Win+])");
+        jumpNext.Click += (_, _) => host.JumpToWaitingClaude(+1);
+        var jumpPrev = new ToolStripMenuItem("Previous waiting (Win+[)");
+        jumpPrev.Click += (_, _) => host.JumpToWaitingClaude(-1);
+
+        ToolStripMenuItem TestItem(string label, StateKind state)
+        {
+            var item = new ToolStripMenuItem(label);
+            item.Click += (_, _) => host.SendTestAlert(state);
+            return item;
+        }
+
+        var echo = new ToolStripMenuItem("Echo via pipe...");
+        echo.Click += (_, _) => RunPipeRoundtripTest();
+
+        menu.DropDownItems.Add(legendHeader);
+        menu.DropDownItems.Add(legendAsking);
+        menu.DropDownItems.Add(legendBusy);
+        menu.DropDownItems.Add(legendError);
+        menu.DropDownItems.Add(legendReady);
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(status);
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(jumpPrev);
+        menu.DropDownItems.Add(jumpNext);
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(TestItem("Test alert → asking", StateKind.Asking));
+        menu.DropDownItems.Add(TestItem("Test alert → busy",   StateKind.Busy));
+        menu.DropDownItems.Add(TestItem("Test alert → error",  StateKind.Error));
+        menu.DropDownItems.Add(TestItem("Test alert → ready",  StateKind.Ready));
+        menu.DropDownItems.Add(TestItem("Test alert → clear",  StateKind.None));
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(echo);
+
+        menu.DropDownOpening += (_, _) =>
+        {
+            status.Text = host.SessionState?.BuildStatusSummary() ?? "Listener disabled";
+        };
+
+        tray.ContextMenuStrip!.Items.Add(menu);
+    }
+
+    /// <summary>Tiny 16x16 color square for tray-menu legend items.</summary>
+    private static Bitmap MakeColorSwatch(Color c)
+    {
+        var bmp = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bmp);
+        using var brush = new SolidBrush(c);
+        g.FillRectangle(brush, 2, 2, 12, 12);
+        using var pen = new Pen(Color.FromArgb(160, 0, 0, 0));
+        g.DrawRectangle(pen, 2, 2, 12, 12);
+        return bmp;
+    }
+
+    /// <summary>Manual pipe smoke test wired to the tray menu. Sends one idle and shows the reply.</summary>
+    private static void RunPipeRoundtripTest()
+    {
+        try
+        {
+            using var pipe = new System.IO.Pipes.NamedPipeClientStream(
+                ".", AlertPipeServer.PipeName, System.IO.Pipes.PipeDirection.InOut);
+            pipe.Connect(1000);
+            var json = "{\"type\":\"state\",\"source\":\"echo\",\"state\":\"idle\",\"sessionId\":\"echo\"}";
+            using (var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false), 4096, leaveOpen: true) { AutoFlush = true })
+            {
+                writer.WriteLine(json);
+            }
+            using var reader = new StreamReader(pipe);
+            var reply = reader.ReadLine();
+            MessageBox.Show($"Sent: {json}\n\nReply: {reply}",
+                "Pipe roundtrip", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Roundtrip failed: " + ex.Message,
+                "Pipe roundtrip", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 }
 
 /// <summary>
@@ -326,6 +439,60 @@ internal sealed class HostForm : Form
     private IntPtr _trackedForeground;
     private Guid _lastDesktopId;
     private readonly System.Windows.Forms.Timer _desktopPoll;
+    private SessionState? _sessionState;
+    private AlertPulse? _alertPulse;
+    private StateChime? _stateChime;
+    private AlertPipeServer? _alertServer;
+    private System.Windows.Forms.Timer? _sweepTimer;
+
+    public SessionState? SessionState => _sessionState;
+    public AlertPulse? AlertPulse => _alertPulse;
+    public DesktopService DesktopService => _desktopService;
+    public Settings Settings => _settings;
+
+    /// <summary>
+    /// Inject a synthetic state transition into the in-memory session table for the
+    /// current desktop. Bypasses the pipe so rendering can be exercised without a
+    /// running Claude. <see cref="StateKind.None"/> clears all test-source entries.
+    /// </summary>
+    public void SendTestAlert(StateKind state)
+    {
+        if (_sessionState == null) return;
+        if (state == StateKind.None) { _sessionState.RemoveBySource("test"); return; }
+        var current = _desktopService.GetCurrentDesktopId();
+        if (current == Guid.Empty) return;
+
+        // Synthetic hook context so the glyph badge is visible too. Busy test alert
+        // simulates an Edit tool call (glyph "E"); other states get the matching event.
+        (string? hookEvent, string? toolName) = state switch
+        {
+            StateKind.Busy   => ("PreToolUse",   "Edit"),
+            StateKind.Asking => ("Notification", null),
+            StateKind.Ready  => ("Stop",         null),
+            StateKind.Error  => ("StopFailure",  null),
+            _ => (null, null),
+        };
+        string body = state switch
+        {
+            StateKind.Busy   => "Running Edit",
+            StateKind.Asking => "Allow this Bash command?",
+            StateKind.Ready  => "Ready",
+            StateKind.Error  => "Stopped: rate_limit",
+            _ => "",
+        };
+
+        _sessionState.Apply(
+            current,
+            source: "test",
+            sessionId: "t-" + Guid.NewGuid().ToString("N").Substring(0, 6),
+            state: state,
+            title: $"Test — {state.ToString().ToLowerInvariant()}",
+            body: body,
+            sessionPid: 0,
+            vsCodePid: 0,
+            hookEvent: hookEvent,
+            toolName: toolName);
+    }
 
     public HostForm(DesktopService desktopService, Settings settings)
     {
@@ -340,6 +507,27 @@ internal sealed class HostForm : Form
 
         Load += (_, _) =>
         {
+            // SessionState + pulse must exist before overlays, because each overlay
+            // captures both in its constructor for paint-time lookups.
+            if (_settings.AlertListenerEnabled)
+            {
+                _sessionState = new SessionState();
+                // A live Claude status arriving on a manually-blue desktop retires the blue:
+                // the marker's job ("come back here") is done once Claude is active again.
+                _sessionState.Changed += g =>
+                {
+                    if (g == SessionState.UnresolvedDesktopId || !_settings.IsDesktopHighlighted(g)) return;
+                    var (s, _, _) = _sessionState!.GetAggregate(g);
+                    if (s != StateKind.None) _settings.ToggleDesktopHighlight(g);
+                };
+                _alertPulse = new AlertPulse(_sessionState, _settings, InvalidateOverlaysForDesktop);
+                _stateChime = new StateChime(_sessionState, _desktopService, _settings);
+                _alertServer = new AlertPipeServer(this, _sessionState, _settings, _desktopService);
+                _alertServer.Start();
+                _sweepTimer = new System.Windows.Forms.Timer { Interval = 5000 };
+                _sweepTimer.Tick += (_, _) => { _sessionState!.Sweep(); _alertPulse!.EnsureRunningIfAskingPresent(); };
+                _sweepTimer.Start();
+            }
             BuildOverlays();
             RegisterHotkeys();
             InstallWinEventHooks();
@@ -366,7 +554,13 @@ internal sealed class HostForm : Form
             if (id != _lastDesktopId)
             {
                 _lastDesktopId = id;
+                // Color is a status indicator, not a notification — don't clear on switch.
+                // It persists until the source sends `idle` (e.g. SessionEnd hook) or
+                // the liveness sweep reaps a dead sessionPid.
                 RefreshAllOverlays();
+                // "What was I doing on this desktop?" reminder: show the note for a few
+                // seconds. No-op when the desktop has no note configured.
+                FlashNoteForDesktop(id);
             }
         };
         _desktopPoll.Start();
@@ -391,10 +585,41 @@ internal sealed class HostForm : Form
 
     private void AddOverlay(TaskbarData tb)
     {
-        var overlay = new TaskbarOverlay(tb, _desktopService, _settings);
+        var overlay = new TaskbarOverlay(tb, _desktopService, _settings, _sessionState, _alertPulse);
         _overlays.Add(overlay);
         overlay.Show();
         overlay.RefreshDesktops();
+    }
+
+    /// <summary>Repaint the per-desktop button on every overlay. Cheap when no overlays exist.</summary>
+    private void InvalidateOverlaysForDesktop(Guid desktopId)
+    {
+        // The unresolved sentinel button appears/disappears with state — that's a layout
+        // change, not a pixel change. Trigger the heavier RefreshDesktops path so
+        // RecalculateLayout adds/removes the "?" entry.
+        if (desktopId == SessionState.UnresolvedDesktopId)
+        {
+            foreach (var o in _overlays.ToArray())
+                if (!o.IsDisposed) o.RefreshDesktops();
+            return;
+        }
+        foreach (var o in _overlays.ToArray())
+        {
+            if (!o.IsDisposed) o.InvalidateForDesktop(desktopId);
+        }
+    }
+
+    /// <summary>
+    /// Pop the per-desktop note/state tooltip for ~4 seconds on every visible overlay.
+    /// Fired after a desktop switch so the user is reminded what they're doing here.
+    /// </summary>
+    private void FlashNoteForDesktop(Guid desktopId)
+    {
+        foreach (var o in _overlays.ToArray())
+        {
+            if (o.IsDisposed || !o.Visible) continue;
+            o.ShowDesktopTooltipFor(desktopId, 4000);
+        }
     }
 
     public HotkeyManager? Hotkeys => _hotkeys;
@@ -409,16 +634,18 @@ internal sealed class HostForm : Form
         TryRegister("MoveDesktopFirst", "Make desktop first", () => { _desktopService.MoveCurrentDesktopToFirst(); RefreshAllOverlays(); });
         TryRegister("MoveDesktopLast",  "Make desktop last",  () => { _desktopService.MoveCurrentDesktopToLast();  RefreshAllOverlays(); });
         TryRegister("ToggleHide",       "Toggle overlay hide", () => { _settings.Hidden = !_settings.Hidden; _settings.Save(); });
-        TryRegister("RenameCurrentDesktop", "Rename current desktop", () =>
+        TryRegister("OpenCurrentDesktopMenu", "Open menu for current desktop", () =>
         {
-            // Try each overlay; the first one with a button for the current desktop opens
-            // the inline rename popup. On multi-monitor setups, that's typically the overlay
-            // on whichever monitor the active window is on.
+            // Pops the right-click context menu for the current desktop, with the
+            // per-desktop section (Rename / Select / Make first / Notes / etc.) pre-populated.
+            // Tries overlays in order; the first one with a button for the current desktop wins.
             foreach (var o in _overlays.ToArray())
             {
-                if (!o.IsDisposed && o.TryBeginRenameCurrentDesktop()) return;
+                if (!o.IsDisposed && o.TryOpenContextMenuForCurrentDesktop()) return;
             }
         });
+        TryRegister("PrevWaitingDesktop", "Previous waiting Claude", () => JumpToWaitingClaude(-1));
+        TryRegister("NextWaitingDesktop", "Next waiting Claude",     () => JumpToWaitingClaude(+1));
 
         // Switch-to-desktop hotkeys. Loop variable must be captured into a local
         // so each handler closure binds its own index.
@@ -495,6 +722,127 @@ internal sealed class HostForm : Form
         }
     }
 
+    /// <summary>
+    /// Hotkey + tray handler: switch to the next desktop with a Claude waiting.
+    /// <paramref name="direction"/> +1 = forward (Win+]), -1 = backward (Win+[).
+    /// Asking takes priority over Ready; within priority, wraps past the current desktop.
+    /// No-op if nothing is waiting.
+    /// </summary>
+    public void JumpToWaitingClaude(int direction)
+    {
+        if (_sessionState == null) return;
+        var desktops = _desktopService.GetDesktops();
+        if (desktops.Count == 0) return;
+
+        int currentIdx = -1;
+        foreach (var d in desktops) if (d.IsCurrent) { currentIdx = d.Index; break; }
+
+        var asking = new List<DesktopInfo>();
+        var error  = new List<DesktopInfo>();
+        var ready  = new List<DesktopInfo>();
+        foreach (var d in desktops)
+        {
+            var (s, _, _) = _sessionState.GetAggregate(d.Id);
+            if      (s == StateKind.Asking) asking.Add(d);
+            else if (s == StateKind.Error)  error.Add(d);
+            else if (s == StateKind.Ready)  ready.Add(d);
+        }
+
+        DesktopInfo? Pick(List<DesktopInfo> list)
+        {
+            if (list.Count == 0) return null;
+            list.Sort((a, b) => a.Index.CompareTo(b.Index));
+            if (direction >= 0)
+            {
+                foreach (var d in list) if (d.Index > currentIdx) return d;
+                return list[0]; // wrap forward to lowest index
+            }
+            // Backward: largest index strictly less than current. List is ascending,
+            // so the last entry satisfying d.Index < currentIdx wins.
+            DesktopInfo? best = null;
+            foreach (var d in list)
+            {
+                if (d.Index < currentIdx) best = d;
+                else break;
+            }
+            return best ?? list[^1]; // wrap backward to highest index
+        }
+
+        // Priority order: yellow (asking, must act) > red (error, may need action) > green (ready).
+        var target = Pick(asking) ?? Pick(error) ?? Pick(ready);
+        if (target == null) return;
+        _desktopService.SwitchToDesktop(target);
+        RefreshAllOverlays();
+    }
+
+    /// <summary>
+    /// Overlay command: move every open VS Code window back to the desktop DesktopNames last
+    /// remembered for it. Useful after a reboot or a stray drag scattered windows. No-op for
+    /// windows already in place.
+    /// </summary>
+    public void MoveAllVsCodeToRemembered()
+    {
+        int moved = _vscodeTracker?.MoveAllToRemembered() ?? 0;
+        if (moved > 0) RefreshAllOverlays();
+    }
+
+    /// <summary>Live snapshot of the taskbar overlays — used by the reassign flyout for
+    /// screen-point hit-testing of drop targets.</summary>
+    public IReadOnlyList<TaskbarOverlay> Overlays => _overlays.ToArray();
+
+    /// <summary>Paint a drop-target ring on the given desktop's button on every overlay
+    /// (null clears). Driven by the reassign flyout during a drag.</summary>
+    public void SetDropHighlight(Guid? desktopId)
+    {
+        foreach (var o in _overlays.ToArray())
+            if (!o.IsDisposed) o.SetDropHighlight(desktopId);
+    }
+
+    /// <summary>
+    /// Apply a user's manual correction from the reassign flyout: move the session's VS Code
+    /// window to <paramref name="targetDesktop"/> (so the passive tracker remembers it
+    /// durably), re-bind the live indicator immediately, and record the resolution so the next
+    /// hook from this session resolves there before the tracker's next scan.
+    /// </summary>
+    public void ReassignSession(string source, string sessionId, string cwd, Guid targetDesktop)
+    {
+        if (targetDesktop == Guid.Empty) return;
+
+        var candidates = _alertServer?.RootNameCandidatesFor(cwd) ?? Array.Empty<string>();
+        IntPtr hwnd = FindVsCodeWindow(candidates);
+        bool moved = false;
+        if (hwnd != IntPtr.Zero && _desktopService.GetDesktopForWindow(hwnd) != targetDesktop)
+            moved = _desktopService.MoveWindowToDesktop(hwnd, targetDesktop);
+
+        _sessionState?.MoveSessionToDesktop(source, sessionId, targetDesktop);
+        _sessionState?.RecordResolution(sessionId, null, cwd, targetDesktop);
+        RefreshAllOverlays();
+        Log.Resolver($"reassign session={sessionId} src={source} cwd={cwd} -> {targetDesktop} " +
+                     $"window={(hwnd == IntPtr.Zero ? "not-found" : moved ? "moved" : "already-there")}");
+    }
+
+    /// <summary>Find an open VS Code workspace window whose rootName is in <paramref name="rootNames"/>.</summary>
+    private static IntPtr FindVsCodeWindow(IReadOnlyCollection<string> rootNames)
+    {
+        if (rootNames.Count == 0) return IntPtr.Zero;
+        IntPtr found = IntPtr.Zero;
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+            var clsBuf = new char[64];
+            int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
+            if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
+            int len = NativeMethods.GetWindowTextLength(hwnd);
+            if (len == 0) return true;
+            var sb = new System.Text.StringBuilder(len + 1);
+            NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
+            var ws = VsCodeTracker.ExtractWorkspace(sb.ToString());
+            if (ws != null && rootNames.Contains(ws)) { found = hwnd; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     private void RebuildOverlays()
     {
         // Dispose existing, re-discover taskbars (handles monitor add/remove, taskbar restart).
@@ -522,6 +870,10 @@ internal sealed class HostForm : Form
     {
         _desktopPoll.Stop();
         _desktopPoll.Dispose();
+        _sweepTimer?.Stop();
+        _sweepTimer?.Dispose();
+        _alertServer?.Dispose();
+        _alertPulse?.Dispose();
         _vscodeTracker?.Dispose();
         _hotkeys?.Dispose();
         if (_foregroundHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_foregroundHook);

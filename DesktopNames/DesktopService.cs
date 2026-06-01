@@ -49,15 +49,16 @@ internal sealed class DesktopService : IDisposable
 
     public void RenameDesktop(Guid desktopId, string newName)
     {
-        // VDA's SetDesktopName takes ANSI — would mangle "Mobilität" etc. So we keep this
-        // one operation on the hand-rolled COM. The slot for SetDesktopName hasn't been
-        // observed to AV; only MoveViewToDesktop has.
-        if (_manager == null) return;
+        // Route through VDA (UTF-8 marshaled — handles "Mobilität" etc. correctly).
+        // Avoids the hand-rolled internal-COM FindDesktop + SetDesktopName path which
+        // was silently no-op'ing on this build, presumably due to vtable drift in slots
+        // 11 or 13 of IVirtualDesktopManagerInternal.
+        if (!VdaDll.IsLoaded) return;
         try
         {
-            var target = _manager.FindDesktop(ref desktopId);
-            if (target == null) return;
-            _manager.SetDesktopName(target, newName);
+            int idx = IndexFromGuid(desktopId);
+            if (idx < 0) return;
+            VdaDll.SetDesktopName(idx, newName);
             DesktopsChanged?.Invoke();
         }
         catch { }
@@ -226,6 +227,24 @@ internal sealed class DesktopService : IDisposable
         {
             var current = _manager.GetCurrentDesktop();
             _manager.MoveDesktop(current, targetIndex);
+            DesktopsChanged?.Invoke();
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Reorder any desktop (not just the current one) to <paramref name="targetIndex"/>.
+    /// Used by the overlay's drag-to-reorder gesture. Same COM slot as MoveCurrentDesktopToIndex
+    /// (which has been stable); FindDesktop(guid) supplies the IVirtualDesktop for the source.
+    /// </summary>
+    public void MoveDesktopToIndex(Guid desktopId, int targetIndex)
+    {
+        if (_manager == null || desktopId == Guid.Empty) return;
+        try
+        {
+            var d = _manager.FindDesktop(ref desktopId);
+            if (d == null) return;
+            _manager.MoveDesktop(d, targetIndex);
             DesktopsChanged?.Invoke();
         }
         catch { }

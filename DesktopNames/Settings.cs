@@ -13,6 +13,19 @@ internal sealed class Settings
     public bool OnlyOnMainDesktop { get; set; }
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
+    /// <summary>
+    /// Desktops the user has manually marked blue (right-click → Blue highlight). A persistent
+    /// user marker, distinct from the transient Claude status colors; survives restarts. A live
+    /// Claude status color takes visual precedence over it.
+    /// </summary>
+    public List<Guid> HighlightDesktopGuids { get; set; } = new();
+
+    /// <summary>
+    /// Free-text reminders ("what am I doing on this desktop"). Shown in the tooltip
+    /// when hovering the button. Empty/missing means no note. Key is desktop GUID.
+    /// </summary>
+    public Dictionary<Guid, string> DesktopNotes { get; set; } = new();
+
     // VSCode workspace → last observed location (desktop + monitor). Always tracked
     // passively: every scan CRUDs the entry to match where the window currently lives,
     // so manual moves via the user's AHK script (Win+Ctrl+N) become the new binding.
@@ -40,6 +53,66 @@ internal sealed class Settings
     /// </summary>
     public bool LastTestedBuildOk { get; set; }
 
+    /// <summary>
+    /// Master switch for the named-pipe listener that accepts Claude (and other apps)
+    /// state updates to color taskbar buttons. Disable to opt out entirely.
+    /// </summary>
+    public bool AlertListenerEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When false, state colors switch instantly without a 2.5s pulse-on-change animation.
+    /// The slow Asking breathe also stops. Useful on slower machines or for users who
+    /// find motion distracting.
+    /// </summary>
+    public bool AlertPulseEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Play a short DTMF tone when a desktop enters the Asking state (a Claude is waiting
+    /// for an answer). The dialled digit is the desktop's number, so the pitch tells you
+    /// which desktop to switch to without looking. Set false to silence.
+    /// </summary>
+    public bool AlertAskingChimeEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Which chime to play. "notes" = a pleasant ascending pentatonic rise of N notes for
+    /// desktop N (countable by ear). "dtmf" = a single phone-keypad tone whose pitch encodes
+    /// the desktop number. Anything else falls back to "notes".
+    /// </summary>
+    public string AlertAskingChimeStyle { get; set; } = "notes";
+
+    /// <summary>Button background when a session is busy. Pale peach — soft enough to
+    /// not yell, distinct enough from the other two states.</summary>
+    public string AlertBusyColor { get; set; } = "#F4B483";
+
+    /// <summary>
+    /// Button background when a session is asking. Pale yellow — chosen for visible
+    /// contrast against the busy peach so the user can glance and distinguish
+    /// "Claude is working" from "needs your input".
+    /// </summary>
+    public string AlertAskingColor { get; set; } = "#FFE680";
+
+    /// <summary>Button background when a session is ready and none higher. Pale mint.</summary>
+    public string AlertReadyColor { get; set; } = "#A8D8B0";
+
+    /// <summary>Background for a manually highlighted desktop. Medium blue — clearly a user
+    /// marker, not one of the muted-pastel status colors.</summary>
+    public string AlertHighlightColor { get; set; } = "#5B9BD5";
+
+    /// <summary>
+    /// Button background when Claude stopped with an error (rate-limit, auth, billing,
+    /// network). Pale coral red — clearly distinct from the busy peach but in the same
+    /// muted family. The errorType field on the wire carries the specific cause and is
+    /// surfaced via the tooltip body.
+    /// </summary>
+    public string AlertErrorColor { get; set; } = "#E08585";
+
+    /// <summary>
+    /// Append per-message diagnostics to %APPDATA%\DesktopNames\desktopnames.log. Useful
+    /// while the integration is still maturing — pair with claudehook.log to debug
+    /// resolver mismatches. Off by default once shipped.
+    /// </summary>
+    public bool AlertLogEnabled { get; set; } = true;
+
     // Hotkey bindings. Strings parsed by HotkeyParser. Set a value to "" to disable a hotkey.
     public Dictionary<string, string> Hotkeys { get; set; } = BuildDefaultHotkeys();
 
@@ -52,7 +125,9 @@ internal sealed class Settings
             ["MoveDesktopFirst"] = "Win+Alt+Home",
             ["MoveDesktopLast"]  = "Win+Alt+End",
             ["ToggleHide"]       = "Win+Alt+H",
-            ["RenameCurrentDesktop"] = "Win+Insert",
+            ["OpenCurrentDesktopMenu"] = "Win+Insert",  // opens the per-desktop context menu
+            ["PrevWaitingDesktop"] = "Win+Oem4",   // Win+[ — previous desktop with an asking/ready Claude
+            ["NextWaitingDesktop"] = "Win+Oem6",   // Win+] — next desktop with an asking/ready Claude
         };
         // Win+Ctrl+1..9,0 → desktops 1..10. Add Shift → desktops 11..20.
         for (int i = 1; i <= 20; i++)
@@ -91,6 +166,29 @@ internal sealed class Settings
         }
         catch { s = new Settings(); }
 
+        // Migration: an earlier build defaulted NextWaitingDesktop to "Win+Oem3", which
+        // collides with Windows Terminal's quake-mode. Wipe that specific stale value so
+        // the current default (Win+]) takes effect for upgrading users.
+        if (s.Hotkeys.TryGetValue("NextWaitingDesktop", out var oldNwd) && oldNwd == "Win+Oem3")
+            s.Hotkeys.Remove("NextWaitingDesktop");
+
+        // Migration: state colors have been re-defaulted twice (saturated → vivid → pale).
+        // Replace any of the previous defaults with the current pale palette; user-customized
+        // values are left alone.
+        if (s.AlertBusyColor   is "#D97A1F") s.AlertBusyColor   = "#F4B483";
+        if (s.AlertAskingColor is "#E8C547" or "#FFD93B") s.AlertAskingColor = "#FFE680";
+        if (s.AlertReadyColor  is "#3FA34D") s.AlertReadyColor  = "#A8D8B0";
+
+        // Migration: the Win+Insert hotkey was repurposed from inline-rename to
+        // "open the per-desktop context menu". Move any custom binding from the old key
+        // to the new key so user customisations survive the rename.
+        if (s.Hotkeys.TryGetValue("RenameCurrentDesktop", out var oldRcd))
+        {
+            if (!s.Hotkeys.ContainsKey("OpenCurrentDesktopMenu"))
+                s.Hotkeys["OpenCurrentDesktopMenu"] = oldRcd;
+            s.Hotkeys.Remove("RenameCurrentDesktop");
+        }
+
         // Fill in any hotkey keys the user's older settings file didn't have.
         var defaults = new Settings().Hotkeys;
         foreach (var kvp in defaults)
@@ -113,12 +211,32 @@ internal sealed class Settings
         Changed?.Invoke();
     }
 
+    public bool IsDesktopHighlighted(Guid desktopId) => HighlightDesktopGuids.Contains(desktopId);
+
+    public void ToggleDesktopHighlight(Guid desktopId)
+    {
+        if (!HighlightDesktopGuids.Remove(desktopId))
+            HighlightDesktopGuids.Add(desktopId);
+        Save();
+    }
+
     public bool IsDesktopHidden(Guid desktopId) => HiddenDesktopGuids.Contains(desktopId);
 
     public void ToggleDesktopHidden(Guid desktopId)
     {
         if (!HiddenDesktopGuids.Remove(desktopId))
             HiddenDesktopGuids.Add(desktopId);
+        Save();
+    }
+
+    public string GetDesktopNote(Guid desktopId)
+        => DesktopNotes.TryGetValue(desktopId, out var n) ? n : "";
+
+    public void SetDesktopNote(Guid desktopId, string note)
+    {
+        note = (note ?? "").Trim();
+        if (note.Length == 0) DesktopNotes.Remove(desktopId);
+        else DesktopNotes[desktopId] = note;
         Save();
     }
 }

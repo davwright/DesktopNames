@@ -114,6 +114,17 @@ internal static class HotkeyParser
             "ins" or "insert" => 0x2D,
             "pgup" or "pageup" => 0x21,
             "pgdn" or "pagedown" => 0x22,
+            "oem3" or "backtick" or "tilde" or "`" => 0xC0,   // VK_OEM_3 — `~ key
+            "oem1" or "oemsemicolon" or "semicolon" or ";" => 0xBA, // ;: key
+            "oem2" or "oemquestion" or "slash" or "/" => 0xBF, // /? key
+            "oem4" or "oemopenbrackets" or "openbracket" or "[" => 0xDB, // [{ key
+            "oem5" or "oempipe" or "backslash" or "\\" => 0xDC, // \| key
+            "oem6" or "oemclosebrackets" or "closebracket" or "]" => 0xDD, // ]} key
+            "oem7" or "oemquotes" or "quote" or "'" => 0xDE, // '" key
+            "oemplus" or "plus" or "=" => 0xBB, // =+ key
+            "oemminus" or "minus" or "-" => 0xBD, // -_ key
+            "oemcomma" or "comma" or "," => 0xBC, // ,< key
+            "oemperiod" or "period" or "." => 0xBE, // .> key
             _ => 0u
         };
     }

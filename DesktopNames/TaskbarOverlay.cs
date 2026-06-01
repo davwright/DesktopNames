@@ -12,23 +12,42 @@ internal sealed class TaskbarOverlay : Form
     private readonly TaskbarData _taskbar;
     private readonly DesktopService _desktopService;
     private readonly Settings _settings;
+    private readonly SessionState? _sessionState;
+    private readonly AlertPulse? _alertPulse;
     private List<DesktopInfo> _desktops = new();
     private readonly List<DesktopButton> _buttons = new();
     private int _hoveredIndex = -1;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _isDarkMode;
     private readonly ContextMenuStrip _contextMenu;
+    private readonly ToolTip _stateTooltip = new() { InitialDelay = 400, ReshowDelay = 100 };
+    private Guid _lastTooltipDesktop = Guid.Empty;
+
+    // Reassign-drag state. Plain press-drag on any desktop button starts a *reorder* drag
+    // (moves the desktop to the drop position via DesktopService.MoveDesktopToIndex). A
+    // long-press (~400ms) on a *lit* desktop opens the session flyout instead.
+    // _dropHighlightDesktop rings the button currently under a session-reassign drag from
+    // the flyout; _dropInsertionIndex is the slot for a reorder drag in progress.
+    private Guid? _dropHighlightDesktop;
+    private int _dragCandidateButton = -1;
+    private Point _dragCandidatePoint;
+    private bool _dragSuppressClick;
+    private SessionFlyout? _flyout;
+    private readonly System.Windows.Forms.Timer _longPressTimer = new() { Interval = 400 };
+    private bool _reordering;
+    private int _dropInsertionIndex = -1;
 
     // Defer single-click switching so a double-click can pre-empt it.
     private readonly System.Windows.Forms.Timer _singleClickTimer = new();
     private Action? _pendingSingleClickAction;
 
+
     public TaskbarData Taskbar => _taskbar;
 
     // Win11 taskbar style constants
-    private static readonly Font ButtonFont = new("Segoe UI Variable Text", 10f, FontStyle.Regular);
-    private static readonly Font ButtonFontBold = new("Segoe UI Variable Text", 10f, FontStyle.Bold);
-    private const int ButtonPaddingH = 3;
+    private static readonly Font ButtonFont = new("Segoe UI Variable Text", 9f, FontStyle.Regular);
+    private static readonly Font ButtonFontBold = new("Segoe UI Variable Text", 9f, FontStyle.Bold);
+    private const int ButtonPaddingH = 0;
     private const int ButtonPaddingV = 3;
     private const int ButtonSpacing = 0;
     private const int ButtonRadius = 4;
@@ -36,11 +55,14 @@ internal sealed class TaskbarOverlay : Form
     // Transparent background - use a color key for true transparency
     private static readonly Color TransparencyColor = Color.FromArgb(1, 1, 1);
 
-    public TaskbarOverlay(TaskbarData taskbar, DesktopService desktopService, Settings settings)
+    public TaskbarOverlay(TaskbarData taskbar, DesktopService desktopService, Settings settings,
+                          SessionState? sessionState, AlertPulse? alertPulse)
     {
         _taskbar = taskbar;
         _desktopService = desktopService;
         _settings = settings;
+        _sessionState = sessionState;
+        _alertPulse = alertPulse;
         _isDarkMode = DetectDarkMode();
 
         FormBorderStyle = FormBorderStyle.None;
@@ -69,8 +91,15 @@ internal sealed class TaskbarOverlay : Form
             else RefreshDesktops();
         };
 
+        MouseDown += OnMouseDown;
         MouseMove += OnMouseMove;
-        MouseLeave += (_, _) => { _hoveredIndex = -1; Invalidate(); };
+        MouseLeave += (_, _) =>
+        {
+            _hoveredIndex = -1;
+            _stateTooltip.Hide(this);
+            _lastTooltipDesktop = Guid.Empty;
+            Invalidate();
+        };
         MouseUp += OnMouseUp;
         MouseDoubleClick += OnMouseDoubleClick;
 
@@ -81,6 +110,8 @@ internal sealed class TaskbarOverlay : Form
             _pendingSingleClickAction = null;
             action?.Invoke();
         };
+
+        _longPressTimer.Tick += OnLongPressTick;
     }
 
     private void OnMouseDoubleClick(object? sender, MouseEventArgs e)
@@ -88,6 +119,9 @@ internal sealed class TaskbarOverlay : Form
         // Cancel any pending single-click switch — user is renaming, not switching.
         _singleClickTimer.Stop();
         _pendingSingleClickAction = null;
+        // A double-click isn't a long-press or a reorder drag — kill those candidates too.
+        _longPressTimer.Stop();
+        _dragCandidateButton = -1;
 
         if (e.Button != MouseButtons.Left) return;
         foreach (var btn in _buttons)
@@ -101,16 +135,39 @@ internal sealed class TaskbarOverlay : Form
     }
 
     /// <summary>
-    /// Hotkey entry point: open inline rename for the desktop that's currently active
-    /// (matches IsCurrent=true). Returns true if this overlay handled it.
+    /// Repaint only the button for this desktop. Driven by AlertPulse during animations
+    /// and by SessionState.Changed for instant transitions. Cheap when the button isn't
+    /// on this overlay (different monitor / no match).
     /// </summary>
-    public bool TryBeginRenameCurrentDesktop()
+    public void InvalidateForDesktop(Guid desktopId)
+    {
+        if (IsDisposed || !Visible) return;
+        foreach (var btn in _buttons)
+        {
+            if (btn.Desktop.Id != desktopId) continue;
+            // If the glyph changed the label's width, the whole strip must reflow so the
+            // wider/narrower text stays exactly fitted (no clip, no slack). Pulse frames pass
+            // the same label, so this short-circuits to a cheap per-button repaint.
+            string live = GetButtonLabel(btn.Desktop, _sessionState?.GetGlyph(desktopId));
+            if (live != btn.LaidOutLabel) { RecalculateLayout(); RepositionOnTaskbar(); Invalidate(); }
+            else Invalidate(btn.Bounds);
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Hotkey entry point: open the per-desktop context menu for the currently active
+    /// desktop. The right-clicked-target is pre-populated so the per-desktop section
+    /// appears at the top of the menu. Returns true if this overlay handled it.
+    /// </summary>
+    public bool TryOpenContextMenuForCurrentDesktop()
     {
         foreach (var btn in _buttons)
         {
             if (btn.Desktop.IsCurrent)
             {
-                BeginInlineRename(btn);
+                _rightClickedDesktop = btn.Desktop;
+                _contextMenu.Show(this, new Point(btn.Bounds.Left, btn.Bounds.Bottom));
                 return true;
             }
         }
@@ -155,13 +212,68 @@ internal sealed class TaskbarOverlay : Form
     {
         _contextMenu.Items.Clear();
 
-        // If the user right-clicked on a specific desktop's button, surface that desktop's options at the top.
+        // The synthetic "?" button has none of the real-desktop actions. Show a tiny
+        // diagnostic menu, then stop — no point chaining the global section below.
+        if (_rightClickedDesktop != null && _rightClickedDesktop.Id == SessionState.UnresolvedDesktopId)
+        {
+            BuildUnresolvedContextMenu();
+            return;
+        }
+
+        // Per-desktop section: full operations on the right-clicked target.
         if (_rightClickedDesktop != null)
         {
             var d = _rightClickedDesktop;
             _contextMenu.Items.Add(new ToolStripMenuItem($"— {d.Name} —") { Enabled = false });
 
-            _contextMenu.Items.Add($"Rename \"{d.Name}\"...", null, (_, _) => PromptRename(d));
+            if (!d.IsCurrent)
+            {
+                _contextMenu.Items.Add(
+                    LabelWithShortcut("Select", $"SwitchToDesktop{d.Index + 1}"),
+                    null, (_, _) => _desktopService.SwitchToDesktop(d));
+            }
+            _contextMenu.Items.Add("Rename...", null, (_, _) => PromptRename(d));
+
+            // Make first / Make last operate on the right-clicked desktop. The COM API
+            // exposes "move current desktop to index", so non-current targets are
+            // handled by switching first — the user ends up on the moved desktop, which
+            // matches the mental model of "this is the desktop I'm operating on".
+            _contextMenu.Items.Add(
+                LabelWithShortcut("Make first", d.IsCurrent ? "MoveDesktopFirst" : ""),
+                null,
+                (_, _) => { if (!d.IsCurrent) _desktopService.SwitchToDesktop(d); _desktopService.MoveCurrentDesktopToFirst(); });
+            _contextMenu.Items.Add(
+                LabelWithShortcut("Make last", d.IsCurrent ? "MoveDesktopLast" : ""),
+                null,
+                (_, _) => { if (!d.IsCurrent) _desktopService.SwitchToDesktop(d); _desktopService.MoveCurrentDesktopToLast(); });
+
+            // Clear highlight: the lightweight "dormant" — dismiss this desktop's colour now;
+            // it returns on the next state change, with no toggle to undo. Disabled when the
+            // desktop has no active highlight to clear.
+            var (clearState, _, _) = _sessionState?.GetAggregate(d.Id) ?? default;
+            var clearItem = new ToolStripMenuItem("Clear highlight")
+            {
+                Enabled = clearState != StateKind.None,
+                ToolTipText = "Dismiss this desktop's colour until Claude's next state change"
+            };
+            clearItem.Click += (_, _) => _sessionState?.Consume(d.Id);
+            _contextMenu.Items.Add(clearItem);
+
+            // Manual blue marker — a persistent user highlight, independent of Claude state.
+            var highlightItem = new ToolStripMenuItem("Blue highlight")
+            {
+                Checked = _settings.IsDesktopHighlighted(d.Id),
+                CheckOnClick = false,
+                ToolTipText = "Mark this desktop blue until you toggle it off"
+            };
+            highlightItem.Click += (_, _) => _settings.ToggleDesktopHighlight(d.Id);
+            _contextMenu.Items.Add(highlightItem);
+
+            var existingNote = _settings.GetDesktopNote(d.Id);
+            var notesLabel = existingNote.Length > 0
+                ? $"Notes...  (\"{Truncate(existingNote, 24)}\")"
+                : "Notes...";
+            _contextMenu.Items.Add(notesLabel, null, (_, _) => PromptNotes(d));
 
             var hideOnThis = new ToolStripMenuItem("Hide overlay on this desktop")
             {
@@ -174,7 +286,9 @@ internal sealed class TaskbarOverlay : Form
             _contextMenu.Items.Add(new ToolStripSeparator());
         }
 
-        var hideItem = new ToolStripMenuItem(_settings.Hidden ? "Show overlay (Win+Alt+H)" : "Hide overlay (Win+Alt+H)");
+        // Global section: overlay-wide settings + Windows-built-in shortcuts.
+        var hideItem = new ToolStripMenuItem(
+            LabelWithShortcut(_settings.Hidden ? "Show overlay" : "Hide overlay", "ToggleHide"));
         hideItem.Click += (_, _) => { _settings.Hidden = !_settings.Hidden; _settings.Save(); };
         _contextMenu.Items.Add(hideItem);
 
@@ -190,33 +304,170 @@ internal sealed class TaskbarOverlay : Form
 
         _contextMenu.Items.Add(new ToolStripSeparator());
 
-        _contextMenu.Items.Add("New desktop (Win+Ctrl+D)", null, (_, _) => _desktopService.CreateDesktop());
-        _contextMenu.Items.Add("Close current desktop (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
+        _contextMenu.Items.Add("New desktop  (Win+Ctrl+D)", null, (_, _) => _desktopService.CreateDesktop());
+        _contextMenu.Items.Add("Close current desktop  (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
+        _contextMenu.Items.Add("Move all VS Code windows to remembered desktops", null,
+            (_, _) => Program.Host?.MoveAllVsCodeToRemembered());
 
-        var renameCurrent = new ToolStripMenuItem("Rename current desktop...");
-        renameCurrent.Click += (_, _) =>
+        // Global rename when no per-desktop section already covers it.
+        if (_rightClickedDesktop == null)
         {
-            var current = _desktops.FirstOrDefault(d => d.IsCurrent);
-            if (current != null) PromptRename(current);
-        };
-        _contextMenu.Items.Add(renameCurrent);
+            var renameCurrent = new ToolStripMenuItem("Rename current desktop...");
+            renameCurrent.Click += (_, _) =>
+            {
+                var current = _desktops.FirstOrDefault(d => d.IsCurrent);
+                if (current != null) PromptRename(current);
+            };
+            _contextMenu.Items.Add(renameCurrent);
+        }
 
         _contextMenu.Items.Add(new ToolStripSeparator());
 
-        _contextMenu.Items.Add("Move desktop left (Win+Alt+←)",  null, (_, _) => _desktopService.MoveCurrentDesktopBy(-1));
-        _contextMenu.Items.Add("Move desktop right (Win+Alt+→)", null, (_, _) => _desktopService.MoveCurrentDesktopBy(1));
-        _contextMenu.Items.Add("Make desktop first (Win+Alt+Home)", null, (_, _) => _desktopService.MoveCurrentDesktopToFirst());
-        _contextMenu.Items.Add("Make desktop last (Win+Alt+End)",   null, (_, _) => _desktopService.MoveCurrentDesktopToLast());
+        _contextMenu.Items.Add(LabelWithShortcut("Move desktop left",  "MoveDesktopLeft"),  null, (_, _) => _desktopService.MoveCurrentDesktopBy(-1));
+        _contextMenu.Items.Add(LabelWithShortcut("Move desktop right", "MoveDesktopRight"), null, (_, _) => _desktopService.MoveCurrentDesktopBy(1));
+        if (_rightClickedDesktop == null)
+        {
+            _contextMenu.Items.Add(LabelWithShortcut("Make first", "MoveDesktopFirst"), null, (_, _) => _desktopService.MoveCurrentDesktopToFirst());
+            _contextMenu.Items.Add(LabelWithShortcut("Make last",  "MoveDesktopLast"),  null, (_, _) => _desktopService.MoveCurrentDesktopToLast());
+        }
 
         _contextMenu.Items.Add(new ToolStripSeparator());
+
+        _contextMenu.Items.Add(LabelWithShortcut("Previous waiting Claude", "PrevWaitingDesktop"), null,
+            (_, _) => Program.Host?.JumpToWaitingClaude(-1));
+        _contextMenu.Items.Add(LabelWithShortcut("Next waiting Claude", "NextWaitingDesktop"), null,
+            (_, _) => Program.Host?.JumpToWaitingClaude(+1));
+
+        _contextMenu.Items.Add(new ToolStripSeparator());
+
         _contextMenu.Items.Add("Keyboard shortcuts...", null, (_, _) => Program.ShowShortcuts());
         _contextMenu.Items.Add("Open settings.json", null, (_, _) => Program.OpenSettingsFile());
         _contextMenu.Items.Add($"About DesktopNames v{Program.GetAppVersion()}").Enabled = false;
         _contextMenu.Items.Add("Exit DesktopNames", null, (_, _) => Program.Host?.Close());
     }
 
+    /// <summary>Append a "(Win+Alt+H)"-style shortcut hint pulled from settings.</summary>
+    private string LabelWithShortcut(string label, string actionKey)
+    {
+        if (string.IsNullOrEmpty(actionKey)) return label;
+        if (_settings.Hotkeys.TryGetValue(actionKey, out var s) && !string.IsNullOrWhiteSpace(s))
+            return $"{label}  ({PrettifyHotkey(s)})";
+        return label;
+    }
+
+    /// <summary>
+    /// Turn the binding strings parsed by HotkeyParser into typographically nicer labels.
+    /// "Win+Oem4" → "Win+[", "Ctrl+Oem6" → "Ctrl+]", etc. The settings value stays the same;
+    /// only the menu display changes.
+    /// </summary>
+    private static string PrettifyHotkey(string binding)
+    {
+        var parts = binding.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (int i = 0; i < parts.Length; i++)
+        {
+            parts[i] = parts[i].ToLowerInvariant() switch
+            {
+                "oem3" or "backtick" or "tilde" => "`",
+                "oem1" or "oemsemicolon" or "semicolon" => ";",
+                "oem2" or "oemquestion" or "slash" => "/",
+                "oem4" or "oemopenbrackets" or "openbracket" => "[",
+                "oem5" or "oempipe" or "backslash" => "\\",
+                "oem6" or "oemclosebrackets" or "closebracket" => "]",
+                "oem7" or "oemquotes" or "quote" => "'",
+                "oemplus" or "plus" => "=",
+                "oemminus" or "minus" => "-",
+                "oemcomma" or "comma" => ",",
+                "oemperiod" or "period" => ".",
+                _ => parts[i]   // unchanged — letters, F-keys, arrows etc. stay readable
+            };
+        }
+        return string.Join("+", parts);
+    }
+
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+
+    /// <summary>Right-click menu for the synthetic "?" unresolved button.</summary>
+    private void BuildUnresolvedContextMenu()
+    {
+        var (_, count, tip) = _sessionState?.GetAggregate(SessionState.UnresolvedDesktopId) ?? default;
+        _contextMenu.Items.Add(new ToolStripMenuItem($"— {count} unresolved session{(count == 1 ? "" : "s")} —") { Enabled = false });
+        if (!string.IsNullOrEmpty(tip))
+        {
+            foreach (var line in tip.Split('\n'))
+                _contextMenu.Items.Add(new ToolStripMenuItem(line) { Enabled = false });
+        }
+        _contextMenu.Items.Add(new ToolStripSeparator());
+        _contextMenu.Items.Add("Open diagnostic log...", null, (_, _) => OpenDiagnosticLog());
+        _contextMenu.Items.Add("Clear all unresolved", null, (_, _) =>
+        {
+            _sessionState?.ClearUnresolved();
+        });
+    }
+
+    /// <summary>Open %APPDATA%\DesktopNames\desktopnames.log in the user's default editor.</summary>
+    private static void OpenDiagnosticLog()
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "DesktopNames", "desktopnames.log");
+        try
+        {
+            if (!File.Exists(path))
+            {
+                MessageBox.Show($"No log yet at:\n{path}\n\nEnable Settings.AlertLogEnabled and trigger an alert first.",
+                    "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{path}\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Could not open log: " + ex.Message, "DesktopNames",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void PromptNotes(DesktopInfo d)
+    {
+        var existing = _settings.GetDesktopNote(d.Id);
+
+        // Anchor above the right-clicked button on this overlay. Fall back to the
+        // overlay's own screen rect if the button can't be found (shouldn't happen).
+        Rectangle anchorScreen = RectangleToScreen(ClientRectangle);
+        foreach (var btn in _buttons)
+        {
+            if (btn.Desktop.Id == d.Id)
+            {
+                anchorScreen = RectangleToScreen(btn.Bounds);
+                break;
+            }
+        }
+
+        var note = NotesDialog.Show("Notes", $"What are you working on at \"{d.Name}\"?", existing, anchorScreen);
+        if (note != null) _settings.SetDesktopNote(d.Id, note);
+    }
+
     private void PromptRename(DesktopInfo desktop)
     {
+        // Prefer the anchored inline popup (same one double-click and Win+Ins use). The
+        // screen-centered InputDialog could land on the wrong monitor and become a stuck
+        // invisible modal — see DN incident log 2026-05-20.
+        foreach (var btn in _buttons)
+        {
+            if (btn.Desktop.Id == desktop.Id)
+            {
+                BeginInlineRename(btn);
+                return;
+            }
+        }
+        // Fallback when the desktop isn't represented on this overlay (rare — e.g. a
+        // global "Rename current desktop..." invoked while the current desktop is hidden).
         var newName = InputDialog.Show("Rename desktop", $"Rename \"{desktop.Name}\" to:", desktop.Name);
         if (!string.IsNullOrWhiteSpace(newName) && newName != desktop.Name)
             _desktopService.RenameDesktop(desktop.Id, newName);
@@ -253,6 +504,24 @@ internal sealed class TaskbarOverlay : Form
     {
         var newDesktops = _desktopService.GetDesktops();
 
+        // Append the synthetic "?" entry at the end of the list when there are sessions
+        // DN couldn't bind to any real desktop. The button is virtual (no real desktop)
+        // and clicking it opens the log; hover lists the unresolved sessions.
+        if (_sessionState != null)
+        {
+            var (s, _, _) = _sessionState.GetAggregate(SessionState.UnresolvedDesktopId);
+            if (s != StateKind.None)
+            {
+                newDesktops.Add(new DesktopInfo
+                {
+                    Index = int.MaxValue,
+                    Id = SessionState.UnresolvedDesktopId,
+                    Name = "?",
+                    IsCurrent = false
+                });
+            }
+        }
+
         // Resolve current desktop for settings-based visibility checks
         var currentDesktop = newDesktops.FirstOrDefault(d => d.IsCurrent);
         bool hiddenByCurrentDesktop = currentDesktop != null && _settings.IsDesktopHidden(currentDesktop.Id);
@@ -286,16 +555,16 @@ internal sealed class TaskbarOverlay : Form
             _desktops = newDesktops;
             RecalculateLayout();
             RepositionOnTaskbar();
-            Invalidate();
         }
 
-        // Also check theme
+        // Always repaint while visible. This catches settings-only changes that don't
+        // shift the layout but do change pixels — dormant toggle (italic), hidden-on-this
+        // toggle, dark-mode flip, etc. Invalidate is cheap (just marks the form dirty).
+        Invalidate();
+
+        // Theme change still tracked so future paints pick up the new colors.
         bool dark = DetectDarkMode();
-        if (dark != _isDarkMode)
-        {
-            _isDarkMode = dark;
-            Invalidate();
-        }
+        if (dark != _isDarkMode) _isDarkMode = dark;
     }
 
     private bool IsFullscreenOnMonitor()
@@ -371,9 +640,14 @@ internal sealed class TaskbarOverlay : Form
         return false;
     }
 
-    private static string GetButtonLabel(DesktopInfo desktop)
+    private string GetButtonLabel(DesktopInfo desktop, string? glyph = null)
     {
-        return $"{desktop.Index + 1}. {desktop.Name}";
+        if (desktop.Id == SessionState.UnresolvedDesktopId) return "?";
+        // The glyph replaces the period between number and name when a session state is
+        // active on this desktop. E.g. "3. Mobilität" → "3? Mobilität" when asking,
+        // "3E Mobilität" when running Edit, etc.
+        string sep = string.IsNullOrEmpty(glyph) ? "." : glyph!;
+        return $"{desktop.Index + 1}{sep} {desktop.Name}";
     }
 
     private void RecalculateLayout()
@@ -384,11 +658,17 @@ internal sealed class TaskbarOverlay : Form
         // Each button is half the taskbar height so two rows fit stacked.
         int buttonHeight = Math.Max(stripHeight / 2, 14);
 
-        // Measure each label's width (height is fixed at buttonHeight).
+        // Measure each label at its *current* width — the actual glyph (or "." when idle),
+        // not a worst-case placeholder. Reserving for the widest glyph left a visible sliver
+        // of slack on every button; with centered text that slack split to both sides and read
+        // as wide gaps. A button is re-laid-out when its glyph changes (InvalidateForDesktop
+        // detects the label-width change), so a wider glyph never overflows.
         var widths = new List<int>(_desktops.Count);
+        var labels = new List<string>(_desktops.Count);
         foreach (var desktop in _desktops)
         {
-            string label = GetButtonLabel(desktop);
+            string label = GetButtonLabel(desktop, _sessionState?.GetGlyph(desktop.Id));
+            labels.Add(label);
             var textSize = TextRenderer.MeasureText(label, ButtonFontBold,
                 new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
             widths.Add(textSize.Width + ButtonPaddingH * 2);
@@ -412,6 +692,7 @@ internal sealed class TaskbarOverlay : Form
             _buttons.Add(new DesktopButton
             {
                 Desktop = _desktops[i],
+                LaidOutLabel = labels[i],
                 Bounds = new Rectangle(xStart, y, w, buttonHeight)
             });
 
@@ -486,34 +767,169 @@ internal sealed class TaskbarOverlay : Form
             var rect = btn.Bounds;
             var desktop = btn.Desktop;
             bool isHovered = i == _hoveredIndex;
-            string label = GetButtonLabel(desktop);
 
-            // Background - always draw for active/hovered, gives pill-shaped button look
-            if (desktop.IsCurrent || isHovered)
+            var (stateKind, stateCount, _) = _sessionState?.GetAggregate(desktop.Id) ?? default;
+            Color? stateBg = stateKind == StateKind.None
+                ? null
+                : ApplyPulse(ResolveStateBaseColor(stateKind), desktop.Id, stateKind);
+            string? glyph = _sessionState?.GetGlyph(desktop.Id);
+            string label = GetButtonLabel(desktop, glyph);
+
+            // Manual blue marker the user toggled on this desktop. A live Claude status color
+            // still wins (an "asking" signal must never be hidden), but otherwise the blue
+            // shows over the plain active/hover pill.
+            Color? manualBg = (stateBg == null && _settings.IsDesktopHighlighted(desktop.Id))
+                ? ParseColorOrFallback(_settings.AlertHighlightColor, Color.FromArgb(91, 155, 213))
+                : null;
+
+            // Background. State color wins over manual/active/hover so the indicator is
+            // unmistakable. Without state, the manual marker wins over the active/hover pill.
+            Color? bg = stateBg ?? manualBg ?? (desktop.IsCurrent ? activeBgColor
+                                   : isHovered ? hoverBgColor
+                                   : (Color?)null);
+            if (bg.HasValue)
             {
-                using var bgBrush = new SolidBrush(desktop.IsCurrent ? activeBgColor : hoverBgColor);
+                using var bgBrush = new SolidBrush(bg.Value);
                 using var path = RoundedRect(rect, ButtonRadius);
                 g.FillPath(bgBrush, path);
             }
 
-            // Active desktop underline indicator
+            // Active desktop underline indicator — still drawn over state color so the
+            // user can see which desktop is current even when colored. Full width of the
+            // button minus a few px of inset so it reads as "this whole cell is active".
             if (desktop.IsCurrent)
             {
-                int indicatorWidth = Math.Min(rect.Width - 16, 20);
-                int indicatorX = rect.X + (rect.Width - indicatorWidth) / 2;
+                const int inset = 4;
+                int indicatorWidth = Math.Max(rect.Width - inset * 2, 8);
+                int indicatorX = rect.X + inset;
                 int indicatorY = rect.Bottom - 3;
                 using var indicatorBrush = new SolidBrush(activeIndicatorColor);
                 using var indicatorPath = RoundedRect(new Rectangle(indicatorX, indicatorY, indicatorWidth, 3), 1);
                 g.FillPath(indicatorBrush, indicatorPath);
             }
 
-            // Text
-            var font = desktop.IsCurrent ? ButtonFontBold : ButtonFont;
-            var color = desktop.IsCurrent ? textColor : textDimColor;
+            // Text — when state-colored, text contrast comes from the state background
+            // (which is always saturated), so we use the bold text color regardless.
+            bool bold = desktop.IsCurrent || stateBg.HasValue || manualBg.HasValue;
+            var font = bold ? ButtonFontBold : ButtonFont;
+            var color = (stateBg ?? manualBg) is Color fill ? PickContrastText(fill)
+                       : desktop.IsCurrent ? textColor : textDimColor;
             TextRenderer.DrawText(g, label, font, rect, color,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+
+            // Count badge (top-right) when more than one session shares the dominant state.
+            if (stateBg.HasValue && stateCount >= 2)
+            {
+                DrawCountBadge(g, rect, stateCount);
+            }
+
+            // Drop-target ring while a session is being dragged over this button.
+            if (_dropHighlightDesktop == desktop.Id)
+            {
+                using var ringPen = new Pen(activeIndicatorColor, 2f);
+                using var ringPath = RoundedRect(Rectangle.Inflate(rect, -1, -1), ButtonRadius);
+                g.DrawPath(ringPen, ringPath);
+            }
+
+            // Source button is dimmed while it's being dragged to a new slot.
+            if (_reordering && i == _dragCandidateButton)
+            {
+                using var dimBrush = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
+                using var dimPath = RoundedRect(rect, ButtonRadius);
+                g.FillPath(dimBrush, dimPath);
+            }
+
+            // Activity glyph is now inline in the label (above) — replaces the "." between
+            // desktop number and name. No corner badge.
         }
+
+        // Reorder insertion indicator: a fat blue bar at the seam where the source would land.
+        if (_reordering && _dropInsertionIndex >= 0 && _buttons.Count > 0)
+        {
+            Rectangle ind;
+            if (_dropInsertionIndex >= _buttons.Count)
+            {
+                var last = _buttons[_buttons.Count - 1].Bounds;
+                ind = new Rectangle(last.Right - 2, last.Top, 4, last.Height);
+            }
+            else
+            {
+                var b = _buttons[_dropInsertionIndex].Bounds;
+                ind = new Rectangle(b.Left - 2, b.Top, 4, b.Height);
+            }
+            using var brush = new SolidBrush(activeIndicatorColor);
+            g.FillRectangle(brush, ind);
+        }
+    }
+
+    private Color ResolveStateBaseColor(StateKind state) => state switch
+    {
+        StateKind.Asking => SafeFromHtml(_settings.AlertAskingColor, Color.FromArgb(255, 230, 128)),
+        StateKind.Busy   => SafeFromHtml(_settings.AlertBusyColor,   Color.FromArgb(244, 180, 131)),
+        StateKind.Error  => SafeFromHtml(_settings.AlertErrorColor,  Color.FromArgb(224, 133, 133)),
+        StateKind.Ready  => SafeFromHtml(_settings.AlertReadyColor,  Color.FromArgb(168, 216, 176)),
+        _ => Color.Gray
+    };
+
+    /// <summary>
+    /// Adds fast-pulse (2.5s post-change, up to +25% brighter) and asking-breathe
+    /// (continuous ±15%) to the base color. Both no-op when AlertPulseEnabled = false
+    /// or AlertPulse is null.
+    /// </summary>
+    private Color ApplyPulse(Color baseColor, Guid desktopId, StateKind state)
+    {
+        if (_alertPulse == null) return baseColor;
+        double fast = _alertPulse.GetFastPulseIntensity(desktopId);
+        double breathe = _alertPulse.GetBreatheIntensity(state);
+        // fast in [0..1] brightens by up to 25%. breathe in [-1..1] shifts by up to 15%.
+        double t = fast * 0.25 + breathe * 0.15;
+        if (Math.Abs(t) < 0.001) return baseColor;
+        return t > 0 ? LerpToward(baseColor, Color.White, t)
+                     : LerpToward(baseColor, Color.Black, -t);
+    }
+
+    private static Color SafeFromHtml(string html, Color fallback)
+    {
+        try { return ColorTranslator.FromHtml(html); }
+        catch { return fallback; }
+    }
+
+    /// <summary>Shared helper so the tray legend renders the same colors the overlay paints.</summary>
+    public static Color ParseColorOrFallback(string html, Color fallback) => SafeFromHtml(html, fallback);
+
+    private static Color LerpToward(Color a, Color b, double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        return Color.FromArgb(
+            255,
+            (int)(a.R + (b.R - a.R) * t),
+            (int)(a.G + (b.G - a.G) * t),
+            (int)(a.B + (b.B - a.B) * t));
+    }
+
+    /// <summary>Pick black or white text based on the perceived brightness of the background.</summary>
+    private static Color PickContrastText(Color bg)
+    {
+        // ITU-R BT.601 luma: works well for our saturated-color palette.
+        double luma = (0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B) / 255.0;
+        return luma > 0.55 ? Color.FromArgb(20, 20, 20) : Color.White;
+    }
+
+    private static void DrawCountBadge(Graphics g, Rectangle btnRect, int count)
+    {
+        const int diameter = 14;
+        var badgeRect = new Rectangle(btnRect.Right - diameter - 2, btnRect.Top + 2, diameter, diameter);
+        using var bg = new SolidBrush(Color.FromArgb(220, 30, 30, 30));
+        g.FillEllipse(bg, badgeRect);
+        using var ring = new Pen(Color.FromArgb(220, 255, 255, 255), 1f);
+        g.DrawEllipse(ring, badgeRect);
+
+        var text = count > 9 ? "9+" : count.ToString();
+        using var f = new Font("Segoe UI Variable Text", 7.5f, FontStyle.Bold);
+        TextRenderer.DrawText(g, text, f, badgeRect, Color.White,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     }
 
     private static GraphicsPath RoundedRect(Rectangle rect, int radius)
@@ -528,8 +944,74 @@ internal sealed class TaskbarOverlay : Form
         return path;
     }
 
+    /// <summary>Remember a left-press on any (real) desktop button. The same press can
+    /// resolve into three different gestures depending on what happens next: a quick release
+    /// switches desktops, movement begins a reorder drag, holding ~400ms opens the session
+    /// flyout (lit desktops only).</summary>
+    private void OnMouseDown(object? sender, MouseEventArgs e)
+    {
+        _dragCandidateButton = -1;
+        _longPressTimer.Stop();
+        if (e.Button != MouseButtons.Left) return;
+        for (int i = 0; i < _buttons.Count; i++)
+        {
+            if (!_buttons[i].Bounds.Contains(e.Location)) continue;
+            var d = _buttons[i].Desktop;
+            if (d.Id == SessionState.UnresolvedDesktopId) break;     // synthetic "?" — never a source
+            _dragCandidateButton = i;
+            _dragCandidatePoint = e.Location;
+            _longPressTimer.Start();
+            break;
+        }
+    }
+
+    /// <summary>Long-press fired without movement: open the session flyout on a lit desktop.
+    /// On unlit (no sessions to reassign), the timer is a no-op and the press can still resolve
+    /// into a click or a reorder.</summary>
+    private void OnLongPressTick(object? sender, EventArgs e)
+    {
+        _longPressTimer.Stop();
+        if (_reordering) return;
+        if (_dragCandidateButton < 0 || _dragCandidateButton >= _buttons.Count) return;
+        if (_sessionState == null) return;
+        var btn = _buttons[_dragCandidateButton];
+        var (state, _, _) = _sessionState.GetAggregate(btn.Desktop.Id);
+        if (state == StateKind.None) return;     // nothing to reassign — fall through to click
+        _dragCandidateButton = -1;
+        _dragSuppressClick = true;
+        _singleClickTimer.Stop();
+        _pendingSingleClickAction = null;
+        OpenReassignFlyout(btn.Desktop, RectangleToScreen(btn.Bounds));
+    }
+
     private void OnMouseMove(object? sender, MouseEventArgs e)
     {
+        // Press-and-drag begins a reorder. Long-press timer (if pending) gets cancelled here
+        // so a moving press never spawns the flyout.
+        if (e.Button == MouseButtons.Left && _dragCandidateButton >= 0 && _dragCandidateButton < _buttons.Count)
+        {
+            if (!_reordering)
+            {
+                var dz = SystemInformation.DragSize;
+                if (Math.Abs(e.X - _dragCandidatePoint.X) > dz.Width / 2 ||
+                    Math.Abs(e.Y - _dragCandidatePoint.Y) > dz.Height / 2)
+                {
+                    _longPressTimer.Stop();
+                    _reordering = true;
+                    _dragSuppressClick = true;
+                    _singleClickTimer.Stop();
+                    _pendingSingleClickAction = null;
+                    Capture = true;
+                }
+            }
+            if (_reordering)
+            {
+                int ins = ComputeInsertionIndex(e.Location);
+                if (ins != _dropInsertionIndex) { _dropInsertionIndex = ins; Invalidate(); }
+            }
+            return;
+        }
+
         int newHover = -1;
         for (int i = 0; i < _buttons.Count; i++)
         {
@@ -544,7 +1026,61 @@ internal sealed class TaskbarOverlay : Form
         {
             _hoveredIndex = newHover;
             Cursor = newHover >= 0 ? Cursors.Hand : Cursors.Default;
+            UpdateStateTooltip(newHover);
             Invalidate();
+        }
+    }
+
+    /// <summary>Show note + state on hover. Tooltip is hidden when both are empty.</summary>
+    private void UpdateStateTooltip(int hoveredIndex)
+    {
+        if (hoveredIndex < 0 || hoveredIndex >= _buttons.Count)
+        {
+            _stateTooltip.Hide(this);
+            _lastTooltipDesktop = Guid.Empty;
+            return;
+        }
+        var btn = _buttons[hoveredIndex];
+        if (btn.Desktop.Id == _lastTooltipDesktop) return; // already showing for this desktop
+
+        string text = BuildTooltipText(btn.Desktop.Id);
+        if (text.Length == 0)
+        {
+            _stateTooltip.Hide(this);
+            _lastTooltipDesktop = Guid.Empty;
+            return;
+        }
+        _lastTooltipDesktop = btn.Desktop.Id;
+        _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, 5000);
+    }
+
+    /// <summary>Combine the desktop note (if any) and Claude state tooltip (if any) into one string.</summary>
+    private string BuildTooltipText(Guid desktopId)
+    {
+        var note = _settings.GetDesktopNote(desktopId);
+        string stateTip = "";
+        if (_sessionState != null)
+        {
+            var (state, _, tip) = _sessionState.GetAggregate(desktopId);
+            if (state != StateKind.None) stateTip = tip;
+        }
+        if (note.Length == 0 && stateTip.Length == 0) return "";
+        if (note.Length == 0) return stateTip;
+        if (stateTip.Length == 0) return note;
+        return note + "\n\n" + stateTip;
+    }
+
+    /// <summary>Show the per-desktop tooltip programmatically (e.g. after switching desktops).</summary>
+    public void ShowDesktopTooltipFor(Guid desktopId, int durationMs)
+    {
+        foreach (var btn in _buttons)
+        {
+            if (btn.Desktop.Id != desktopId) continue;
+            string text = BuildTooltipText(desktopId);
+            if (text.Length == 0) return;
+            _lastTooltipDesktop = desktopId;
+            _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, durationMs);
+            return;
         }
     }
 
@@ -563,6 +1099,36 @@ internal sealed class TaskbarOverlay : Form
         }
 
         if (e.Button != MouseButtons.Left) return;
+
+        // Reorder drag completed — move the source desktop to the drop slot.
+        if (_reordering)
+        {
+            int sourceIdx = _dragCandidateButton >= 0 && _dragCandidateButton < _buttons.Count
+                ? _buttons[_dragCandidateButton].Desktop.Index : -1;
+            Guid sourceId = sourceIdx >= 0 ? _buttons[_dragCandidateButton].Desktop.Id : Guid.Empty;
+            int insertion = _dropInsertionIndex;
+            _reordering = false;
+            _dropInsertionIndex = -1;
+            _dragCandidateButton = -1;
+            _dragSuppressClick = false;
+            Capture = false;
+            Invalidate();
+
+            if (insertion >= 0 && sourceId != Guid.Empty)
+            {
+                // MoveDesktop is final-index semantics; adjust for the removal of the source
+                // when the drop is to the right of where it started.
+                int finalIdx = insertion > sourceIdx ? insertion - 1 : insertion;
+                if (finalIdx != sourceIdx)
+                    _desktopService.MoveDesktopToIndex(sourceId, finalIdx);
+            }
+            return;
+        }
+
+        // A long-press opened the reassign flyout — swallow this release so it doesn't switch desktop.
+        if (_dragSuppressClick) { _dragSuppressClick = false; _dragCandidateButton = -1; return; }
+        _longPressTimer.Stop();
+        _dragCandidateButton = -1;
         // Second click of a double-click: ignore here, MouseDoubleClick handles it.
         if (e.Clicks >= 2) return;
 
@@ -571,6 +1137,14 @@ internal sealed class TaskbarOverlay : Form
             if (_buttons[i].Bounds.Contains(e.Location))
             {
                 var desktop = _buttons[i].Desktop;
+
+                // The "?" virtual button: open the diagnostic log instead of switching.
+                if (desktop.Id == SessionState.UnresolvedDesktopId)
+                {
+                    OpenDiagnosticLog();
+                    break;
+                }
+
                 if (!desktop.IsCurrent)
                 {
                     // Defer the switch by the system double-click time so that a
@@ -595,6 +1169,59 @@ internal sealed class TaskbarOverlay : Form
         }
     }
 
+    /// <summary>Open the per-desktop session flyout — the drag source for reassigning
+    /// individual sessions. Anchored to the button on this overlay; replaces any open flyout.</summary>
+    private void OpenReassignFlyout(DesktopInfo desktop, Rectangle anchorScreen)
+    {
+        if (_sessionState == null) return;
+        var sessions = _sessionState.GetSessions(desktop.Id);
+        if (sessions.Count == 0) return;
+        _flyout?.Close();
+        _flyout = new SessionFlyout(desktop, sessions, anchorScreen, _isDarkMode);
+        _flyout.FormClosed += (_, _) => _flyout = null;
+        _flyout.Show();
+    }
+
+    /// <summary>Ring the given desktop's button as a drop target (null clears). Driven by the
+    /// reassign flyout while a session is being dragged over this overlay.</summary>
+    public void SetDropHighlight(Guid? desktopId)
+    {
+        if (_dropHighlightDesktop == desktopId) return;
+        _dropHighlightDesktop = desktopId;
+        if (!IsDisposed) Invalidate();
+    }
+
+    /// <summary>During a reorder drag, the slot the source would land in if released now.
+    /// Returns the 0..N index in the rendered list (0 = first slot, N = past last). -1 when
+    /// the cursor isn't over any button.</summary>
+    private int ComputeInsertionIndex(Point clientPt)
+    {
+        for (int i = 0; i < _buttons.Count; i++)
+        {
+            var b = _buttons[i].Bounds;
+            if (!b.Contains(clientPt)) continue;
+            if (_buttons[i].Desktop.Id == SessionState.UnresolvedDesktopId) return -1;
+            int mid = b.Left + b.Width / 2;
+            return clientPt.X < mid ? i : i + 1;
+        }
+        return -1;
+    }
+
+    /// <summary>Map a screen point to the real desktop whose button contains it, or null
+    /// (the synthetic "?" button is never a drop target).</summary>
+    public DesktopInfo? DesktopAtScreenPoint(Point screenPt)
+    {
+        if (IsDisposed || !Visible) return null;
+        var client = PointToClient(screenPt);
+        foreach (var btn in _buttons)
+        {
+            if (!btn.Bounds.Contains(client)) continue;
+            if (btn.Desktop.Id == SessionState.UnresolvedDesktopId) return null;
+            return btn.Desktop;
+        }
+        return null;
+    }
+
     private static bool DetectDarkMode()
     {
         try
@@ -609,8 +1236,12 @@ internal sealed class TaskbarOverlay : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        _flyout?.Close();
         _refreshTimer.Stop();
         _refreshTimer.Dispose();
+        _longPressTimer.Stop();
+        _longPressTimer.Dispose();
+        _stateTooltip.Dispose();
         base.OnFormClosing(e);
     }
 
@@ -618,5 +1249,8 @@ internal sealed class TaskbarOverlay : Form
     {
         public DesktopInfo Desktop { get; set; } = null!;
         public Rectangle Bounds { get; set; }
+        /// <summary>The label this button's width was measured for. When the live label differs
+        /// (a glyph appeared/changed), the strip must relayout so the wider text doesn't clip.</summary>
+        public string LaidOutLabel { get; set; } = "";
     }
 }

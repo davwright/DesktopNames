@@ -40,6 +40,35 @@ internal sealed class VsCodeTracker : IDisposable
         _timer.Dispose();
     }
 
+    /// <summary>
+    /// Move every currently-open VS Code workspace window to the desktop last remembered for
+    /// it in <see cref="Settings.VsCodeWorkspaceDesktops"/> (which the passive scan keeps in
+    /// sync with real window positions). Backs the overlay's "Move all VS Code windows to
+    /// remembered desktops" command. Best-effort per window; returns the number actually moved.
+    /// </summary>
+    public int MoveAllToRemembered()
+    {
+        int moved = 0;
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+
+            var clsBuf = new char[64];
+            int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
+            if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
+
+            string? workspace = ExtractWorkspace(GetWindowTitle(hwnd));
+            if (workspace == null) return true;
+            if (!_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved)) return true;
+            if (saved.DesktopId == Guid.Empty) return true;
+
+            if (_desktop.GetDesktopForWindow(hwnd) == saved.DesktopId) return true; // already there
+            if (_desktop.MoveWindowToDesktop(hwnd, saved.DesktopId)) moved++;
+            return true;
+        }, IntPtr.Zero);
+        return moved;
+    }
+
     private void Scan()
     {
         bool dirty = false;
@@ -74,7 +103,15 @@ internal sealed class VsCodeTracker : IDisposable
                 _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
             {
                 if (saved.DesktopId != Guid.Empty && saved.DesktopId != currentDesktop)
-                    _desktop.MoveWindowToDesktop(hwnd, saved.DesktopId);
+                {
+                    // Re-sync currentDesktop on success so the UpdateEntry below records the
+                    // post-move location, not the stale pre-move one. Without this, the saved
+                    // binding gets clobbered with whatever desktop VS Code happened to restore
+                    // the window on, and every Claude hook firing in the ~2s before the next
+                    // scan resolves to the wrong place (and gets cemented into learned-paths).
+                    if (_desktop.MoveWindowToDesktop(hwnd, saved.DesktopId))
+                        currentDesktop = saved.DesktopId;
+                }
                 if (saved.MonitorDeviceId != null || saved.MonitorWidth > 0)
                     _desktop.MoveWindowToMonitor(hwnd, saved);
                 if (saved.WindowWidth > 0 || saved.WindowHeight > 0 || saved.WindowMaximized)
@@ -138,6 +175,69 @@ internal sealed class VsCodeTracker : IDisposable
         return sb.ToString();
     }
 
+    // Cache of VSCode profile names — when the user is on a non-default profile, VSCode
+    // inserts the profile name as an extra title segment ("<file> - <workspace> - <profile>
+    // - Visual Studio Code"). Without this list we'd take the profile name as the workspace
+    // and miss the real rootName entirely. Source: %APPDATA%\Code\User\globalStorage\storage.json
+    // → userDataProfiles[].name. Refreshed every couple of minutes.
+    private static readonly HashSet<string> KnownProfileNames = new(StringComparer.Ordinal);
+    private static DateTime _profileScanUtc = DateTime.MinValue;
+    private static readonly TimeSpan ProfileScanCooldown = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Strip the trailing profile-name segment from a title stripped of its app suffix.
+    /// Matches the LONGEST suffix that equals a known profile name, so profile names with
+    /// embedded " - " separators are handled correctly (e.g. profile "Dev - Test" against
+    /// title "...workspace - Dev - Test"). Returns the input unchanged if no profile matches.
+    /// </summary>
+    private static string StripTrailingProfile(string stripped)
+    {
+        if (KnownProfileNames.Count == 0) return stripped;
+
+        // Walk back from the end of the string finding " - " positions. At each position,
+        // the suffix beyond it is a candidate profile name. Pick the longest match.
+        int bestCutAt = -1;
+        int searchEnd = stripped.Length;
+        while (true)
+        {
+            int dash = stripped.LastIndexOf(" - ", searchEnd - 1, searchEnd, StringComparison.Ordinal);
+            if (dash < 0) break;
+            string candidate = stripped[(dash + 3)..];
+            if (KnownProfileNames.Contains(candidate))
+            {
+                bestCutAt = dash; // longer candidates are reached as we walk left
+            }
+            searchEnd = dash;
+        }
+        return bestCutAt >= 0 ? stripped[..bestCutAt] : stripped;
+    }
+
+    private static void EnsureProfileCacheFresh()
+    {
+        if (DateTime.UtcNow - _profileScanUtc < ProfileScanCooldown) return;
+        _profileScanUtc = DateTime.UtcNow;
+        try
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Code", "User", "globalStorage", "storage.json");
+            if (!File.Exists(path)) return;
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            if (!doc.RootElement.TryGetProperty("userDataProfiles", out var profiles)) return;
+            if (profiles.ValueKind != System.Text.Json.JsonValueKind.Array) return;
+            KnownProfileNames.Clear();
+            foreach (var p in profiles.EnumerateArray())
+            {
+                if (p.TryGetProperty("name", out var n))
+                {
+                    var name = n.GetString();
+                    if (!string.IsNullOrEmpty(name)) KnownProfileNames.Add(name);
+                }
+            }
+        }
+        catch { /* leave cache as-is on failure */ }
+    }
+
     internal static string? ExtractWorkspace(string title)
     {
         if (string.IsNullOrEmpty(title)) return null;
@@ -152,8 +252,14 @@ internal sealed class VsCodeTracker : IDisposable
         }
         if (stripped == null) return null;
 
-        // VS Code default pattern: "${activeEditor} - ${rootName}"
-        // Take the part after the last " - " — that's the workspace.
+        // VS Code default title: "${activeEditor} - ${rootName}". On a non-default profile
+        // it becomes "${activeEditor} - ${rootName} - ${profileName}". Detect the trailing
+        // profile segment by matching against the user's known profile names. The match
+        // is longest-suffix-wins so profile names containing " - " (e.g. "Dev - Test") are
+        // handled — we try every increasingly-long suffix and strip the longest hit.
+        EnsureProfileCacheFresh();
+        stripped = StripTrailingProfile(stripped);
+
         int lastDash = stripped.LastIndexOf(" - ", StringComparison.Ordinal);
         var workspace = lastDash >= 0 ? stripped[(lastDash + 3)..] : stripped;
 

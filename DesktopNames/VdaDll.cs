@@ -117,6 +117,7 @@ internal static class VdaDll
     [DllImport(DLL_NAME)] public static extern void GoToDesktopNumber(int n);
     [DllImport(DLL_NAME)] public static extern int CreateDesktop();
     [DllImport(DLL_NAME)] public static extern void RemoveDesktop(int removeIdx, int fallbackIdx);
+    [DllImport(DLL_NAME)] public static extern int SetDesktopName(int desktopIndex, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     /// <summary>
     /// Read-only battery of calls that exercises the same vtable slots destructive
