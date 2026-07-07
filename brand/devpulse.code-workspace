@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../../../extensions/devpulse"
+		},
+		{
+			"path": ".."
+		}
+	],
+	"settings": {
+		"devpulse.organizationUrl": "https://dev.azure.com/oebb-azure-platform",
+		"devpulse.project": "osis",
+		"devpulse.jira.siteUrl": "https://evolit.atlassian.net",
+		"devpulse.jira.project": "OSIS",
+		"devpulse.jira.email": "david.wright@evolx.at"
+	}
+}

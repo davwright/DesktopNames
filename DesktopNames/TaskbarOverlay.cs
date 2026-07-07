@@ -20,8 +20,17 @@ internal sealed class TaskbarOverlay : Form
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _isDarkMode;
     private readonly ContextMenuStrip _contextMenu;
-    private readonly ToolTip _stateTooltip = new() { InitialDelay = 400, ReshowDelay = 100 };
+    private readonly ToolTip _stateTooltip = new() { InitialDelay = 400, ReshowDelay = 100, OwnerDraw = true };
     private Guid _lastTooltipDesktop = Guid.Empty;
+    // Owner-drawn so the Claude message line renders italic and the cwd dim. _tooltipText holds
+    // what's currently shown (set at every Show call) so Popup/Draw can measure and render it.
+    private string _tooltipText = "";
+    private readonly Font _ttFont = (Font)(SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont).Clone();
+    private Font _ttItalic = null!;
+    private static readonly TextFormatFlags TipFlags =
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+    private const int TipPad = 5;
+    private const int TipIndent = 14;
 
     // Reassign-drag state. Plain press-drag on any desktop button starts a *reorder* drag
     // (moves the desktop to the drop position via DesktopService.MoveDesktopToIndex). A
@@ -81,6 +90,10 @@ internal sealed class TaskbarOverlay : Form
         _refreshTimer.Tick += (_, _) => RefreshDesktops();
         _refreshTimer.Start();
 
+        _ttItalic = new Font(_ttFont, FontStyle.Italic);
+        _stateTooltip.Popup += OnTooltipPopup;
+        _stateTooltip.Draw += OnTooltipDraw;
+
         _contextMenu = new ContextMenuStrip();
         _contextMenu.Opening += (_, _) => BuildContextMenu();
 
@@ -128,6 +141,7 @@ internal sealed class TaskbarOverlay : Form
         {
             if (btn.Bounds.Contains(e.Location))
             {
+                if (btn.Desktop.Id == SessionState.UnresolvedDesktopId) break; // synthetic "?" — not renameable
                 BeginInlineRename(btn);
                 break;
             }
@@ -260,13 +274,21 @@ internal sealed class TaskbarOverlay : Form
             _contextMenu.Items.Add(clearItem);
 
             // Manual blue marker — a persistent user highlight, independent of Claude state.
+            // Turning it on also consumes any current Claude status, so a yellow "asking"
+            // desktop converts to blue in one click (no separate "Clear highlight" needed).
+            // The blue then clears itself when Claude's next status arrives on this desktop.
             var highlightItem = new ToolStripMenuItem("Blue highlight")
             {
                 Checked = _settings.IsDesktopHighlighted(d.Id),
                 CheckOnClick = false,
-                ToolTipText = "Mark this desktop blue until you toggle it off"
+                ToolTipText = "Mark blue (clears the current Claude colour); auto-clears on Claude's next status"
             };
-            highlightItem.Click += (_, _) => _settings.ToggleDesktopHighlight(d.Id);
+            highlightItem.Click += (_, _) =>
+            {
+                bool turningOn = !_settings.IsDesktopHighlighted(d.Id);
+                _settings.ToggleDesktopHighlight(d.Id);
+                if (turningOn) _sessionState?.Consume(d.Id);
+            };
             _contextMenu.Items.Add(highlightItem);
 
             var existingNote = _settings.GetDesktopNote(d.Id);
@@ -306,8 +328,8 @@ internal sealed class TaskbarOverlay : Form
 
         _contextMenu.Items.Add("New desktop  (Win+Ctrl+D)", null, (_, _) => _desktopService.CreateDesktop());
         _contextMenu.Items.Add("Close current desktop  (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
-        _contextMenu.Items.Add("Move all VS Code windows to remembered desktops", null,
-            (_, _) => Program.Host?.MoveAllVsCodeToRemembered());
+        _contextMenu.Items.Add("Arrange VS Code windows…", null,
+            (_, _) => Program.Host?.ShowArrangeWindowsDialog());
 
         // Global rename when no per-desktop section already covers it.
         if (_rightClickedDesktop == null)
@@ -390,11 +412,12 @@ internal sealed class TaskbarOverlay : Form
     /// <summary>Right-click menu for the synthetic "?" unresolved button.</summary>
     private void BuildUnresolvedContextMenu()
     {
-        var (_, count, tip) = _sessionState?.GetAggregate(SessionState.UnresolvedDesktopId) ?? default;
+        var (_, _, tip) = _sessionState?.GetAggregate(SessionState.UnresolvedDesktopId) ?? default;
+        int count = _sessionState?.LiveCount(SessionState.UnresolvedDesktopId) ?? 0;
         _contextMenu.Items.Add(new ToolStripMenuItem($"— {count} unresolved session{(count == 1 ? "" : "s")} —") { Enabled = false });
         if (!string.IsNullOrEmpty(tip))
         {
-            foreach (var line in tip.Split('\n'))
+            foreach (var line in SessionState.StripTipMarkers(tip).Split('\n'))
                 _contextMenu.Items.Add(new ToolStripMenuItem(line) { Enabled = false });
         }
         _contextMenu.Items.Add(new ToolStripSeparator());
@@ -502,6 +525,7 @@ internal sealed class TaskbarOverlay : Form
 
     public void RefreshDesktops()
     {
+        EnsurePinned();
         var newDesktops = _desktopService.GetDesktops();
 
         // Append the synthetic "?" entry at the end of the list when there are sessions
@@ -704,6 +728,26 @@ internal sealed class TaskbarOverlay : Form
         ClientSize = new Size(totalWidth, stripHeight);
     }
 
+    /// <summary>
+    /// Pin the overlay to every virtual desktop so it stays visible as the user switches
+    /// desktops. Replaces the old implicit "SetWindowPos re-pull" which recent Win11 builds
+    /// no longer honour (the window would get stuck on its home desktop — usually #1). Cheap
+    /// and idempotent: re-affirms only when the OS has dropped the pin (e.g. after a taskbar
+    /// or display-change rebuild gives us a fresh handle).
+    /// </summary>
+    private void EnsurePinned()
+    {
+        if (!VdaDll.IsLoaded || !IsHandleCreated) return;
+        try { if (VdaDll.IsPinnedWindow(Handle) == 0) VdaDll.PinWindow(Handle); }
+        catch { }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        EnsurePinned();
+    }
+
     private void RepositionOnTaskbar()
     {
         // Re-derive the taskbar strip from monitor work area each refresh,
@@ -768,7 +812,8 @@ internal sealed class TaskbarOverlay : Form
             var desktop = btn.Desktop;
             bool isHovered = i == _hoveredIndex;
 
-            var (stateKind, stateCount, _) = _sessionState?.GetAggregate(desktop.Id) ?? default;
+            var (stateKind, _, _) = _sessionState?.GetAggregate(desktop.Id) ?? default;
+            int liveCount = _sessionState?.LiveCount(desktop.Id) ?? 0;
             Color? stateBg = stateKind == StateKind.None
                 ? null
                 : ApplyPulse(ResolveStateBaseColor(stateKind), desktop.Id, stateKind);
@@ -818,10 +863,11 @@ internal sealed class TaskbarOverlay : Form
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
 
-            // Count badge (top-right) when more than one session shares the dominant state.
-            if (stateBg.HasValue && stateCount >= 2)
+            // Count badge (top-right) — total live sessions on this desktop (matches the
+            // flyout list), shown whenever more than one shares the colored button.
+            if (stateBg.HasValue && liveCount >= 2)
             {
-                DrawCountBadge(g, rect, stateCount);
+                DrawCountBadge(g, rect, liveCount);
             }
 
             // Drop-target ring while a session is being dragged over this button.
@@ -975,8 +1021,9 @@ internal sealed class TaskbarOverlay : Form
         if (_dragCandidateButton < 0 || _dragCandidateButton >= _buttons.Count) return;
         if (_sessionState == null) return;
         var btn = _buttons[_dragCandidateButton];
-        var (state, _, _) = _sessionState.GetAggregate(btn.Desktop.Id);
-        if (state == StateKind.None) return;     // nothing to reassign — fall through to click
+        // Open for any desktop that has sessions — including ones whose colour has cleared
+        // (all consumed). Those are exactly the stale leftovers the user wants to inspect/remove.
+        if (_sessionState.GetSessions(btn.Desktop.Id).Count == 0) return;
         _dragCandidateButton = -1;
         _dragSuppressClick = true;
         _singleClickTimer.Stop();
@@ -1051,6 +1098,7 @@ internal sealed class TaskbarOverlay : Form
             return;
         }
         _lastTooltipDesktop = btn.Desktop.Id;
+        _tooltipText = text;
         _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, 5000);
     }
 
@@ -1070,6 +1118,49 @@ internal sealed class TaskbarOverlay : Form
         return note + "\n\n" + stateTip;
     }
 
+    /// <summary>Split the current tooltip text into styled lines: the header regular, the
+    /// TipItalic-marked Claude message italic + indented, the TipDim-marked cwd dim + indented.</summary>
+    private IEnumerable<(string text, Font font, Color color, int indent)> TipLines()
+    {
+        foreach (var raw in _tooltipText.Split('\n'))
+        {
+            if (raw.Length == 0) { yield return ("", _ttFont, Color.Empty, 0); continue; }
+            if (raw[0] == SessionState.TipItalic)
+                yield return (raw[1..], _ttItalic, SystemColors.InfoText, TipIndent);
+            else if (raw[0] == SessionState.TipDim)
+                yield return (raw[1..], _ttFont, SystemColors.GrayText, TipIndent);
+            else
+                yield return (raw, _ttFont, SystemColors.InfoText, 0);
+        }
+    }
+
+    private void OnTooltipPopup(object? sender, PopupEventArgs e)
+    {
+        int w = 0, h = 0;
+        foreach (var (text, font, _, indent) in TipLines())
+        {
+            if (text.Length == 0) { h += font.Height / 2; continue; }
+            var sz = TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags);
+            w = Math.Max(w, sz.Width + indent);
+            h += sz.Height;
+        }
+        e.ToolTipSize = new Size(w + TipPad * 2, h + TipPad * 2);
+    }
+
+    private void OnTooltipDraw(object? sender, DrawToolTipEventArgs e)
+    {
+        e.DrawBackground();
+        e.DrawBorder();
+        int y = e.Bounds.Top + TipPad;
+        foreach (var (text, font, color, indent) in TipLines())
+        {
+            if (text.Length == 0) { y += font.Height / 2; continue; }
+            TextRenderer.DrawText(e.Graphics, text, font,
+                new Point(e.Bounds.Left + TipPad + indent, y), color, TipFlags);
+            y += TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags).Height;
+        }
+    }
+
     /// <summary>Show the per-desktop tooltip programmatically (e.g. after switching desktops).</summary>
     public void ShowDesktopTooltipFor(Guid desktopId, int durationMs)
     {
@@ -1079,6 +1170,7 @@ internal sealed class TaskbarOverlay : Form
             string text = BuildTooltipText(desktopId);
             if (text.Length == 0) return;
             _lastTooltipDesktop = desktopId;
+            _tooltipText = text;
             _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, durationMs);
             return;
         }
@@ -1138,10 +1230,12 @@ internal sealed class TaskbarOverlay : Form
             {
                 var desktop = _buttons[i].Desktop;
 
-                // The "?" virtual button: open the diagnostic log instead of switching.
+                // The "?" virtual button: open the reassign flyout listing the unmatched
+                // sessions so the user can drag each onto a real desktop. (The diagnostic
+                // log moves to the right-click menu.)
                 if (desktop.Id == SessionState.UnresolvedDesktopId)
                 {
-                    OpenDiagnosticLog();
+                    OpenReassignFlyout(desktop, RectangleToScreen(_buttons[i].Bounds));
                     break;
                 }
 
@@ -1242,6 +1336,8 @@ internal sealed class TaskbarOverlay : Form
         _longPressTimer.Stop();
         _longPressTimer.Dispose();
         _stateTooltip.Dispose();
+        _ttFont.Dispose();
+        _ttItalic.Dispose();
         base.OnFormClosing(e);
     }
 

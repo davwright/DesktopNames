@@ -119,6 +119,14 @@ internal static class VdaDll
     [DllImport(DLL_NAME)] public static extern void RemoveDesktop(int removeIdx, int fallbackIdx);
     [DllImport(DLL_NAME)] public static extern int SetDesktopName(int desktopIndex, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
+    // Window pinning — "show this window on every virtual desktop". Used to keep the taskbar
+    // overlay present as the user switches desktops, instead of relying on the (now-broken on
+    // recent Win11 builds) implicit re-pull when re-showing a window. Pin/UnPin return void in
+    // the upstream DLL; IsPinnedWindow returns 1/0. On x64 a return-type mismatch is harmless.
+    [DllImport(DLL_NAME)] public static extern void PinWindow(IntPtr hwnd);
+    [DllImport(DLL_NAME)] public static extern void UnPinWindow(IntPtr hwnd);
+    [DllImport(DLL_NAME)] public static extern int IsPinnedWindow(IntPtr hwnd);
+
     /// <summary>
     /// Read-only battery of calls that exercises the same vtable slots destructive
     /// operations would use. Caller uses the result to gate AutoMove on a fresh

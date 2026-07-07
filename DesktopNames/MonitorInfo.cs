@@ -1,5 +1,18 @@
 namespace DesktopNames;
 
+/// <summary>One physical monitor on the current setup, as enumerated by <see cref="MonitorRef.EnumerateAll"/>.</summary>
+internal sealed class MonitorDescriptor
+{
+    public IntPtr Handle { get; init; }
+    public string? DeviceId { get; init; }
+    public NativeMethods.RECT Monitor { get; init; }
+    public NativeMethods.RECT Work { get; init; }
+    public bool IsPrimary { get; init; }
+    public int X => Monitor.Left;
+    public int Width => Monitor.Right - Monitor.Left;
+    public int Height => Monitor.Bottom - Monitor.Top;
+}
+
 /// <summary>
 /// Identifies a physical monitor in two forms:
 ///   - <see cref="DeviceId"/>: hardware-stable identifier (from EnumDisplayDevices with
@@ -133,6 +146,38 @@ internal sealed class MonitorRef
         }, IntPtr.Zero);
 
         return matched != IntPtr.Zero ? matched : byRectFallback;
+    }
+
+    /// <summary>
+    /// Enumerate every physical monitor on the current setup, left-to-right by screen X.
+    /// Used by the "arrange windows" dialog to lay out the screen columns and to translate
+    /// a dropped cell back into a concrete target monitor.
+    /// </summary>
+    public static List<MonitorDescriptor> EnumerateAll()
+    {
+        var list = new List<MonitorDescriptor>();
+        NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+            (IntPtr hMon, IntPtr hdc, ref NativeMethods.RECT rc, IntPtr lp) =>
+        {
+            var mi = new NativeMethods.MONITORINFOEX
+            {
+                cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>()
+            };
+            if (NativeMethods.GetMonitorInfo(hMon, ref mi))
+            {
+                list.Add(new MonitorDescriptor
+                {
+                    Handle = hMon,
+                    DeviceId = ResolveDeviceId(mi.szDevice),
+                    Monitor = mi.rcMonitor,
+                    Work = mi.rcWork,
+                    IsPrimary = (mi.dwFlags & 1u) != 0   // MONITORINFOF_PRIMARY
+                });
+            }
+            return true;
+        }, IntPtr.Zero);
+        list.Sort((a, b) => a.Monitor.Left.CompareTo(b.Monitor.Left));
+        return list;
     }
 
     /// <summary>

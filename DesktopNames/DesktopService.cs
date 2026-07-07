@@ -134,6 +134,40 @@ internal sealed class DesktopService : IDisposable
             NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_ASYNCWINDOWPOS);
     }
 
+    /// <summary>
+    /// Maximize a window on a specific monitor, then move it to a virtual desktop. Used by the
+    /// arrange-windows dialog's OK. Done via SetWindowPlacement (no activation, works on windows
+    /// that currently live on another virtual desktop), seeding a sane restored rect inside the
+    /// target work area so un-maximizing later lands on the right screen. The desktop move runs
+    /// last so all the positioning happens while the window is still on the current desktop.
+    /// </summary>
+    public void MaximizeOnMonitorThenMoveToDesktop(IntPtr hwnd, NativeMethods.RECT work, Guid desktopId)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        try
+        {
+            var wp = new NativeMethods.WINDOWPLACEMENT
+            {
+                length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>()
+            };
+            if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
+            {
+                int l = work.Left + 80, t = work.Top + 60, r = work.Right - 80, b = work.Bottom - 60;
+                if (r <= l) { l = work.Left; r = work.Right; }
+                if (b <= t) { t = work.Top; b = work.Bottom; }
+                wp.rcNormalPosition.Left = l;
+                wp.rcNormalPosition.Top = t;
+                wp.rcNormalPosition.Right = r;
+                wp.rcNormalPosition.Bottom = b;
+                wp.showCmd = NativeMethods.SW_MAXIMIZE;
+                NativeMethods.SetWindowPlacement(hwnd, ref wp);
+            }
+        }
+        catch { }
+
+        if (desktopId != Guid.Empty) MoveWindowToDesktop(hwnd, desktopId);
+    }
+
     public Guid GetDesktopForWindow(IntPtr hwnd)
     {
         if (!VdaDll.IsLoaded || hwnd == IntPtr.Zero) return Guid.Empty;

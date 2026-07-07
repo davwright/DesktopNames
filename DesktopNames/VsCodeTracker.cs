@@ -69,6 +69,30 @@ internal sealed class VsCodeTracker : IDisposable
         return moved;
     }
 
+    /// <summary>One open VS Code workspace window and where it currently lives.</summary>
+    public readonly record struct OpenWindow(IntPtr Hwnd, string Workspace, Guid DesktopId, MonitorRef? Monitor);
+
+    /// <summary>
+    /// Snapshot every currently-open VS Code workspace window with its live desktop + monitor.
+    /// Backs the "arrange windows" dialog. Same window/title filter as <see cref="Scan"/>.
+    /// </summary>
+    public List<OpenWindow> EnumerateOpenWorkspaceWindows()
+    {
+        var result = new List<OpenWindow>();
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+            var clsBuf = new char[64];
+            int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
+            if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
+            string? workspace = ExtractWorkspace(GetWindowTitle(hwnd));
+            if (workspace == null) return true;
+            result.Add(new OpenWindow(hwnd, workspace, _desktop.GetDesktopForWindow(hwnd), MonitorRef.FromHwnd(hwnd)));
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
     private void Scan()
     {
         bool dirty = false;

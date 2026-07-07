@@ -19,10 +19,12 @@ internal sealed class SessionFlyout : Form
     private const int HeaderHeight = 20;
     private const int PadH = 10;
     private const int DotSize = 8;
+    private const int XColWidth = 24;   // right-hand column reserved for the remove "✕"
 
     private static readonly Font RowFont = new("Segoe UI Variable Text", 9.5f, FontStyle.Regular);
     private static readonly Font PathFont = new("Segoe UI Variable Text", 8f, FontStyle.Regular);
     private static readonly Font HeaderFont = new("Segoe UI Variable Text", 8.5f, FontStyle.Regular);
+    private static readonly Font XFont = new("Segoe UI", 10f, FontStyle.Regular);
 
     private readonly DesktopInfo _sourceDesktop;
     private readonly List<SessionState.SessionRef> _sessions;
@@ -30,7 +32,9 @@ internal sealed class SessionFlyout : Form
     private readonly System.Windows.Forms.Timer _closeTimer = new() { Interval = 2000 };
 
     private int _hoverRow = -1;
+    private int _hoverX = -1;     // row whose "✕" the cursor is over (-1 = none)
     private int _pressRow = -1;
+    private int _pressXRow = -1;  // row whose "✕" the press landed on (suppresses drag)
     private Point _pressPoint;
     private bool _dragging;
     private SessionState.SessionRef _dragRef;
@@ -96,21 +100,41 @@ internal sealed class SessionFlyout : Form
         base.WndProc(ref m);
     }
 
+    /// <summary>Header line. The synthetic unresolved bucket gets a friendlier label than its
+    /// raw "?" button name.</summary>
+    private string HeaderText => _sourceDesktop.Id == SessionState.UnresolvedDesktopId
+        ? "Unmatched sessions — drag onto a desktop"
+        : $"{_sourceDesktop.Name} — drag a session onto a desktop";
+
     private int ComputeWidth()
     {
         int textLeft = PadH + DotSize + 6;
-        int max = TextRenderer.MeasureText($"{_sourceDesktop.Name} — drag a session onto a desktop", HeaderFont).Width;
+        int max = TextRenderer.MeasureText(HeaderText, HeaderFont).Width;
         foreach (var s in _sessions)
         {
             int line1 = textLeft + TextRenderer.MeasureText(RowLabel(s), RowFont).Width + PadH;
             int line2 = textLeft + TextRenderer.MeasureText(SecondaryText(s), PathFont).Width + PadH;
             max = Math.Max(max, Math.Max(line1, line2));
         }
-        return Math.Clamp(max + PadH, 220, 640);
+        return Math.Clamp(max + PadH + XColWidth, 220, 640);
     }
 
     private static string RowLabel(SessionState.SessionRef s)
-        => $"{s.Label}   ({s.State.ToString().ToLowerInvariant()})";
+    {
+        string sid = s.SessionId.Length > 4 ? s.SessionId[..4] : s.SessionId;
+        return $"{s.Label}   ({sid} · {s.State.ToString().ToLowerInvariant()} · {SessionState.FormatAge(s.LastSeenUtc)})";
+    }
+
+    /// <summary>Square hit/draw region for a row's remove "✕", flush to the right edge.</summary>
+    private Rectangle XRectFor(int row)
+        => new(Width - XColWidth, HeaderHeight + row * RowHeight + (RowHeight - XColWidth) / 2,
+               XColWidth, XColWidth);
+
+    private int XHitAt(Point client)
+    {
+        int row = RowAt(client);
+        return row >= 0 && XRectFor(row).Contains(client) ? row : -1;
+    }
 
     /// <summary>Second line — the full working directory (the real disambiguator when many
     /// sessions share a generic leaf name like "validation" or "src"). Falls back to the
@@ -132,6 +156,7 @@ internal sealed class SessionFlyout : Form
     {
         if (e.Button != MouseButtons.Left) return;
         _pressRow = RowAt(e.Location);
+        _pressXRow = XHitAt(e.Location);
         _pressPoint = e.Location;
     }
 
@@ -145,7 +170,8 @@ internal sealed class SessionFlyout : Form
             return;
         }
 
-        if (e.Button == MouseButtons.Left && _pressRow >= 0)
+        // A press that started on the "✕" removes on release — never begins a drag.
+        if (e.Button == MouseButtons.Left && _pressRow >= 0 && _pressXRow < 0)
         {
             var dz = SystemInformation.DragSize;
             if (Math.Abs(e.X - _pressPoint.X) > dz.Width / 2 ||
@@ -157,12 +183,28 @@ internal sealed class SessionFlyout : Form
         }
 
         int row = RowAt(e.Location);
-        if (row != _hoverRow) { _hoverRow = row; Invalidate(); }
+        int xr = XHitAt(e.Location);
+        if (row != _hoverRow || xr != _hoverX)
+        {
+            _hoverRow = row;
+            _hoverX = xr;
+            Cursor = xr >= 0 ? Cursors.Hand : Cursors.Default;
+            Invalidate();
+        }
     }
 
     private void OnFlyoutMouseUp(object? sender, MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Left) return;
+
+        if (_pressXRow >= 0 && !_dragging)
+        {
+            int xTarget = _pressXRow;
+            _pressXRow = _pressRow = -1;
+            if (XHitAt(e.Location) == xTarget) RemoveSessionRow(xTarget);
+            return;
+        }
+
         if (!_dragging) { _pressRow = -1; return; }
 
         _dragging = false;
@@ -191,6 +233,19 @@ internal sealed class SessionFlyout : Form
         _ghost.MoveTo(Control.MousePosition);
     }
 
+    /// <summary>Dismiss one session's indicator and shrink the flyout; close when none remain.</summary>
+    private void RemoveSessionRow(int row)
+    {
+        if (row < 0 || row >= _sessions.Count) return;
+        var s = _sessions[row];
+        Program.Host?.RemoveSession(s.Source, s.SessionId);
+        _sessions.RemoveAt(row);
+        _hoverRow = _hoverX = -1;
+        if (_sessions.Count == 0) { Close(); return; }
+        Height = HeaderHeight + RowHeight * _sessions.Count + 6;
+        Invalidate();
+    }
+
     private static DesktopInfo? HitTestOverlays(Point screenPt)
     {
         if (Program.Host == null) return null;
@@ -217,7 +272,7 @@ internal sealed class SessionFlyout : Form
         using (var pen = new Pen(border)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
 
         var headerRect = new Rectangle(PadH, 0, Width - PadH * 2, HeaderHeight);
-        TextRenderer.DrawText(g, $"{_sourceDesktop.Name} — drag a session onto a desktop", HeaderFont,
+        TextRenderer.DrawText(g, HeaderText, HeaderFont,
             headerRect, dim, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
         for (int i = 0; i < _sessions.Count; i++)
@@ -236,7 +291,7 @@ internal sealed class SessionFlyout : Form
                 g.FillEllipse(dotBrush, dotRect);
 
             int textLeft = PadH + DotSize + 6;
-            int textWidth = Width - textLeft - PadH;
+            int textWidth = Width - textLeft - PadH - XColWidth;
             var line1 = new Rectangle(textLeft, rowRect.Top + 4, textWidth, 18);
             var line2 = new Rectangle(textLeft, rowRect.Top + 21, textWidth, 15);
             TextRenderer.DrawText(g, RowLabel(s), RowFont, line1, fg,
@@ -245,6 +300,10 @@ internal sealed class SessionFlyout : Form
             TextRenderer.DrawText(g, SecondaryText(s), PathFont, line2, dim,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix |
                 TextFormatFlags.PathEllipsis);
+
+            // Remove "✕" — dim by default, brightens to the foreground colour on hover.
+            TextRenderer.DrawText(g, "✕", XFont, XRectFor(i), i == _hoverX ? fg : dim,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
     }
 

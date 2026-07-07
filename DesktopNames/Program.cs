@@ -68,6 +68,24 @@ static class Program
         trayIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         trayIcon.ContextMenuStrip.Items.Add("Exit", null, (_, _) => hostForm.Close());
 
+        // Tray tooltip = version line + the most-recent hook events (newest first, live ages),
+        // so hovering the icon shows the dynamics. NotifyIcon.Text caps at 127 chars; add whole
+        // lines while they fit and crop the line that would overflow rather than chopping blind.
+        hostForm.RecentEventsChanged += () =>
+        {
+            const int Cap = 127;
+            var sb = new System.Text.StringBuilder($"DesktopNames v{GetAppVersion()}");
+            foreach (var line in hostForm.RecentEventLines())
+            {
+                int remaining = Cap - sb.Length - 1; // budget after the '\n'
+                if (remaining <= 1) break;
+                sb.Append('\n');
+                sb.Append(line.Length <= remaining ? line : line.Substring(0, remaining - 1) + "…");
+                if (line.Length > remaining) break;
+            }
+            trayIcon.Text = sb.ToString();
+        };
+
         hostForm.FormClosing += (_, _) =>
         {
             // Single cleanup site. Don't call Application.Exit() — Form.Close + Application.Run exit is enough.
@@ -445,6 +463,35 @@ internal sealed class HostForm : Form
     private AlertPipeServer? _alertServer;
     private System.Windows.Forms.Timer? _sweepTimer;
 
+    // Most-recent hook events, newest first — surfaced in the tray tooltip so the user can
+    // watch the live dynamics. Capped; only the tail is kept. Timestamps are stored so the
+    // tooltip shows live ages (recomputed each read), not frozen clock times.
+    private readonly LinkedList<(DateTime whenUtc, string sid, string label, string ev)> _recentEvents = new();
+    private const int RecentEventsMax = 5;
+
+    /// <summary>Fires (UI thread) when the tray-tooltip feed should be rebuilt.</summary>
+    public event Action? RecentEventsChanged;
+
+    /// <summary>Record one received hook event for the tray tooltip feed. UI thread only.</summary>
+    public void RecordEvent(string sessionId, string label, string hookEvent, string toolName)
+    {
+        string ev = hookEvent == "PreToolUse" && !string.IsNullOrEmpty(toolName) ? toolName : hookEvent;
+        string sid = sessionId.Length >= 2 ? sessionId[..2] : sessionId;
+        _recentEvents.AddFirst((DateTime.UtcNow, sid, label, ev));
+        while (_recentEvents.Count > RecentEventsMax) _recentEvents.RemoveLast();
+        RecentEventsChanged?.Invoke();
+    }
+
+    /// <summary>Newest-first event lines with live ages (e.g. "8m  15  md-tester  Bash").</summary>
+    public IEnumerable<string> RecentEventLines()
+    {
+        foreach (var (whenUtc, sid, label, ev) in _recentEvents)
+            yield return $"{SessionState.FormatAge(whenUtc)}  {sid}  {label}  {ev}";
+    }
+
+    /// <summary>Re-emit the feed so the tooltip's ages stay current. Called from the sweep timer.</summary>
+    public void RefreshRecentEvents() { if (_recentEvents.Count > 0) RecentEventsChanged?.Invoke(); }
+
     public SessionState? SessionState => _sessionState;
     public AlertPulse? AlertPulse => _alertPulse;
     public DesktopService DesktopService => _desktopService;
@@ -514,18 +561,22 @@ internal sealed class HostForm : Form
                 _sessionState = new SessionState();
                 // A live Claude status arriving on a manually-blue desktop retires the blue:
                 // the marker's job ("come back here") is done once Claude is active again.
+                // Deferred via BeginInvoke so this runs AFTER the pulse + chime subscribers in
+                // this same Changed dispatch — otherwise the removal's save/repaint (or a throw)
+                // could swallow the very notification that's clearing the blue.
                 _sessionState.Changed += g =>
                 {
                     if (g == SessionState.UnresolvedDesktopId || !_settings.IsDesktopHighlighted(g)) return;
                     var (s, _, _) = _sessionState!.GetAggregate(g);
-                    if (s != StateKind.None) _settings.ToggleDesktopHighlight(g);
+                    if (s != StateKind.None)
+                        BeginInvoke(new Action(() => { try { _settings.ToggleDesktopHighlight(g); } catch { } }));
                 };
                 _alertPulse = new AlertPulse(_sessionState, _settings, InvalidateOverlaysForDesktop);
                 _stateChime = new StateChime(_sessionState, _desktopService, _settings);
                 _alertServer = new AlertPipeServer(this, _sessionState, _settings, _desktopService);
                 _alertServer.Start();
                 _sweepTimer = new System.Windows.Forms.Timer { Interval = 5000 };
-                _sweepTimer.Tick += (_, _) => { _sessionState!.Sweep(); _alertPulse!.EnsureRunningIfAskingPresent(); };
+                _sweepTimer.Tick += (_, _) => { _sessionState!.Sweep(); _alertPulse!.EnsureRunningIfAskingPresent(); RefreshRecentEvents(); };
                 _sweepTimer.Start();
             }
             BuildOverlays();
@@ -776,14 +827,15 @@ internal sealed class HostForm : Form
     }
 
     /// <summary>
-    /// Overlay command: move every open VS Code window back to the desktop DesktopNames last
-    /// remembered for it. Useful after a reboot or a stray drag scattered windows. No-op for
-    /// windows already in place.
+    /// Overlay command: open the arrange-windows grid (desktops × screens) so the user can
+    /// drag each open VS Code window to where it should live, then OK to move + maximize +
+    /// remember. Replaces the old one-shot "move all to remembered" with an editable view.
     /// </summary>
-    public void MoveAllVsCodeToRemembered()
+    public void ShowArrangeWindowsDialog()
     {
-        int moved = _vscodeTracker?.MoveAllToRemembered() ?? 0;
-        if (moved > 0) RefreshAllOverlays();
+        if (_vscodeTracker == null) return;
+        using var dlg = new ArrangeWindowsDialog(_desktopService, _settings, _vscodeTracker);
+        if (dlg.ShowDialog() == DialogResult.OK) RefreshAllOverlays();
     }
 
     /// <summary>Live snapshot of the taskbar overlays — used by the reassign flyout for
@@ -819,6 +871,13 @@ internal sealed class HostForm : Form
         RefreshAllOverlays();
         Log.Resolver($"reassign session={sessionId} src={source} cwd={cwd} -> {targetDesktop} " +
                      $"window={(hwnd == IntPtr.Zero ? "not-found" : moved ? "moved" : "already-there")}");
+    }
+
+    /// <summary>Dismiss one session's indicator (the flyout's per-row "✕").</summary>
+    public void RemoveSession(string source, string sessionId)
+    {
+        _sessionState?.RemoveSession(source, sessionId);
+        RefreshAllOverlays();
     }
 
     /// <summary>Find an open VS Code workspace window whose rootName is in <paramref name="rootNames"/>.</summary>

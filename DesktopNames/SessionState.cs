@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 
 namespace DesktopNames;
@@ -59,6 +59,15 @@ internal sealed class SessionState
     /// desktop GUID returned by Windows.
     /// </summary>
     public static readonly Guid UnresolvedDesktopId = new("ffffffff-ffff-ffff-ffff-ffffffffffff");
+
+    /// <summary>Leading markers on tooltip lines telling the overlay's owner-drawn tooltip how to
+    /// style them: <see cref="TipItalic"/> = the Claude message (italic), <see cref="TipDim"/> =
+    /// the cwd sub-line (dim). <see cref="StripTipMarkers"/> removes them for plain-text consumers.</summary>
+    internal const char TipItalic = (char)0x1F;
+    internal const char TipDim = (char)0x1E;
+
+    public static string StripTipMarkers(string s) =>
+        s.Replace(TipItalic.ToString(), "").Replace(TipDim.ToString(), "    ");
 
     public event Action<Guid>? Changed;
 
@@ -222,14 +231,39 @@ internal sealed class SessionState
             if (e.Consumed) continue;
             if (e.State == max) count++;
             var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
-            string line = $"{label} ({e.State.ToString().ToLowerInvariant()})";
-            if (!string.IsNullOrEmpty(e.Body)) line += " — " + e.Body;
-            // Full cwd on an indented sub-line — the real disambiguator when the title's leaf
-            // name is generic (e.g. "claude - validation" could be any repo's validation tool).
-            if (!string.IsNullOrEmpty(e.Cwd)) line += "\n      " + e.Cwd;
+            // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
+            // collide (two sessions in the same folder, or one whose cwd wandered there).
+            var sid = e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
+            // Three lines per session: a regular header, the Claude message italic on its own
+            // line, then the full cwd dim below it (the real disambiguator when the title's leaf
+            // name is generic). TipItalic/TipDim mark the latter two for the owner-drawn tooltip.
+            string line = $"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})";
+            if (!string.IsNullOrEmpty(e.Body)) line += "\n" + TipItalic + e.Body;
+            if (!string.IsNullOrEmpty(e.Cwd)) line += "\n" + TipDim + e.Cwd;
             lines.Add(line);
         }
         return (max, count, string.Join("\n", lines));
+    }
+
+    /// <summary>Compact relative age since last activity: "10s", "5m", "4h", "3d".</summary>
+    public static string FormatAge(DateTime lastSeenUtc)
+    {
+        var d = DateTime.UtcNow - lastSeenUtc;
+        if (d.TotalSeconds < 60) return $"{Math.Max(0, (int)d.TotalSeconds)}s";
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes}m";
+        if (d.TotalHours < 24)   return $"{(int)d.TotalHours}h";
+        return $"{(int)d.TotalDays}d";
+    }
+
+    /// <summary>Count of live (non-consumed) sessions on a desktop — what the overlay's
+    /// count badge shows. Differs from <see cref="GetAggregate"/>'s count, which counts only
+    /// the sessions at the dominant state; this is the total the flyout lists.</summary>
+    public int LiveCount(Guid desktopId)
+    {
+        if (!_byDesktop.TryGetValue(desktopId, out var list)) return 0;
+        int n = 0;
+        foreach (var e in list) if (!e.Consumed) n++;
+        return n;
     }
 
     /// <summary>
@@ -295,6 +329,17 @@ internal sealed class SessionState
         foreach (var g in changed) Changed?.Invoke(g);
     }
 
+    /// <summary>Drop a single session's indicator (the flyout's per-row "x"). The session may
+    /// reappear if it's alive and speaks again; for a stale leftover it stays gone.</summary>
+    public void RemoveSession(string source, string sessionId)
+    {
+        var key = (source, sessionId);
+        if (!_location.TryGetValue(key, out var desktop)) return;
+        RemoveEntry(desktop, source, sessionId);
+        _location.Remove(key);
+        Changed?.Invoke(desktop);
+    }
+
     /// <summary>Wipe every unresolved-bucket entry (called from the "?" button's context menu).</summary>
     public void ClearUnresolved()
     {
@@ -338,9 +383,18 @@ internal sealed class SessionState
                 // and Claude can generate prose for many minutes between tool calls; the
                 // earlier 60s threshold was reaping live sessions prematurely.
                 bool stale = e.State == StateKind.Busy && (now - e.LastSeenUtc).TotalMinutes > 15;
-                if (!dead && !stale) continue;
+                // No-liveness reap: many sessions are launched via Git Bash, whose parent walk
+                // lands on MSYS pid 1, so we get no liveness pid and can never detect death.
+                // Those sessions would linger forever. Drop any non-Asking entry with no pid
+                // after 15 min of silence (Asking must persist — the user has to act on it).
+                // Sticky bindings outlive the reap, so if the session speaks again it
+                // re-attaches to the same desktop.
+                bool staleNoPid = e.SessionPid == 0 && e.State != StateKind.Asking
+                                  && (now - e.LastSeenUtc).TotalMinutes > 15;
+                if (!dead && !stale && !staleNoPid) continue;
 
-                Log.Resolver($"sweep reap session={e.SessionId} src={e.Source} reason={(dead ? "dead-pid" : "stale-busy")} pid={e.SessionPid} desktop={desktopId}");
+                string reason = dead ? "dead-pid" : stale ? "stale-busy" : "stale-nopid";
+                Log.Resolver($"sweep reap session={e.SessionId} src={e.Source} reason={reason} pid={e.SessionPid} desktop={desktopId}");
                 list.RemoveAt(i);
                 _location.Remove((e.Source, e.SessionId));
                 changed.Add(desktopId);
@@ -424,23 +478,23 @@ internal sealed class SessionState
 
     /// <summary>A session located on a desktop, with enough context for the reassign flyout.</summary>
     public readonly record struct SessionRef(
-        string Source, string SessionId, string Label, string Cwd, StateKind State);
+        string Source, string SessionId, string Label, string Cwd, StateKind State, DateTime LastSeenUtc);
 
     /// <summary>
     /// Every session currently located on <paramref name="desktopId"/> (consumed or not),
-    /// most-recently-seen first. Label prefers the cwd basename (recognizable workspace name),
-    /// falling back to the title then the session id.
+    /// oldest-activity first so the flyout lists stale leftovers at the top. Label prefers the
+    /// cwd basename (recognizable workspace name), falling back to the title then the session id.
     /// </summary>
     public List<SessionRef> GetSessions(Guid desktopId)
     {
         var result = new List<SessionRef>();
         if (!_byDesktop.TryGetValue(desktopId, out var list)) return result;
-        foreach (var e in list.OrderByDescending(e => e.LastSeenUtc))
+        foreach (var e in list.OrderBy(e => e.LastSeenUtc))
         {
             string label = !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd)
                          : !string.IsNullOrEmpty(e.Title) ? e.Title
                          : e.SessionId;
-            result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State));
+            result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc));
         }
         return result;
     }

@@ -144,7 +144,8 @@ internal sealed class AlertPipeServer : IDisposable
             {
                 try
                 {
-                    var (target, userHint) = ResolveDesktop(msg);
+                    _host.RecordEvent(msg.SessionId ?? "", EventLabel(msg), msg.HookEvent ?? msg.State ?? "?", msg.ToolName ?? "");
+                    var (target, userHint, viaSession) = ResolveDesktop(msg);
                     if (target == Guid.Empty && stateKind != StateKind.None)
                     {
                         // Park the session on the unresolved sentinel desktop so the "?"
@@ -178,14 +179,18 @@ internal sealed class AlertPipeServer : IDisposable
                         // MSYS PPID=1 quirk — pid=1 isn't a real process on Windows and was
                         // causing every entry to be reaped within 5s of arriving).
                         int livenessPid = msg.ParentPid > 4 ? msg.ParentPid : 0;
-                        // For Stop-that-turned-into-Asking, prefer lastMessageTail as the
-                        // tooltip body since ClaudeHook's body would otherwise be "Ready".
+                        // Prefer the most specific human-readable line ClaudeHook can give us so
+                        // the hover identifies which Claude this is. These are event-exclusive:
+                        //   PreToolUse → toolDescription ("Edit Program.cs"); pre-truncated + word-
+                        //                safe, so display verbatim.
+                        //   Stop       → lastMessageTail (Claude's final ~200 chars); flatten
+                        //                newlines so it stays on the session's single hover line.
+                        // Otherwise fall back to ClaudeHook's body ("Running {tool}", "Ready", …).
                         string body = msg.Body ?? "";
-                        if (stateKind == StateKind.Asking && msg.HookEvent == "Stop" &&
-                            !string.IsNullOrEmpty(msg.LastMessageTail))
-                        {
-                            body = msg.LastMessageTail!;
-                        }
+                        if (!string.IsNullOrEmpty(msg.ToolDescription))
+                            body = msg.ToolDescription!;
+                        if (!string.IsNullOrEmpty(msg.LastMessageTail))
+                            body = msg.LastMessageTail!.Replace("\r", " ").Replace("\n", " ").Trim();
                         _state.Apply(
                             target,
                             msg.Source ?? "unknown",
@@ -204,7 +209,11 @@ internal sealed class AlertPipeServer : IDisposable
                         if (stateKind == StateKind.None)
                             _state.ClearSticky(msg.SessionId ?? "", msg.TranscriptPath);
                         else if (target != Guid.Empty)
-                            _state.RecordResolution(msg.SessionId ?? "", msg.TranscriptPath, msg.Cwd, target);
+                            // When resolved via the session pin, the cwd may have wandered into
+                            // another repo — don't feed that stray cwd into the learned-path
+                            // index (pass null) or it would mis-bind other sessions. The sticky
+                            // session/transcript TTL is still refreshed so the pin stays alive.
+                            _state.RecordResolution(msg.SessionId ?? "", msg.TranscriptPath, viaSession ? null : msg.Cwd, target);
 
                         var info = _desktop.GetDesktops().FirstOrDefault(d => d.Id == target);
                         reply.Ok = true;
@@ -231,6 +240,22 @@ internal sealed class AlertPipeServer : IDisposable
         }
 
         WriteReply(pipe, reply);
+    }
+
+    /// <summary>Short, recognizable label for the tray event feed: cwd basename, else title,
+    /// else a truncated session id.</summary>
+    private static string EventLabel(AlertMessage msg)
+    {
+        if (!string.IsNullOrEmpty(msg.Cwd))
+        {
+            string p = msg.Cwd!.Replace('/', '\\').TrimEnd('\\', ' ');
+            int slash = p.LastIndexOf('\\');
+            if (slash >= 0 && slash < p.Length - 1) return p[(slash + 1)..];
+            if (p.Length > 0) return p;
+        }
+        if (!string.IsNullOrEmpty(msg.Title)) return msg.Title!;
+        var id = msg.SessionId ?? "";
+        return id.Length > 8 ? id[..8] : id;
     }
 
     private static void WriteReply(NamedPipeServerStream pipe, ReplyJson reply)
@@ -331,17 +356,29 @@ internal sealed class AlertPipeServer : IDisposable
     /// 4. sticky session/transcript cache (works after the originating window closed).
     /// Returns Guid.Empty + a human-actionable hint when nothing matches.
     /// </summary>
-    private (Guid desktopId, string? userMessage) ResolveDesktop(AlertMessage msg)
+    private (Guid desktopId, string? userMessage, bool viaSession) ResolveDesktop(AlertMessage msg)
     {
         if (msg.VsCodePid > 0)
         {
             var g = ResolveByVsCodePid(msg.VsCodePid);
-            if (g != Guid.Empty) { Log.Resolver($"  via=vscodePid({msg.VsCodePid}) -> {g}"); return (g, null); }
+            if (g != Guid.Empty) { Log.Resolver($"  via=vscodePid({msg.VsCodePid}) -> {g}"); return (g, null, false); }
         }
+
+        // Pin-to-window: once a session has resolved to a desktop, keep it there even if its
+        // cwd later wanders into another repo (e.g. a skill cd's into a different folder).
+        // Checked BEFORE cwd-walkup so the feed doesn't migrate desktops mid-session. The
+        // binding is established on the first hook via the cwd path below. viaSession=true so
+        // the caller doesn't re-record the (now-wandered) cwd into the learned-path index.
+        if (!string.IsNullOrEmpty(msg.SessionId) || !string.IsNullOrEmpty(msg.TranscriptPath))
+        {
+            if (_state.TryStickyLookup(msg.SessionId ?? "", msg.TranscriptPath, out var sd))
+            { Log.Resolver($"  via=sticky-pin(session={msg.SessionId}) -> {sd}"); return (sd, null, true); }
+        }
+
         if (!string.IsNullOrEmpty(msg.Cwd))
         {
             var g = ResolveByCwdWalkUp(msg.Cwd!);
-            if (g != Guid.Empty) { Log.Resolver($"  via=cwd-walkup({msg.Cwd}) -> {g}"); return (g, null); }
+            if (g != Guid.Empty) { Log.Resolver($"  via=cwd-walkup({msg.Cwd}) -> {g}"); return (g, null, false); }
 
             // Workspace-folder lookup: scan %APPDATA%\Code\User\workspaceStorage on demand.
             // Closes the .code-workspace gap where rootName ("ev.exe") differs from any
@@ -357,26 +394,21 @@ internal sealed class AlertPipeServer : IDisposable
                         loc.DesktopId != Guid.Empty)
                     {
                         Log.Resolver($"  via=workspace-index({msg.Cwd}) -> rootName={rootName} -> {loc.DesktopId}");
-                        return (loc.DesktopId, null);
+                        return (loc.DesktopId, null, false);
                     }
                 }
                 Log.Resolver($"  workspace-index found candidates [{string.Join(",", candidates)}] but none in VsCodeWorkspaceDesktops");
             }
 
             if (_state.TryLookupLearnedPath(msg.Cwd!, out var lp))
-            { Log.Resolver($"  via=learned-path({msg.Cwd}) -> {lp}"); return (lp, null); }
-        }
-        if (!string.IsNullOrEmpty(msg.SessionId) || !string.IsNullOrEmpty(msg.TranscriptPath))
-        {
-            if (_state.TryStickyLookup(msg.SessionId ?? "", msg.TranscriptPath, out var sd))
-            { Log.Resolver($"  via=sticky(session={msg.SessionId} transcript={msg.TranscriptPath}) -> {sd}"); return (sd, null); }
+            { Log.Resolver($"  via=learned-path({msg.Cwd}) -> {lp}"); return (lp, null, false); }
         }
 
         // Nothing resolved. Build a hint the user can act on.
         string cwdPart = !string.IsNullOrEmpty(msg.Cwd) ? msg.Cwd! : "this Claude session";
         string hint = $"No open VSCode window matches {cwdPart}. Open the folder in VSCode to enable desktop indicators for this session.";
         Log.Resolver($"  via=NONE cwd={msg.Cwd} vscodePid={msg.VsCodePid} session={msg.SessionId} transcript={msg.TranscriptPath}");
-        return (Guid.Empty, hint);
+        return (Guid.Empty, hint, false);
     }
 
     /// <summary>
@@ -498,6 +530,9 @@ internal sealed class AlertPipeServer : IDisposable
         public string? HookEvent { get; set; }
         public string? HookSource { get; set; }
         public string? ToolName { get; set; }
+        // PreToolUse only (nullable): a more specific, pre-truncated human-readable line than
+        // toolName alone — e.g. "Edit Program.cs" instead of "Edit". Null on all other events.
+        public string? ToolDescription { get; set; }
         public string? Message { get; set; }
 
         // Sent by ClaudeHook (2026-05-20+):
