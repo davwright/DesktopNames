@@ -28,7 +28,16 @@ $exe       = Join-Path $deployDir 'DesktopNames.exe'
 # traced back (or honestly labelled as untraceable).
 $sha = & git -C $PSScriptRoot rev-parse --short HEAD 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'nogit' }
-$dirty = if (& git -C $PSScriptRoot status --porcelain 2>$null) { '.dirty' } else { '' }
+
+# Every publish leaves its own <Version> bump uncommitted, so by the next run the tree is
+# always "dirty" by this script's own hand — which would make the flag meaningless in the
+# one case it has to be right. A csproj whose only change is that version line doesn't
+# count; any other edit to it still does.
+$changed = @(& git -C $PSScriptRoot status --porcelain 2>$null | Where-Object { $_ })
+$csprojOnlyVersion = -not (& git -C $PSScriptRoot diff -U0 -- $csproj |
+    Where-Object { $_ -match '^[+-][^+-]' -and $_ -notmatch '<Version>' })
+if ($csprojOnlyVersion) { $changed = @($changed | Where-Object { $_ -notmatch 'DesktopNames\.csproj$' }) }
+$dirty = if ($changed.Count -gt 0) { '.dirty' } else { '' }
 
 # --- read current version ---
 $xml = [xml](Get-Content $csproj)
