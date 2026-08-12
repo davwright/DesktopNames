@@ -26,12 +26,88 @@ internal sealed class Settings
     /// </summary>
     public Dictionary<Guid, string> DesktopNotes { get; set; } = new();
 
-    // VSCode workspace → last observed location (desktop + monitor). Always tracked
-    // passively: every scan CRUDs the entry to match where the window currently lives,
-    // so manual moves via the user's AHK script (Win+Ctrl+N) become the new binding.
-    // Auto-move on first sight restores from this map.
+    // VSCode workspace → last observed location (desktop + monitor + snap position), kept per
+    // monitor arrangement. Always tracked passively: every scan CRUDs the entry to match where
+    // the window currently lives, so manual moves via the user's AHK script (Win+Ctrl+N) become
+    // the new binding. Auto-move on first sight restores from the current arrangement's layout.
     public bool VsCodeAutoMove { get; set; } = false;
-    public Dictionary<string, WorkspaceLocation> VsCodeWorkspaceDesktops { get; set; } = new();
+
+    /// <summary>Screen-setup signature (<see cref="ScreenSetup.Signature"/>) → remembered layout.</summary>
+    public Dictionary<string, ScreenLayout> VsCodeLayouts { get; set; } = new();
+
+    /// <summary>Pre-multi-setup files stored one flat map. Migrated into <see cref="VsCodeLayouts"/> on load.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("VsCodeWorkspaceDesktops")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, WorkspaceLocation>? LegacyWorkspaceDesktops { get; set; }
+
+    private ScreenLayout? _layout;
+    private DateTime _layoutStamp;
+    private static readonly TimeSpan LayoutCacheTtl = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The remembered layout for the monitor arrangement plugged in right now, created on first
+    /// use. Callers just ask every time instead of tracking display changes themselves; the
+    /// answer is cached briefly because resolving it enumerates monitors and their device ids.
+    /// </summary>
+    public ScreenLayout Layout()
+    {
+        if (_layout != null && DateTime.UtcNow - _layoutStamp < LayoutCacheTtl) return _layout;
+
+        var screens = MonitorRef.EnumerateAll();
+        string sig = ScreenSetup.SignatureOf(screens);
+        bool created = !VsCodeLayouts.TryGetValue(sig, out var layout);
+        if (created)
+        {
+            layout = AdoptOrSeed(screens, sig);
+            VsCodeLayouts[sig] = layout;
+        }
+        layout!.Describe = ScreenSetup.DescribeOf(screens);
+        layout.Screens = screens.Select(ScreenInfo.From).ToList();
+        layout.DeviceSignature = ScreenSetup.DeviceSignatureOf(screens);
+        _layout = layout;
+        _layoutStamp = DateTime.UtcNow;
+        // Persist a newly-seen arrangement right away, so its key doesn't depend on some later
+        // window move happening to dirty the file. Re-entry is safe: the cache is already warm.
+        if (created) Save();
+        return layout;
+    }
+
+    /// <summary>
+    /// First sight of an arrangement. Rather than starting blank, inherit from the closest
+    /// previous one: the same physical monitors at different coordinates (you rearranged them
+    /// in Windows) carry their window positions over as a starting point, which you can then
+    /// change independently.
+    /// </summary>
+    private ScreenLayout AdoptOrSeed(List<MonitorDescriptor> screens, string sig)
+    {
+        // One-time upgrade: layouts written before coordinates were part of the key have no
+        // recorded screens. If exactly one exists it was recorded on whatever is plugged in
+        // now, so adopt it outright instead of orphaning its remembered positions.
+        var stale = VsCodeLayouts.Where(kv => kv.Value.Screens.Count == 0).ToList();
+        if (stale.Count == 1)
+        {
+            VsCodeLayouts.Remove(stale[0].Key);
+            Log.Screens($"arrangement {sig} adopts pre-coordinate layout {stale[0].Key} ({stale[0].Value.Workspaces.Count} windows)");
+            return stale[0].Value;
+        }
+
+        string family = ScreenSetup.DeviceSignatureOf(screens);
+        var source = VsCodeLayouts.Values.FirstOrDefault(l => l.DeviceSignature == family);
+        var seeded = new ScreenLayout { Name = source?.Name };
+        if (source != null)
+            foreach (var kvp in source.Workspaces) seeded.Workspaces[kvp.Key] = kvp.Value.Clone();
+
+        Log.Screens($"new arrangement {sig} [{ScreenSetup.DescribeOf(screens)}]" +
+                    (source != null ? $" seeded from same monitors rearranged ({seeded.Workspaces.Count} windows)" : " (nothing to seed from)"));
+        return seeded;
+    }
+
+    /// <summary>Drop the cached layout so the next <see cref="Layout"/> re-resolves — called on
+    /// WM_DISPLAYCHANGE so a dock/undock switches layouts immediately.</summary>
+    public void InvalidateLayout() => _layout = null;
+
+    /// <summary>Shorthand for the current arrangement's workspace → location map.</summary>
+    public Dictionary<string, WorkspaceLocation> Workspaces => Layout().Workspaces;
 
     /// <summary>
     /// Override path to VirtualDesktopAccessor.dll. Empty/null = auto-discover.
@@ -165,6 +241,17 @@ internal sealed class Settings
             else s = new Settings();
         }
         catch { s = new Settings(); }
+
+        // Migration: the flat workspace map predates per-screen-setup layouts. Adopt it as the
+        // layout for whatever arrangement is plugged in now — that's the setup it was recorded on.
+        if (s.LegacyWorkspaceDesktops is { Count: > 0 })
+        {
+            var layout = s.Layout();
+            foreach (var kvp in s.LegacyWorkspaceDesktops)
+                if (!layout.Workspaces.ContainsKey(kvp.Key))
+                    layout.Workspaces[kvp.Key] = kvp.Value;
+        }
+        s.LegacyWorkspaceDesktops = null;
 
         // Migration: an earlier build defaulted NextWaitingDesktop to "Win+Oem3", which
         // collides with Windows Terminal's quake-mode. Wipe that specific stale value so

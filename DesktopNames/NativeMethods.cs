@@ -141,9 +141,13 @@ internal static class NativeMethods
 
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     public const int DWMWA_CLOAKED = 14;
+    public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int attrValue, int attrSize);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT attrValue, int attrSize);
 
     public const byte VK_LCONTROL = 0xA2;
     public const byte VK_LWIN = 0x5B;
@@ -224,6 +228,61 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+
+    // --- CCD (Connecting and Configuring Displays) API. Used only to work out the display
+    // numbers Windows shows in Settings ("Identify"), which no other API exposes.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LUID { public uint LowPart; public int HighPart; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_SOURCE_INFO
+    {
+        public LUID adapterId; public uint id; public uint modeInfoIdx; public uint statusFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_TARGET_INFO
+    {
+        public LUID adapterId; public uint id; public uint modeInfoIdx;
+        public uint outputTechnology; public uint rotation; public uint scaling;
+        public uint refreshNumerator; public uint refreshDenominator;
+        public uint scanLineOrdering; public int targetAvailable; public uint statusFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_PATH_INFO
+    {
+        public DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo;
+        public DISPLAYCONFIG_PATH_TARGET_INFO targetInfo;
+        public uint flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_DEVICE_INFO_HEADER
+    {
+        public uint type; public uint size; public LUID adapterId; public uint id;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DISPLAYCONFIG_SOURCE_DEVICE_NAME
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string viewGdiDeviceName;
+    }
+
+    public const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
+    public const uint DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
+
+    [DllImport("user32.dll")]
+    public static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
+
+    [DllImport("user32.dll")]
+    public static extern int QueryDisplayConfig(uint flags, ref uint numPathArrayElements,
+        [Out] DISPLAYCONFIG_PATH_INFO[] pathArray, ref uint numModeInfoArrayElements,
+        IntPtr modeInfoArray, IntPtr currentTopologyId);
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_SOURCE_DEVICE_NAME requestPacket);
 
     // SWP flags not already declared at top of file:
     public const uint SWP_NOZORDER       = 0x0004;

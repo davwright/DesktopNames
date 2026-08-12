@@ -135,37 +135,67 @@ internal sealed class DesktopService : IDisposable
     }
 
     /// <summary>
-    /// Maximize a window on a specific monitor, then move it to a virtual desktop. Used by the
-    /// arrange-windows dialog's OK. Done via SetWindowPlacement (no activation, works on windows
-    /// that currently live on another virtual desktop), seeding a sane restored rect inside the
-    /// target work area so un-maximizing later lands on the right screen. The desktop move runs
-    /// last so all the positioning happens while the window is still on the current desktop.
+    /// Put a window where a <see cref="WorkspaceLocation"/> says it belongs: onto the target
+    /// monitor, into its snap position (full screen / half / quarter) or its remembered free
+    /// rect, then onto <paramref name="desktopId"/>. Positioning goes through SetWindowPlacement
+    /// (no activation, works on windows currently living on another virtual desktop) and the
+    /// desktop move runs last, so all the geometry lands while the window is still here.
+    /// Pass Guid.Empty for <paramref name="desktopId"/> to leave the window on its desktop.
     /// </summary>
-    public void MaximizeOnMonitorThenMoveToDesktop(IntPtr hwnd, NativeMethods.RECT work, Guid desktopId)
+    public bool PlaceWindow(IntPtr hwnd, WorkspaceLocation target, Guid desktopId)
     {
-        if (hwnd == IntPtr.Zero) return;
+        if (hwnd == IntPtr.Zero) return false;
+        bool any = false;
         try
         {
-            var wp = new NativeMethods.WINDOWPLACEMENT
+            var work = ResolveWorkArea(hwnd, target);
+            if (work.Width <= 0 || work.Height <= 0) { }
+            else if (target.Snap != SnapMode.Free)
             {
-                length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>()
-            };
-            if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
-            {
-                int l = work.Left + 80, t = work.Top + 60, r = work.Right - 80, b = work.Bottom - 60;
-                if (r <= l) { l = work.Left; r = work.Right; }
-                if (b <= t) { t = work.Top; b = work.Bottom; }
-                wp.rcNormalPosition.Left = l;
-                wp.rcNormalPosition.Top = t;
-                wp.rcNormalPosition.Right = r;
-                wp.rcNormalPosition.Bottom = b;
-                wp.showCmd = NativeMethods.SW_MAXIMIZE;
-                NativeMethods.SetWindowPlacement(hwnd, ref wp);
+                any = SnapGeometry.Apply(hwnd, work, target.Snap);
             }
+            else if (target.WindowWidth > 0 && target.WindowHeight > 0)
+            {
+                int w = Math.Min(target.WindowWidth, work.Width);
+                int h = Math.Min(target.WindowHeight, work.Height);
+                int l = Math.Clamp(work.Left + target.WindowOffsetX, work.Left, work.Right - w);
+                int t = Math.Clamp(work.Top + target.WindowOffsetY, work.Top, work.Bottom - h);
+                var wp = new NativeMethods.WINDOWPLACEMENT { length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>() };
+                if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
+                {
+                    wp.rcNormalPosition = new NativeMethods.RECT { Left = l, Top = t, Right = l + w, Bottom = t + h };
+                    wp.showCmd = NativeMethods.SW_SHOWNORMAL;
+                    any = NativeMethods.SetWindowPlacement(hwnd, ref wp);
+                }
+            }
+            else any = MoveWindowToMonitor(hwnd, target);
         }
         catch { }
 
-        if (desktopId != Guid.Empty) MoveWindowToDesktop(hwnd, desktopId);
+        if (desktopId != Guid.Empty && GetDesktopForWindow(hwnd) != desktopId)
+            any |= MoveWindowToDesktop(hwnd, desktopId);
+        return any;
+    }
+
+    /// <summary>
+    /// Work area of the monitor a location points at, falling back to the window's current
+    /// monitor when that monitor isn't part of the setup plugged in right now.
+    /// </summary>
+    private static NativeMethods.RECT ResolveWorkArea(IntPtr hwnd, WorkspaceLocation target)
+    {
+        IntPtr hMon = new MonitorRef
+        {
+            DeviceId = target.MonitorDeviceId,
+            RectX = target.MonitorX,
+            RectY = target.MonitorY,
+            RectWidth = target.MonitorWidth,
+            RectHeight = target.MonitorHeight
+        }.ResolveCurrentHandle();
+        if (hMon == IntPtr.Zero)
+            hMon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+
+        var mi = new NativeMethods.MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+        return NativeMethods.GetMonitorInfo(hMon, ref mi) ? mi.rcWork : default;
     }
 
     public Guid GetDesktopForWindow(IntPtr hwnd)

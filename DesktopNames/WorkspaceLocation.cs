@@ -36,8 +36,70 @@ internal sealed class WorkspaceLocation
     public int WindowWidth { get; set; }
     public int WindowHeight { get; set; }
 
-    /// <summary>True if the window was maximized at observation time.</summary>
-    public bool WindowMaximized { get; set; }
+    /// <summary>
+    /// How the window occupied its monitor: full screen, a snapped half/quarter, or Free
+    /// (use the offset/size above). Replaces the older WindowMaximized bool, which is still
+    /// read from legacy settings files and mapped onto <see cref="SnapMode.Max"/>.
+    /// </summary>
+    public SnapMode Snap { get; set; }
+
+    public WorkspaceLocation Clone() => (WorkspaceLocation)MemberwiseClone();
+}
+
+/// <summary>
+/// Everything remembered for one monitor arrangement (see <see cref="ScreenSetup"/>): the
+/// user's label for it plus the per-workspace positions. Keyed in
+/// <see cref="Settings.VsCodeLayouts"/> by the arrangement's signature, so the layout you
+/// use docked at work isn't overwritten by the one you use on the laptop alone.
+/// </summary>
+internal sealed class ScreenLayout
+{
+    /// <summary>User-supplied label ("work", "home", "single"). Falls back to a generated description.</summary>
+    public string? Name { get; set; }
+
+    /// <summary>Auto-generated description of the arrangement, e.g. "2 screens · 3840×2160 + 1920×1080".</summary>
+    public string? Describe { get; set; }
+
+    /// <summary>
+    /// The monitors this arrangement consists of, with the coordinates they sat at — the array
+    /// the arrangement key is built from. Rewritten every time the arrangement is resolved, so
+    /// it also records what "screen 2" meant for the positions stored below.
+    /// </summary>
+    public List<ScreenInfo> Screens { get; set; } = new();
+
+    /// <summary>Position-independent key for <see cref="Screens"/>: which monitors, ignoring
+    /// where they sit. Lets a rearranged setup start from the layout of the same monitors.</summary>
+    public string? DeviceSignature { get; set; }
+
+    public Dictionary<string, WorkspaceLocation> Workspaces { get; set; } = new();
+
+    public string DisplayName => string.IsNullOrWhiteSpace(Name) ? (Describe ?? "unknown setup") : Name!;
+}
+
+/// <summary>One monitor as it stood when an arrangement was recorded.</summary>
+internal sealed class ScreenInfo
+{
+    public string? DeviceId { get; set; }
+    public string? Model { get; set; }
+    /// <summary>Windows' Settings → Display number.</summary>
+    public int Number { get; set; }
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public bool IsPrimary { get; set; }
+
+    public static ScreenInfo From(MonitorDescriptor m) => new()
+    {
+        DeviceId = m.DeviceId,
+        Model = m.Model,
+        Number = m.Number,
+        X = m.Monitor.Left,
+        Y = m.Monitor.Top,
+        Width = m.Width,
+        Height = m.Height,
+        IsPrimary = m.IsPrimary,
+    };
 }
 
 /// <summary>
@@ -75,7 +137,9 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
                 case "WindowOffsetY":   result.WindowOffsetY   = reader.GetInt32(); break;
                 case "WindowWidth":     result.WindowWidth     = reader.GetInt32(); break;
                 case "WindowHeight":    result.WindowHeight    = reader.GetInt32(); break;
-                case "WindowMaximized": result.WindowMaximized = reader.GetBoolean(); break;
+                case "Snap":            result.Snap            = Enum.TryParse<SnapMode>(reader.GetString(), out var sm) ? sm : SnapMode.Free; break;
+                // Legacy: pre-snap files only recorded "was it maximized".
+                case "WindowMaximized": if (reader.GetBoolean() && result.Snap == SnapMode.Free) result.Snap = SnapMode.Max; break;
                 default:                reader.Skip();         break;
             }
         }
@@ -94,14 +158,14 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
             writer.WriteNumber("MonitorWidth", value.MonitorWidth);
             writer.WriteNumber("MonitorHeight", value.MonitorHeight);
         }
-        if (value.WindowWidth > 0 || value.WindowHeight > 0 || value.WindowMaximized)
+        if (value.WindowWidth > 0 || value.WindowHeight > 0)
         {
             writer.WriteNumber("WindowOffsetX", value.WindowOffsetX);
             writer.WriteNumber("WindowOffsetY", value.WindowOffsetY);
             writer.WriteNumber("WindowWidth",   value.WindowWidth);
             writer.WriteNumber("WindowHeight",  value.WindowHeight);
-            if (value.WindowMaximized) writer.WriteBoolean("WindowMaximized", true);
         }
+        if (value.Snap != SnapMode.Free) writer.WriteString("Snap", value.Snap.ToString());
         writer.WriteEndObject();
     }
 }

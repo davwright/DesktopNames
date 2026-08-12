@@ -20,6 +20,12 @@ internal sealed class TaskbarOverlay : Form
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _isDarkMode;
     private readonly ContextMenuStrip _contextMenu;
+    // The overlay is WS_EX_NOACTIVATE, so the menu never owns the foreground and WinForms'
+    // own click-outside dismissal never sees clicks landing in other apps. Watch for the
+    // foreground window changing away from whatever was active when the menu opened and
+    // close it ourselves — otherwise it hangs around on top of whatever you clicked next.
+    private readonly System.Windows.Forms.Timer _menuBlurTimer = new() { Interval = 200 };
+    private IntPtr _menuOpenForeground;
     private readonly ToolTip _stateTooltip = new() { InitialDelay = 400, ReshowDelay = 100, OwnerDraw = true };
     private Guid _lastTooltipDesktop = Guid.Empty;
     // Owner-drawn so the Claude message line renders italic and the cwd dim. _tooltipText holds
@@ -95,7 +101,19 @@ internal sealed class TaskbarOverlay : Form
         _stateTooltip.Draw += OnTooltipDraw;
 
         _contextMenu = new ContextMenuStrip();
-        _contextMenu.Opening += (_, _) => BuildContextMenu();
+        _contextMenu.Opening += (_, _) =>
+        {
+            BuildContextMenu();
+            _menuOpenForeground = NativeMethods.GetForegroundWindow();
+            _menuBlurTimer.Start();
+        };
+        _contextMenu.Closed += (_, _) => _menuBlurTimer.Stop();
+        _menuBlurTimer.Tick += (_, _) =>
+        {
+            var fg = NativeMethods.GetForegroundWindow();
+            if (fg != _menuOpenForeground && fg != Handle && fg != _contextMenu.Handle)
+                _contextMenu.Close(ToolStripDropDownCloseReason.AppFocusChange);
+        };
 
         _settings.Changed += () =>
         {
@@ -330,6 +348,21 @@ internal sealed class TaskbarOverlay : Form
         _contextMenu.Items.Add("Close current desktop  (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
         _contextMenu.Items.Add("Arrange VS Code windows…", null,
             (_, _) => Program.Host?.ShowArrangeWindowsDialog());
+
+        var screens = MonitorRef.EnumerateAll();
+        if (screens.Count > 1)
+        {
+            var moveAll = new ToolStripMenuItem("Move all VS Code windows to");
+            for (int i = 0; i < screens.Count; i++)
+            {
+                var s = screens[i];
+                moveAll.DropDownItems.Add($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                    (_, _) => Program.Host?.MoveAllVsCodeToScreen(s));
+            }
+            _contextMenu.Items.Add(moveAll);
+        }
+        _contextMenu.Items.Add($"Restore VS Code layout  ({_settings.Layout().DisplayName})", null,
+            (_, _) => Program.Host?.RestoreVsCodeLayout());
 
         // Global rename when no per-desktop section already covers it.
         if (_rightClickedDesktop == null)
@@ -1335,6 +1368,8 @@ internal sealed class TaskbarOverlay : Form
         _refreshTimer.Dispose();
         _longPressTimer.Stop();
         _longPressTimer.Dispose();
+        _menuBlurTimer.Stop();
+        _menuBlurTimer.Dispose();
         _stateTooltip.Dispose();
         _ttFont.Dispose();
         _ttItalic.Dispose();

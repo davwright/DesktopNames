@@ -41,31 +41,53 @@ internal sealed class VsCodeTracker : IDisposable
     }
 
     /// <summary>
-    /// Move every currently-open VS Code workspace window to the desktop last remembered for
-    /// it in <see cref="Settings.VsCodeWorkspaceDesktops"/> (which the passive scan keeps in
-    /// sync with real window positions). Backs the overlay's "Move all VS Code windows to
-    /// remembered desktops" command. Best-effort per window; returns the number actually moved.
+    /// Put every currently-open VS Code workspace window back where the current screen setup
+    /// remembers it: screen, snap position, then virtual desktop. Backs the overlay's
+    /// "Restore VS Code layout" command. Best-effort per window; returns the number touched.
     /// </summary>
     public int MoveAllToRemembered()
     {
         int moved = 0;
-        NativeMethods.EnumWindows((hwnd, _) =>
+        foreach (var w in EnumerateOpenWorkspaceWindows())
         {
-            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+            if (!_settings.Workspaces.TryGetValue(w.Workspace, out var saved)) continue;
+            _desktop.PlaceWindow(w.Hwnd, saved, saved.DesktopId);
+            moved++;
+        }
+        return moved;
+    }
 
-            var clsBuf = new char[64];
-            int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
-            if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
+    /// <summary>
+    /// Move every open VS Code window onto <paramref name="screen"/>, keeping each on its own
+    /// virtual desktop and in its own snap position. Backs the overlay's "Move all VS Code
+    /// windows to → Screen N" command. Returns the number of windows moved.
+    /// </summary>
+    public int MoveAllToScreen(MonitorDescriptor screen)
+    {
+        int moved = 0;
+        foreach (var w in EnumerateOpenWorkspaceWindows())
+        {
+            WorkspaceLocation target;
+            if (_settings.Workspaces.TryGetValue(w.Workspace, out var saved)) target = saved.Clone();
+            else
+            {
+                // Never seen this workspace on this setup — carry over how it sits right now
+                // (maximized / snapped half / free rect) so only the screen changes.
+                target = new WorkspaceLocation();
+                MonitorRef.CaptureWindowPlacement(w.Hwnd, target);
+            }
+            target.DesktopId = w.DesktopId;          // stays on the desktop it's on
+            target.MonitorDeviceId = screen.DeviceId;
+            target.MonitorX = screen.Monitor.Left;
+            target.MonitorY = screen.Monitor.Top;
+            target.MonitorWidth = screen.Width;
+            target.MonitorHeight = screen.Height;
 
-            string? workspace = ExtractWorkspace(GetWindowTitle(hwnd));
-            if (workspace == null) return true;
-            if (!_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved)) return true;
-            if (saved.DesktopId == Guid.Empty) return true;
-
-            if (_desktop.GetDesktopForWindow(hwnd) == saved.DesktopId) return true; // already there
-            if (_desktop.MoveWindowToDesktop(hwnd, saved.DesktopId)) moved++;
-            return true;
-        }, IntPtr.Zero);
+            _desktop.PlaceWindow(w.Hwnd, target, Guid.Empty);
+            _settings.Workspaces[w.Workspace] = target;
+            moved++;
+        }
+        if (moved > 0) _settings.Save();
         return moved;
     }
 
@@ -116,31 +138,25 @@ internal sealed class VsCodeTracker : IDisposable
             Guid currentDesktop = _desktop.GetDesktopForWindow(hwnd);
             if (currentDesktop == Guid.Empty) return true;
 
-            var currentMonitor = MonitorRef.FromHwnd(hwnd);
-
             bool firstSight = !_established.Contains(hwnd);
 
-            // First sight with a saved entry: restore (desktop, monitor, window placement)
+            // First sight with a saved entry: restore (monitor, snap/placement, desktop)
             // if AutoMove on. Each step is best-effort; failures don't gate the next.
             if (firstSight &&
                 _settings.VsCodeAutoMove &&
-                _settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved))
+                _settings.Workspaces.TryGetValue(workspace, out var saved))
             {
-                if (saved.DesktopId != Guid.Empty && saved.DesktopId != currentDesktop)
-                {
-                    // Re-sync currentDesktop on success so the UpdateEntry below records the
-                    // post-move location, not the stale pre-move one. Without this, the saved
-                    // binding gets clobbered with whatever desktop VS Code happened to restore
-                    // the window on, and every Claude hook firing in the ~2s before the next
-                    // scan resolves to the wrong place (and gets cemented into learned-paths).
-                    if (_desktop.MoveWindowToDesktop(hwnd, saved.DesktopId))
-                        currentDesktop = saved.DesktopId;
-                }
-                if (saved.MonitorDeviceId != null || saved.MonitorWidth > 0)
-                    _desktop.MoveWindowToMonitor(hwnd, saved);
-                if (saved.WindowWidth > 0 || saved.WindowHeight > 0 || saved.WindowMaximized)
-                    MonitorRef.ApplyWindowPlacement(hwnd, saved);
+                // Re-read where it ended up so the UpdateEntry below records the post-move
+                // location, not the stale pre-move one. Without this, the saved binding gets
+                // clobbered with whatever desktop VS Code happened to restore the window on,
+                // and every Claude hook firing in the ~2s before the next scan resolves to
+                // the wrong place (and gets cemented into learned-paths).
+                _desktop.PlaceWindow(hwnd, saved, saved.DesktopId);
+                var after = _desktop.GetDesktopForWindow(hwnd);
+                if (after != Guid.Empty) currentDesktop = after;
             }
+
+            var currentMonitor = MonitorRef.FromHwnd(hwnd);
 
             // CRUD the observation to the now-current (desktop, monitor, placement).
             // Manual moves via the user's AHK Win+Ctrl+N flow through this path.
@@ -171,9 +187,9 @@ internal sealed class VsCodeTracker : IDisposable
     /// </summary>
     private bool UpdateEntry(string workspace, WorkspaceLocation observed)
     {
-        if (_settings.VsCodeWorkspaceDesktops.TryGetValue(workspace, out var saved) && SameLocation(saved, observed))
+        if (_settings.Workspaces.TryGetValue(workspace, out var saved) && SameLocation(saved, observed))
             return false;
-        _settings.VsCodeWorkspaceDesktops[workspace] = observed;
+        _settings.Workspaces[workspace] = observed;
         return true;
     }
 
@@ -188,7 +204,7 @@ internal sealed class VsCodeTracker : IDisposable
         && a.WindowOffsetY == b.WindowOffsetY
         && a.WindowWidth == b.WindowWidth
         && a.WindowHeight == b.WindowHeight
-        && a.WindowMaximized == b.WindowMaximized;
+        && a.Snap == b.Snap;
 
     private static string GetWindowTitle(IntPtr hwnd)
     {

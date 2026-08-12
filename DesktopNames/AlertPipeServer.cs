@@ -21,6 +21,7 @@ internal sealed class AlertPipeServer : IDisposable
     private readonly Settings _settings;
     private readonly DesktopService _desktop;
     private readonly WorkspaceFolderIndex _wsIndex = new();
+    private readonly ClaudeSessionRegistry _claudeSessions = new();
     private Thread? _thread;
     private NamedPipeServerStream? _current;
     private volatile bool _stopping;
@@ -124,7 +125,7 @@ internal sealed class AlertPipeServer : IDisposable
         // DN now decides which color each Claude hook event maps to. Falls back to the
         // legacy `state` field if `hookEvent` is missing, so older callers / synthetic
         // tests still work during the transition.
-        if (!TryClassify(msg, out var stateKind))
+        if (!TryClassify(msg, out var transition))
         {
             Log.Pipe($"rejected: unclassifiable hookEvent={msg.HookEvent ?? "<null>"} state={msg.State ?? "<null>"}");
             WriteReply(pipe, new ReplyJson { Ok = false, Error = "unclassifiable" });
@@ -133,7 +134,9 @@ internal sealed class AlertPipeServer : IDisposable
         string extras = "";
         if (!string.IsNullOrEmpty(msg.NotificationKind)) extras += $" notif={msg.NotificationKind}";
         if (!string.IsNullOrEmpty(msg.ErrorType))        extras += $" err={msg.ErrorType}";
-        Log.Pipe($"IN  session={msg.SessionId} hook={msg.HookEvent ?? "-"} -> {stateKind} cwd={msg.Cwd} vscodePid={msg.VsCodePid} parentPid={msg.ParentPid} walk={msg.WalkOutcome ?? "-"}{extras}");
+        string effect = transition.Remove ? "remove"
+                      : $"{(transition.Activity?.ToString() ?? "activity-unchanged")}/ask={transition.Ask}";
+        Log.Pipe($"IN  session={msg.SessionId} hook={msg.HookEvent ?? "-"} -> {effect} cwd={msg.Cwd} vscodePid={msg.VsCodePid} parentPid={msg.ParentPid} walk={msg.WalkOutcome ?? "-"}{extras}");
 
         // Resolution + state mutation must run on the UI thread.
         ReplyJson reply = new();
@@ -146,7 +149,22 @@ internal sealed class AlertPipeServer : IDisposable
                 {
                     _host.RecordEvent(msg.SessionId ?? "", EventLabel(msg), msg.HookEvent ?? msg.State ?? "?", msg.ToolName ?? "");
                     var (target, userHint, viaSession) = ResolveDesktop(msg);
-                    if (target == Guid.Empty && stateKind != StateKind.None)
+
+                    // Prefer the most specific human-readable line ClaudeHook can give us so the
+                    // hover/flyout identifies what this Claude is doing. These are event-exclusive:
+                    //   PreToolUse   → toolDescription ("Edit Program.cs"); pre-truncated + word-safe.
+                    //   Notification → message (the question / idle prompt Claude is waiting on).
+                    //   Stop         → lastMessageTail (Claude's final ~200 chars); flatten newlines.
+                    // Otherwise fall back to ClaudeHook's body ("Running {tool}", "Ready", …).
+                    string body = msg.Body ?? "";
+                    if (!string.IsNullOrEmpty(msg.ToolDescription))
+                        body = msg.ToolDescription!;
+                    if (!string.IsNullOrEmpty(msg.Message))
+                        body = msg.Message!.Replace("\r", " ").Replace("\n", " ").Trim();
+                    if (!string.IsNullOrEmpty(msg.LastMessageTail))
+                        body = msg.LastMessageTail!.Replace("\r", " ").Replace("\n", " ").Trim();
+
+                    if (target == Guid.Empty && !transition.Remove)
                     {
                         // Park the session on the unresolved sentinel desktop so the "?"
                         // button in the overlay surfaces it. Reply is still ok:false so
@@ -154,22 +172,25 @@ internal sealed class AlertPipeServer : IDisposable
                         // Same livenessPid rule as the resolved path: reject pid<=4 (System,
                         // Idle, Git Bash MSYS PPID=1) so we don't reap within 5s.
                         int livenessPidUnres = msg.ParentPid > 4 ? msg.ParentPid : 0;
-                        _state.Apply(
+                        var eff = _state.Apply(
                             SessionState.UnresolvedDesktopId,
                             msg.Source ?? "unknown",
                             msg.SessionId!,
-                            stateKind,
+                            transition.Activity,
+                            transition.Ask,
+                            transition.Remove,
                             msg.Title ?? "",
-                            string.IsNullOrEmpty(msg.Cwd) ? (msg.Body ?? "") : msg.Cwd!,
+                            body,
                             livenessPidUnres,
                             msg.VsCodePid,
                             msg.HookEvent,
                             msg.ToolName,
+                            msg.ToolDescription,
                             msg.Cwd ?? "");
                         reply.Ok = false;
                         reply.Error = "vscode-window-not-found";
                         reply.UserMessage = userHint;
-                        Log.State($"UNRESOLVED session={msg.SessionId} state={stateKind} cwd={msg.Cwd}");
+                        Log.State($"UNRESOLVED session={msg.SessionId} state={eff} cwd={msg.Cwd}");
                     }
                     else
                     {
@@ -179,34 +200,25 @@ internal sealed class AlertPipeServer : IDisposable
                         // MSYS PPID=1 quirk — pid=1 isn't a real process on Windows and was
                         // causing every entry to be reaped within 5s of arriving).
                         int livenessPid = msg.ParentPid > 4 ? msg.ParentPid : 0;
-                        // Prefer the most specific human-readable line ClaudeHook can give us so
-                        // the hover identifies which Claude this is. These are event-exclusive:
-                        //   PreToolUse → toolDescription ("Edit Program.cs"); pre-truncated + word-
-                        //                safe, so display verbatim.
-                        //   Stop       → lastMessageTail (Claude's final ~200 chars); flatten
-                        //                newlines so it stays on the session's single hover line.
-                        // Otherwise fall back to ClaudeHook's body ("Running {tool}", "Ready", …).
-                        string body = msg.Body ?? "";
-                        if (!string.IsNullOrEmpty(msg.ToolDescription))
-                            body = msg.ToolDescription!;
-                        if (!string.IsNullOrEmpty(msg.LastMessageTail))
-                            body = msg.LastMessageTail!.Replace("\r", " ").Replace("\n", " ").Trim();
-                        _state.Apply(
+                        var eff = _state.Apply(
                             target,
                             msg.Source ?? "unknown",
                             msg.SessionId!,
-                            stateKind,
+                            transition.Activity,
+                            transition.Ask,
+                            transition.Remove,
                             msg.Title ?? "",
                             body,
                             livenessPid,
                             msg.VsCodePid,
                             msg.HookEvent,
                             msg.ToolName,
+                            msg.ToolDescription,
                             msg.Cwd ?? "");
 
                         // Learn from this resolution so siblings + future hooks resolve faster.
                         // Idle should drop sticky bindings; everything else cements them.
-                        if (stateKind == StateKind.None)
+                        if (transition.Remove)
                             _state.ClearSticky(msg.SessionId ?? "", msg.TranscriptPath);
                         else if (target != Guid.Empty)
                             // When resolved via the session pin, the cwd may have wandered into
@@ -219,7 +231,7 @@ internal sealed class AlertPipeServer : IDisposable
                         reply.Ok = true;
                         reply.DesktopIndex = info?.Index ?? -1;
                         reply.DesktopName = info?.Name ?? "";
-                        Log.State($"applied session={msg.SessionId} state={stateKind} livenessPid={livenessPid} desktop={target} idx={reply.DesktopIndex} name='{reply.DesktopName}'");
+                        Log.State($"applied session={msg.SessionId} state={eff} livenessPid={livenessPid} desktop={target} idx={reply.DesktopIndex} name='{reply.DesktopName}'");
                     }
                 }
                 catch (Exception ex)
@@ -296,11 +308,20 @@ internal sealed class AlertPipeServer : IDisposable
     };
 
     /// <summary>
-    /// Maps a Claude hook event to a StateKind. Source of truth for the color semantics
-    /// the user wants: yellow > orange > red > green (Asking > Busy > Error > Ready).
+    /// What one hook event does to a session. Activity and the pending question are separate
+    /// facts: a permission prompt doesn't stop the four tools already running, and a
+    /// background tool finishing doesn't answer the prompt. <c>Activity == null</c> means
+    /// "this event says nothing about what the session is doing".
+    /// </summary>
+    private readonly record struct Transition(StateKind? Activity, AskChange Ask, bool Remove = false);
+
+    /// <summary>
+    /// Maps a Claude hook event to its effect. Source of truth for the color semantics the
+    /// user wants: yellow > orange > red > green (Asking > Busy > Error > Ready), where
+    /// yellow now comes from a pending question rather than from winning a race.
     /// Falls back to the legacy <c>state</c> field if <c>hookEvent</c> isn't supplied.
     /// </summary>
-    private static bool TryClassify(AlertMessage msg, out StateKind state)
+    private static bool TryClassify(AlertMessage msg, out Transition t)
     {
         string? ev = msg.HookEvent;
         if (!string.IsNullOrEmpty(ev))
@@ -309,55 +330,86 @@ internal sealed class AlertPipeServer : IDisposable
             {
                 case "SessionStart":
                 case "UserPromptSubmit":
-                    state = StateKind.Busy; return true;
+                    // The user engaging is itself the answer to anything pending.
+                    t = new(StateKind.Busy, AskChange.Clear); return true;
                 case "PreToolUse":
-                    // Tools whose semantics are "block on user" map to Asking, not Busy.
-                    if (!string.IsNullOrEmpty(msg.ToolName) && BlockingTools.Contains(msg.ToolName!))
-                    { state = StateKind.Asking; return true; }
-                    state = StateKind.Busy; return true;
+                    // Tools whose whole purpose is to block on the user open a question.
+                    t = new(StateKind.Busy,
+                            !string.IsNullOrEmpty(msg.ToolName) && BlockingTools.Contains(msg.ToolName!)
+                                ? AskChange.Set : AskChange.None);
+                    return true;
+                case "PostToolUse":
+                    // The gated tool finished, so the prompt that gated it was answered.
+                    // Only clears a question raised by this same tool + description.
+                    t = new(StateKind.Busy, AskChange.ClearIfMatches); return true;
                 case "PermissionRequest":
-                    // Inline y/n permission dialog — primary signal for "Claude is blocked
-                    // on user". Stays yellow until the user answers.
-                    state = StateKind.Asking; return true;
+                    // Inline y/n dialog. Says nothing about activity — the session's other
+                    // in-flight tools keep running while the main loop blocks.
+                    t = new(null, AskChange.Set); return true;
                 case "Notification":
-                    // permission_prompt / idle_prompt → asking. auth_success is suppressed
+                    // permission_prompt / idle_prompt → a question. auth_success is suppressed
                     // by ClaudeHook before send so we shouldn't see it; treat as no-op if it
-                    // ever arrives. Unknown subtypes default to asking (be loud, not silent).
+                    // ever arrives. Unknown subtypes raise a question (be loud, not silent).
                     if (string.Equals(msg.NotificationKind, "auth_success", StringComparison.Ordinal))
-                    { state = StateKind.None; return true; }
-                    state = StateKind.Asking; return true;
+                    { t = new(null, AskChange.None); return true; }
+                    t = new(null, AskChange.Set); return true;
                 case "Stop":
-                    // Stop-with-question detection: ClaudeHook peeks the transcript and
-                    // sets lastMessageEndsWithQuestion=true when Claude's final assistant
-                    // text ends with "?". Treat that as Asking (yellow) even though
-                    // technically the turn finished. null/false → ordinary Ready (green).
+                    // The turn ended, so anything pending is resolved — except a question
+                    // Claude asked in its closing message, which is a new one.
                     if (msg.LastMessageEndsWithQuestion == true)
-                    { state = StateKind.Asking; return true; }
-                    state = StateKind.Ready; return true;
+                    { t = new(StateKind.Ready, AskChange.Set); return true; }
+                    // Background work still running (live Monitor watcher, or run_in_background
+                    // Bash) → still Busy. The turn ended but Claude is watching something.
+                    t = new(msg.BackgroundActive ? StateKind.Busy : StateKind.Ready, AskChange.Clear);
+                    return true;
                 case "StopFailure":
-                    state = StateKind.Error; return true;
+                    t = new(StateKind.Error, AskChange.Clear); return true;
                 case "SessionEnd":
-                    state = StateKind.None; return true;
+                    t = new(null, AskChange.Clear, Remove: true); return true;
                 default:
-                    state = StateKind.None; return false; // unknown hookEvent — refuse
+                    t = default; return false; // unknown hookEvent — refuse
             }
         }
         // Legacy callers (synthetic tests, older builds) that still send `state`.
-        if (!string.IsNullOrEmpty(msg.State) && TryParseState(msg.State!, out state)) return true;
-        state = StateKind.None;
+        if (!string.IsNullOrEmpty(msg.State) && TryParseState(msg.State!, out var legacy))
+        {
+            t = legacy switch
+            {
+                StateKind.Asking => new(null, AskChange.Set),
+                StateKind.None   => new(null, AskChange.Clear, Remove: true),
+                _                => new(legacy, AskChange.Clear),
+            };
+            return true;
+        }
+        t = default;
         return false;
     }
 
     /// <summary>
     /// Resolution order (from authoritative-now to learned-history):
-    /// 1. vscodePid — exact window on the current process tree.
-    /// 2. cwd walk-up against tracked workspace rootNames.
-    /// 3. learned-path index from prior successful resolutions (sibling cwds, etc.).
-    /// 4. sticky session/transcript cache (works after the originating window closed).
+    /// 1. ide-lock — the launching window's own workspace folders, joined via the session's
+    ///    inherited CLAUDE_CODE_SSE_PORT. Exact; immune to cwd wandering and title parsing.
+    /// 2. vscodePid — only resolves when a single VS Code window exists (see below).
+    /// 3. sticky session/transcript cache (works after the originating window closed).
+    /// 4. cwd walk-up against tracked workspace rootNames.
+    /// 5. learned-path index from prior successful resolutions (sibling cwds, etc.).
     /// Returns Guid.Empty + a human-actionable hint when nothing matches.
     /// </summary>
     private (Guid desktopId, string? userMessage, bool viaSession) ResolveDesktop(AlertMessage msg)
     {
+        foreach (var folder in _claudeSessions.WorkspaceFoldersFor(msg.SessionId))
+        {
+            foreach (var rootName in RootNamesForFolder(folder))
+            {
+                if (_settings.Workspaces.TryGetValue(rootName, out var loc) &&
+                    loc.DesktopId != Guid.Empty)
+                {
+                    Log.Resolver($"  via=ide-lock({folder}) -> rootName={rootName} -> {loc.DesktopId}");
+                    return (loc.DesktopId, null, true);
+                }
+            }
+        }
+
         if (msg.VsCodePid > 0)
         {
             var g = ResolveByVsCodePid(msg.VsCodePid);
@@ -390,14 +442,14 @@ internal sealed class AlertPipeServer : IDisposable
             {
                 foreach (var rootName in candidates)
                 {
-                    if (_settings.VsCodeWorkspaceDesktops.TryGetValue(rootName, out var loc) &&
+                    if (_settings.Workspaces.TryGetValue(rootName, out var loc) &&
                         loc.DesktopId != Guid.Empty)
                     {
                         Log.Resolver($"  via=workspace-index({msg.Cwd}) -> rootName={rootName} -> {loc.DesktopId}");
                         return (loc.DesktopId, null, false);
                     }
                 }
-                Log.Resolver($"  workspace-index found candidates [{string.Join(",", candidates)}] but none in VsCodeWorkspaceDesktops");
+                Log.Resolver($"  workspace-index found candidates [{string.Join(",", candidates)}] but none in the remembered layout");
             }
 
             if (_state.TryLookupLearnedPath(msg.Cwd!, out var lp))
@@ -444,6 +496,20 @@ internal sealed class AlertPipeServer : IDisposable
         }
         foreach (var n in _wsIndex.FindRootNameCandidates(cwd!)) set.Add(n);
         return set;
+    }
+
+    /// <summary>
+    /// rootNames VS Code could be showing in the title for a workspace root reported by an
+    /// ide lock: the folder's own basename (plain-folder window) plus any .code-workspace
+    /// names the workspace index maps to that exact path (multi-root window).
+    /// </summary>
+    private IEnumerable<string> RootNamesForFolder(string folder)
+    {
+        string norm = folder.Replace('/', '\\').TrimEnd('\\', ' ');
+        string basename = Path.GetFileName(norm);
+        if (basename.Length > 0) yield return basename;
+        foreach (var n in _wsIndex.FindRootNameCandidates(norm))
+            if (n != basename) yield return n;
     }
 
     private Guid ResolveByVsCodePid(int pid)
@@ -500,7 +566,7 @@ internal sealed class AlertPipeServer : IDisposable
             int slash = current.LastIndexOf('\\');
             string name = slash >= 0 ? current[(slash + 1)..] : current;
             if (name.Length > 0 &&
-                _settings.VsCodeWorkspaceDesktops.TryGetValue(name, out var loc) &&
+                _settings.Workspaces.TryGetValue(name, out var loc) &&
                 loc.DesktopId != Guid.Empty)
             {
                 return loc.DesktopId;
@@ -550,6 +616,13 @@ internal sealed class AlertPipeServer : IDisposable
         //   null  → peek failed / schema break — treat as Ready (fail-closed).
         public bool? LastMessageEndsWithQuestion { get; set; }
         public string? LastMessageTail { get; set; }
+
+        // Sent by ClaudeHook on Stop events. true when background work is still running at
+        // turn end — a live Monitor watcher (detected from the transcript) or a
+        // run_in_background Bash shell (from the Stop payload's background_tasks). Colours
+        // the Stop Busy (orange), not Ready (green): the turn ended but Claude is still
+        // working. See ../Claude-Alert/DESKTOPNAMES-INTEGRATION.md.
+        public bool BackgroundActive { get; set; }
 
         // process tree
         public int VsCodePid { get; set; }

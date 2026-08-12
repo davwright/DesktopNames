@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Skill(authoring-skills)",
-      "Skill(authoring-skills:*)"
+      "Skill(authoring-skills:*)",
+      "Bash(mkdir -p C:/Users/dwrigh/AppData/Local/Temp/claude/c--git-tools-DesktopNames/0879f60d-9c85-4fd6-90ff-014ff20287be/scratchpad/rt/appdata/DesktopNames)",
+      "Bash(cp C:/Users/dwrigh/AppData/Roaming/DesktopNames/settings.json C:/Users/dwrigh/AppData/Local/Temp/claude/c--git-tools-DesktopNames/0879f60d-9c85-4fd6-90ff-014ff20287be/scratchpad/rt/appdata/DesktopNames/settings.json)",
+      "Bash(APPDATA=C:/Users/dwrigh/AppData/Local/Temp/claude/c--git-tools-DesktopNames/0879f60d-9c85-4fd6-90ff-014ff20287be/scratchpad/rt/appdata dotnet run -v q --nologo)",
+      "Bash(APPDATA=C:/Users/dwrigh/AppData/Local/Temp/claude/c--git-tools-DesktopNames/0879f60d-9c85-4fd6-90ff-014ff20287be/scratchpad/dlg/appdata timeout 110 dotnet run -v q --nologo C:/Users/dwrigh/AppData/Local/Temp/claude/c--git-tools-DesktopNames/0879f60d-9c85-4fd6-90ff-014ff20287be/scratchpad/dlg/arrange3.png)"
     ]
   }
 }

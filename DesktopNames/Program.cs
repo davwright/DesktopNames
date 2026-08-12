@@ -16,6 +16,9 @@ static class Program
 
         var settings = Settings.Load();
         Log.Configure(settings.AlertLogEnabled);
+        // First line after every restart says which build produced everything below it.
+        // Without this, "the fix isn't taking" and "the publish hasn't run yet" look identical.
+        Log.Startup($"DesktopNames {GetBuildStamp()} pid={Environment.ProcessId}");
 
         // Locate and load VirtualDesktopAccessor.dll before DesktopService starts —
         // VdaDll P/Invokes are no-ops until this succeeds. If the DLL is missing, prompt
@@ -55,7 +58,7 @@ static class Program
 
         var trayIcon = new NotifyIcon
         {
-            Text = $"DesktopNames v{GetAppVersion()}",
+            Text = $"DesktopNames v{GetBuildStamp()}",
             Icon = appIcon,
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip()
@@ -233,6 +236,18 @@ static class Program
             return s is null ? null : new Icon(s);
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Full build stamp — <c>1.2.19+a1b2c3d</c>, or <c>…+a1b2c3d.dirty</c> when publish.ps1
+    /// built from a working tree that didn't match that commit. Unlike
+    /// <see cref="GetAppVersion"/> this keeps the suffix: the suffix is the whole point.
+    /// </summary>
+    public static string GetBuildStamp()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        return string.IsNullOrWhiteSpace(info) ? GetAppVersion() : info!;
     }
 
     public static string GetAppVersion()
@@ -528,11 +543,15 @@ internal sealed class HostForm : Form
             _ => "",
         };
 
+        // Asking is a pending question, not an activity level — inject it as one so the
+        // test entries exercise the same path real events take.
         _sessionState.Apply(
             current,
             source: "test",
             sessionId: "t-" + Guid.NewGuid().ToString("N").Substring(0, 6),
-            state: state,
+            activity: state == StateKind.Asking ? null : state,
+            ask: state == StateKind.Asking ? AskChange.Set : AskChange.Clear,
+            remove: false,
             title: $"Test — {state.ToString().ToLowerInvariant()}",
             body: body,
             sessionPid: 0,
@@ -838,6 +857,22 @@ internal sealed class HostForm : Form
         if (dlg.ShowDialog() == DialogResult.OK) RefreshAllOverlays();
     }
 
+    /// <summary>Overlay command: pull every open VS Code window onto one screen, each staying
+    /// on its own virtual desktop and in its own snap position.</summary>
+    public void MoveAllVsCodeToScreen(MonitorDescriptor screen)
+    {
+        _vscodeTracker?.MoveAllToScreen(screen);
+        RefreshAllOverlays();
+    }
+
+    /// <summary>Overlay command: put every open VS Code window back where this screen setup
+    /// remembers it (desktop + screen + snap position).</summary>
+    public void RestoreVsCodeLayout()
+    {
+        _vscodeTracker?.MoveAllToRemembered();
+        RefreshAllOverlays();
+    }
+
     /// <summary>Live snapshot of the taskbar overlays — used by the reassign flyout for
     /// screen-point hit-testing of drop targets.</summary>
     public IReadOnlyList<TaskbarOverlay> Overlays => _overlays.ToArray();
@@ -916,6 +951,7 @@ internal sealed class HostForm : Form
 
         if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
         {
+            _settings.InvalidateLayout();   // different screen setup => different remembered layout
             BeginInvoke(RebuildOverlays);
         }
         else if (m.Msg == NativeMethods.WM_SETTINGCHANGE)

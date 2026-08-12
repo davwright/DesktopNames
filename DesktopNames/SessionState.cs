@@ -16,13 +16,73 @@ namespace DesktopNames;
 /// </summary>
 internal enum StateKind { None = 0, Ready = 1, Error = 2, Busy = 3, Asking = 4 }
 
+/// <summary>What an incoming event does to a session's pending question, independent of
+/// what it does to the session's activity. See <see cref="SessionEntry.Ask"/>.</summary>
+internal enum AskChange
+{
+    /// <summary>Event says nothing about a pending question (ordinary tool traffic).</summary>
+    None,
+    /// <summary>Claude is now blocked on the user (permission prompt, blocking tool, Stop-with-question).</summary>
+    Set,
+    /// <summary>Turn boundary — whatever was pending is resolved.</summary>
+    Clear,
+    /// <summary>A tool finished; clears the pending question only if it's the one that was gated.</summary>
+    ClearIfMatches,
+}
+
+/// <summary>
+/// A question Claude is blocked on. Identified by tool + description rather than a
+/// tool_use_id because PermissionRequest doesn't carry one — but PreToolUse,
+/// PermissionRequest and PostToolUse for the same call all produce the same pair, which
+/// is what lets a completed tool clear the prompt it was gated by.
+/// </summary>
+internal sealed class PendingAsk
+{
+    public string ToolName { get; init; } = "";
+    public string Description { get; init; } = "";
+    /// <summary>Text to show while the question is pending — kept separately so ordinary
+    /// background tool traffic can update the entry's Body without losing the question.</summary>
+    public string Body { get; init; } = "";
+    public DateTime SinceUtc { get; init; }
+
+    public bool Matches(string toolName, string description) =>
+        ToolName == toolName &&
+        (Description.Length == 0 || description.Length == 0 || Description == description);
+}
+
 internal sealed class SessionEntry
 {
+    /// <summary>How many recent message bodies to keep per session for the flyout.</summary>
+    public const int RecentBodiesMax = 5;
+
     public string Source { get; init; } = "";
     public string SessionId { get; init; } = "";
-    public StateKind State { get; set; }
+
+    /// <summary>What the session is doing: Busy / Ready / Error. Never Asking — being
+    /// blocked on the user is <see cref="Ask"/>, which is a separate fact that coexists
+    /// with activity. A session can be running four parallel tools *and* waiting on a
+    /// permission prompt; collapsing both into one field is what let background
+    /// PreToolUse events repaint the desktop orange over a live question.</summary>
+    public StateKind Activity { get; set; }
+
+    /// <summary>Questions Claude is blocked on, oldest first. A list rather than one slot
+    /// because prompts can queue: answering the second must not clear the first.</summary>
+    public List<PendingAsk> Asks { get; } = new();
+
+    /// <summary>Displayed state. A pending question outranks whatever else is happening.</summary>
+    public StateKind State => Asks.Count > 0 ? StateKind.Asking : Activity;
+
+    /// <summary>The question to show — the oldest one still unanswered.</summary>
+    public PendingAsk? OldestAsk => Asks.Count > 0 ? Asks[0] : null;
+
     public string Title { get; set; } = "";
     public string Body { get; set; } = "";
+
+    /// <summary>The last few <see cref="Body"/> values, oldest first, most recent last. The
+    /// reassign flyout shows these so the user can identify a session by its recent activity,
+    /// not just its current line. Capped at <see cref="RecentBodiesMax"/>.</summary>
+    public List<string> RecentBodies { get; } = new();
+
     public int SessionPid { get; init; }
     public int VsCodePid { get; init; }
     public DateTime LastSeenUtc { get; set; }
@@ -108,9 +168,11 @@ internal sealed class SessionState
         public Guid DesktopId { get; set; }
         public string Source { get; set; } = "";
         public string SessionId { get; set; } = "";
-        public StateKind State { get; set; }
+        public StateKind Activity { get; set; }
+        public List<PendingAsk> Asks { get; set; } = new();
         public string Title { get; set; } = "";
         public string Body { get; set; } = "";
+        public List<string> RecentBodies { get; set; } = new();
         public int SessionPid { get; set; }
         public int VsCodePid { get; set; }
         public string HookEvent { get; set; } = "";
@@ -129,7 +191,9 @@ internal sealed class SessionState
                     list.Add(new PersistedEntry
                     {
                         DesktopId = desktopId, Source = e.Source, SessionId = e.SessionId,
-                        State = e.State, Title = e.Title, Body = e.Body,
+                        Activity = e.Activity, Asks = new List<PendingAsk>(e.Asks),
+                        Title = e.Title, Body = e.Body,
+                        RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
                         Consumed = e.Consumed,
@@ -157,14 +221,21 @@ internal sealed class SessionState
                 if (p.SessionPid > 0 && !IsAlive(p.SessionPid)) continue;
                 if (!_byDesktop.TryGetValue(p.DesktopId, out var bucket))
                     _byDesktop[p.DesktopId] = bucket = new List<SessionEntry>();
-                bucket.Add(new SessionEntry
+                // Entries written by a pre-Activity/Asks build deserialize with neither set,
+                // so they carry no state worth restoring — drop rather than resurrect a blank row.
+                if (p.Activity == StateKind.None && (p.Asks == null || p.Asks.Count == 0)) continue;
+                var restored = new SessionEntry
                 {
-                    Source = p.Source, SessionId = p.SessionId, State = p.State,
+                    Source = p.Source, SessionId = p.SessionId,
+                    Activity = p.Activity,
                     Title = p.Title, Body = p.Body, SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
                     Cwd = p.Cwd, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore
-                });
+                };
+                if (p.Asks != null) restored.Asks.AddRange(p.Asks);
+                if (p.RecentBodies != null) restored.RecentBodies.AddRange(p.RecentBodies);
+                bucket.Add(restored);
                 _location[(p.Source, p.SessionId)] = p.DesktopId;
             }
         }
@@ -172,20 +243,28 @@ internal sealed class SessionState
         finally { _loading = false; }
     }
 
-    /// <summary>Apply a state transition. <paramref name="desktopId"/> is the resolved target.</summary>
-    public void Apply(Guid desktopId, string source, string sessionId,
-                      StateKind state, string title, string body,
-                      int sessionPid, int vsCodePid,
-                      string? hookEvent = null, string? toolName = null, string cwd = "")
+    /// <summary>
+    /// Apply an event. <paramref name="activity"/> is null when the event says nothing about
+    /// what the session is doing (a permission prompt doesn't stop the work already running);
+    /// <paramref name="remove"/> drops the session entirely (SessionEnd).
+    /// Returns the session's effective state afterwards, so callers log what was actually
+    /// stored rather than what they sent.
+    /// </summary>
+    public StateKind Apply(Guid desktopId, string source, string sessionId,
+                           StateKind? activity, AskChange ask, bool remove,
+                           string title, string body,
+                           int sessionPid, int vsCodePid,
+                           string? hookEvent = null, string? toolName = null,
+                           string? toolDescription = null, string cwd = "")
     {
         var key = (source, sessionId);
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
         var prevPrevAgg = prevDesktop != Guid.Empty ? GetAggregate(prevDesktop) : default;
         var prevTargetAgg = GetAggregate(desktopId);
 
-        if (state == StateKind.None)
+        StateKind effective = StateKind.None;
+        if (remove)
         {
-            // Idle = remove from wherever it is, no insert.
             if (prevDesktop != Guid.Empty) RemoveEntry(prevDesktop, source, sessionId);
             _location.Remove(key);
         }
@@ -195,8 +274,9 @@ internal sealed class SessionState
             if (prevDesktop != Guid.Empty && prevDesktop != desktopId)
                 RemoveEntry(prevDesktop, source, sessionId);
 
-            UpsertEntry(desktopId, source, sessionId, state, title, body, sessionPid, vsCodePid,
-                        hookEvent ?? "", toolName ?? "", cwd ?? "");
+            effective = UpsertEntry(desktopId, source, sessionId, activity, ask, title, body,
+                                    sessionPid, vsCodePid, hookEvent ?? "", toolName ?? "",
+                                    toolDescription ?? "", cwd ?? "");
             _location[key] = desktopId;
         }
 
@@ -208,6 +288,7 @@ internal sealed class SessionState
         }
         var targetNow = GetAggregate(desktopId);
         if (!AggregateEquals(prevTargetAgg, targetNow)) Changed?.Invoke(desktopId);
+        return effective;
     }
 
     /// <summary>Aggregate state, count of sessions at that state, and a tooltip body.</summary>
@@ -476,9 +557,12 @@ internal sealed class SessionState
     private static string NormalizePath(string p) =>
         p.Replace('/', '\\').TrimEnd('\\', ' ');
 
-    /// <summary>A session located on a desktop, with enough context for the reassign flyout.</summary>
+    /// <summary>A session located on a desktop, with enough context for the reassign flyout.
+    /// <paramref name="RecentBodies"/> is oldest-first; the flyout shows them so the row carries
+    /// the same message context as the taskbar hovertext.</summary>
     public readonly record struct SessionRef(
-        string Source, string SessionId, string Label, string Cwd, StateKind State, DateTime LastSeenUtc);
+        string Source, string SessionId, string Label, string Cwd, StateKind State,
+        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies);
 
     /// <summary>
     /// Every session currently located on <paramref name="desktopId"/> (consumed or not),
@@ -494,7 +578,8 @@ internal sealed class SessionState
             string label = !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd)
                          : !string.IsNullOrEmpty(e.Title) ? e.Title
                          : e.SessionId;
-            result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc));
+            result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc,
+                                      e.RecentBodies.ToArray()));
         }
         return result;
     }
@@ -581,10 +666,10 @@ internal sealed class SessionState
         return $"{total} session{(total == 1 ? "" : "s")}: " + string.Join(" · ", parts);
     }
 
-    private void UpsertEntry(Guid desktopId, string source, string sessionId,
-                             StateKind state, string title, string body,
-                             int sessionPid, int vsCodePid,
-                             string hookEvent, string toolName, string cwd)
+    private StateKind UpsertEntry(Guid desktopId, string source, string sessionId,
+                                  StateKind? activity, AskChange ask, string title, string body,
+                                  int sessionPid, int vsCodePid,
+                                  string hookEvent, string toolName, string toolDescription, string cwd)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list))
         {
@@ -598,45 +683,86 @@ internal sealed class SessionState
         }
         if (existing == null)
         {
-            list.Add(new SessionEntry
+            existing = new SessionEntry
             {
                 Source = source,
                 SessionId = sessionId,
-                State = state,
-                Title = title,
-                Body = body,
+                // A first sighting with no activity of its own (a bare PermissionRequest) is
+                // still a live session — Busy is the honest floor under the question.
+                Activity = activity ?? StateKind.Busy,
                 SessionPid = sessionPid,
                 VsCodePid = vsCodePid,
-                LastSeenUtc = DateTime.UtcNow,
-                HookEvent = hookEvent,
-                ToolName = toolName,
-                Cwd = cwd,
-            });
+            };
+            list.Add(existing);
         }
-        else
+        else if (activity.HasValue)
         {
-            // Asking is sticky against parallel tool traffic. While a permission prompt is
-            // pending, the session's other in-flight tools keep firing PreToolUse, and
-            // last-write-wins would repaint the desktop orange within seconds — the user
-            // never sees the yellow. Freeze the whole entry (state, body, age) so the
-            // tooltip keeps showing the question and its true age. Everything else still
-            // gets through: Stop / UserPromptSubmit / SessionEnd end the turn (so the
-            // prompt was answered), and Ready / Error / None overwrite as before.
-            if (existing.State == StateKind.Asking && state == StateKind.Busy && hookEvent == "PreToolUse")
-            {
-                Log.State($"suppressed session={sessionId} PreToolUse/Busy over pending Asking (tool={toolName})");
-                return;
-            }
-
-            existing.State = state;
-            existing.Title = title;
-            existing.Body = body;
-            existing.LastSeenUtc = DateTime.UtcNow;
-            existing.Consumed = false;
-            existing.HookEvent = hookEvent;
-            existing.ToolName = toolName;
-            if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;
+            existing.Activity = activity.Value;
         }
+
+        ApplyAskChange(existing, ask, sessionId, toolName, toolDescription, body);
+
+        existing.Title = title;
+        // While a question is pending, the visible line stays the question. Background tools
+        // keep reporting, and their descriptions are still recorded in RecentBodies, but they
+        // don't get to overwrite what the user is being asked.
+        existing.Body = existing.OldestAsk?.Body is { Length: > 0 } q ? q : body;
+        existing.LastSeenUtc = DateTime.UtcNow;
+        existing.Consumed = false;
+        existing.HookEvent = hookEvent;
+        existing.ToolName = toolName;
+        if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;
+        PushRecentBody(existing, body);
+        return existing.State;
+    }
+
+    private static void ApplyAskChange(SessionEntry entry, AskChange ask, string sessionId,
+                                       string toolName, string toolDescription, string body)
+    {
+        switch (ask)
+        {
+            case AskChange.Set:
+                // Re-notification for the same prompt is common (Claude re-emits while it
+                // waits), so only add one entry per distinct question.
+                if (!entry.Asks.Any(a => a.Matches(toolName, toolDescription)))
+                    entry.Asks.Add(new PendingAsk
+                    {
+                        ToolName = toolName,
+                        Description = toolDescription,
+                        Body = body,
+                        SinceUtc = DateTime.UtcNow,
+                    });
+                break;
+
+            case AskChange.Clear:
+                if (entry.Asks.Count > 0)
+                    Log.State($"ask cleared session={sessionId} (turn boundary, {entry.Asks.Count} pending)");
+                entry.Asks.Clear();
+                break;
+
+            case AskChange.ClearIfMatches:
+                // PostToolUse: the gated tool ran, so the user answered *that* prompt. A
+                // different tool finishing means nothing — that's exactly the parallel
+                // traffic that used to clobber the question.
+                int i = entry.Asks.FindIndex(a => a.Matches(toolName, toolDescription));
+                if (i >= 0)
+                {
+                    entry.Asks.RemoveAt(i);
+                    Log.State($"ask answered session={sessionId} tool={toolName} ({entry.Asks.Count} still pending)");
+                }
+                break;
+        }
+    }
+
+    /// <summary>Append a body to the rolling buffer, skipping empties and consecutive duplicates
+    /// (PreToolUse repeats the same "Running {tool}" line), capped at <see cref="SessionEntry.RecentBodiesMax"/>.</summary>
+    private static void PushRecentBody(SessionEntry entry, string body)
+    {
+        if (string.IsNullOrEmpty(body)) return;
+        if (entry.RecentBodies.Count > 0 && entry.RecentBodies[^1] == body) return;
+        entry.RecentBodies.Add(body);
+        while (entry.RecentBodies.Count > SessionEntry.RecentBodiesMax)
+            entry.RecentBodies.RemoveAt(0);
     }
 
     private void RemoveEntry(Guid desktopId, string source, string sessionId)
