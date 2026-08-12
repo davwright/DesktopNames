@@ -615,6 +615,19 @@ internal sealed class SessionState
         }
         else
         {
+            // Asking is sticky against parallel tool traffic. While a permission prompt is
+            // pending, the session's other in-flight tools keep firing PreToolUse, and
+            // last-write-wins would repaint the desktop orange within seconds — the user
+            // never sees the yellow. Freeze the whole entry (state, body, age) so the
+            // tooltip keeps showing the question and its true age. Everything else still
+            // gets through: Stop / UserPromptSubmit / SessionEnd end the turn (so the
+            // prompt was answered), and Ready / Error / None overwrite as before.
+            if (existing.State == StateKind.Asking && state == StateKind.Busy && hookEvent == "PreToolUse")
+            {
+                Log.State($"suppressed session={sessionId} PreToolUse/Busy over pending Asking (tool={toolName})");
+                return;
+            }
+
             existing.State = state;
             existing.Title = title;
             existing.Body = body;
