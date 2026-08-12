@@ -21,6 +21,15 @@ $csproj    = Join-Path $PSScriptRoot 'DesktopNames\DesktopNames.csproj'
 $deployDir = Join-Path $env:APPDATA 'DesktopNames'
 $exe       = Join-Path $deployDir 'DesktopNames.exe'
 
+# --- provenance (before the version bump, which would otherwise dirty the tree itself) ---
+# The version number alone identifies nothing: this script deliberately publishes the
+# working tree, which routinely holds uncommitted work. Record the commit it was built
+# from, and whether the tree matched that commit, so the running build can always be
+# traced back (or honestly labelled as untraceable).
+$sha = & git -C $PSScriptRoot rev-parse --short HEAD 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'nogit' }
+$dirty = if (& git -C $PSScriptRoot status --porcelain 2>$null) { '.dirty' } else { '' }
+
 # --- read current version ---
 $xml = [xml](Get-Content $csproj)
 $node = $xml.Project.PropertyGroup.Version
@@ -54,14 +63,6 @@ if ($new -ne $current) {
     Write-Host "Version unchanged: $new"
 }
 
-# --- provenance ---
-# The version number alone identifies nothing: this script deliberately publishes the
-# working tree, which routinely holds uncommitted work. Stamp the commit it was built
-# from, and mark it dirty when the tree doesn't match that commit, so the running build
-# can always be traced back (or honestly labelled as untraceable).
-$sha = & git -C $PSScriptRoot rev-parse --short HEAD 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'nogit' }
-$dirty = if (& git -C $PSScriptRoot status --porcelain 2>$null) { '.dirty' } else { '' }
 $stamp = "$new+$sha$dirty"
 if ($dirty) { Write-Warning "working tree is dirty - the deployed build matches no commit ($stamp)" }
 
