@@ -54,18 +54,29 @@ if ($new -ne $current) {
     Write-Host "Version unchanged: $new"
 }
 
+# --- provenance ---
+# The version number alone identifies nothing: this script deliberately publishes the
+# working tree, which routinely holds uncommitted work. Stamp the commit it was built
+# from, and mark it dirty when the tree doesn't match that commit, so the running build
+# can always be traced back (or honestly labelled as untraceable).
+$sha = & git -C $PSScriptRoot rev-parse --short HEAD 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $sha) { $sha = 'nogit' }
+$dirty = if (& git -C $PSScriptRoot status --porcelain 2>$null) { '.dirty' } else { '' }
+$stamp = "$new+$sha$dirty"
+if ($dirty) { Write-Warning "working tree is dirty - the deployed build matches no commit ($stamp)" }
+
 # --- stop, publish, relaunch ---
 Get-Process DesktopNames -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
 
-& dotnet publish $csproj -c Release -o $deployDir --nologo
+& dotnet publish $csproj -c Release -o $deployDir --nologo -p:InformationalVersion=$stamp
 if ($LASTEXITCODE -ne 0) { throw "publish failed (exit $LASTEXITCODE)" }
 
 Start-Process $exe
 Start-Sleep -Milliseconds 800
 $proc = Get-Process DesktopNames -ErrorAction SilentlyContinue
 if ($proc) {
-    Write-Host "Relaunched v$new (pid $($proc.Id))" -ForegroundColor Green
+    Write-Host "Relaunched $stamp (pid $($proc.Id))" -ForegroundColor Green
 } else {
-    Write-Warning "Published v$new but process is not running."
+    Write-Warning "Published $stamp but process is not running."
 }
