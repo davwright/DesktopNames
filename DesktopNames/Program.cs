@@ -310,7 +310,9 @@ static class Program
                 string suffix = r.Success ? "" :
                     r.LastError switch
                     {
-                        1409 => "   (Win32 1409: another running app already holds this combo)",
+                        // 1409 covers both cases: Windows returns it for its own reserved
+                        // combos (Win+L, Win+Alt+arrows, ...) as well as for app collisions.
+                        1409 => "   (Win32 1409: reserved by Windows, or held by another running app)",
                         -1   => "",
                         _    => $"   (Win32 error {r.LastError})"
                     };
