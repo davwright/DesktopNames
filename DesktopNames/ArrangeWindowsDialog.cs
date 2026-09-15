@@ -29,10 +29,27 @@ internal sealed class ArrangeWindowsDialog : Form
     private readonly List<(FlowLayoutPanel panel, DesktopInfo desktop, MonitorDescriptor screen)> _bodyCells = new();
     private readonly ContextMenuStrip _snapMenu = new();
     private readonly Label _setupLabel = new();
+    private readonly ToolTip _tips = new();
     private TableLayoutPanel? _grid;
     private Panel? _bar;
     private Panel? _header;
+    private Label? _hint;
     private Label? _dragChip;
+
+    /// <summary>
+    /// WS_EX_COMPOSITED: paint the whole child tree into one off-screen buffer. Without it a
+    /// drop repaints each grid cell as its row height is recomputed, so the rows above the
+    /// drop visibly flash one after the other.
+    /// </summary>
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x02000000;
+            return cp;
+        }
+    }
 
     public ArrangeWindowsDialog(DesktopService desktop, Settings settings, VsCodeTracker tracker)
     {
@@ -233,6 +250,7 @@ internal sealed class ArrangeWindowsDialog : Form
         var bar = new Panel { Dock = DockStyle.Bottom, Height = 48 };
         var okBtn = new Button { Text = "OK", DialogResult = DialogResult.OK, Width = 90, Height = 30, Anchor = AnchorStyles.Right | AnchorStyles.Top };
         var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 90, Height = 30, Anchor = AnchorStyles.Right | AnchorStyles.Top };
+        var auto = new Button { Text = "Auto-assign by name", Width = 140, Height = 30, Anchor = AnchorStyles.Right | AnchorStyles.Top };
         var hint = new Label
         {
             Text = "Drag chips between cells · right-click a chip for full screen / half / quarter",
@@ -241,19 +259,24 @@ internal sealed class ArrangeWindowsDialog : Form
             Location = new Point(12, 15),
             Height = 18,
         };
+        _hint = hint;
+        auto.Location = new Point(bar.Width - 350, 9);
         okBtn.Location = new Point(bar.Width - 200, 9);
         cancel.Location = new Point(bar.Width - 100, 9);
         // keep them anchored to the right as the form resizes; the hint takes what's left
         bar.Resize += (_, _) =>
         {
+            auto.Left = bar.Width - 350;
             okBtn.Left = bar.Width - 200;
             cancel.Left = bar.Width - 100;
-            hint.Width = Math.Max(0, okBtn.Left - 24);
+            hint.Width = Math.Max(0, auto.Left - 24);
         };
+        auto.Click += (_, _) => AutoAssign();
         okBtn.Click += (_, _) => Apply();
         AcceptButton = okBtn;
         CancelButton = cancel;
         bar.Controls.Add(hint);
+        bar.Controls.Add(auto);
         bar.Controls.Add(okBtn);
         bar.Controls.Add(cancel);
         ok = okBtn;
@@ -371,6 +394,7 @@ internal sealed class ArrangeWindowsDialog : Form
     /// the desktop row it's already in.</summary>
     private void MoveAllToColumn(MonitorDescriptor screen)
     {
+        _grid?.SuspendLayout();
         foreach (var (panel, desktop, cellScreen) in _bodyCells.ToArray())
         {
             if (ReferenceEquals(cellScreen, screen)) continue;
@@ -378,6 +402,101 @@ internal sealed class ArrangeWindowsDialog : Form
             foreach (Control c in panel.Controls.Cast<Control>().ToArray())
                 target.Controls.Add(c);
         }
+        _grid?.ResumeLayout(false);
+        RelayoutRows();
+    }
+
+    private enum MatchKind { None, Exact, Prefix, Fuzzy }
+
+    /// <summary>
+    /// How close a fuzzy hit has to be, as 1 - distance/length. 0.75 is the line between
+    /// "incdients" ≈ "incidents" (0.78, a typo) and "dat" ≈ "dav" (0.67, a different word).
+    /// </summary>
+    private const double FuzzyFloor = 0.75;
+
+    /// <summary>
+    /// Pick the desktop whose name best fits a workspace name: an exact hit first, then the
+    /// longest prefix relationship in either direction ("osis" ⊂ "osis_fixes", "mob" ⊂
+    /// "mobility"), then the nearest Levenshtein neighbour if it clears <see cref="FuzzyFloor"/>.
+    /// Case-insensitive throughout. Returns -1 when nothing is close enough to guess.
+    /// </summary>
+    private (int index, MatchKind kind) MatchDesktop(string workspace)
+    {
+        string w = workspace.ToLowerInvariant();
+
+        int exact = _desktops.FindIndex(d => string.Equals(d.Name, w, StringComparison.OrdinalIgnoreCase));
+        if (exact >= 0) return (exact, MatchKind.Exact);
+
+        int best = -1, bestLen = 0;
+        for (int i = 0; i < _desktops.Count; i++)
+        {
+            string n = _desktops[i].Name.ToLowerInvariant();
+            if (n.Length == 0) continue;
+            if (!w.StartsWith(n, StringComparison.Ordinal) && !n.StartsWith(w, StringComparison.Ordinal)) continue;
+            int len = Math.Min(n.Length, w.Length);
+            if (len > bestLen) { best = i; bestLen = len; }
+        }
+        if (best >= 0) return (best, MatchKind.Prefix);
+
+        double bestScore = FuzzyFloor;
+        for (int i = 0; i < _desktops.Count; i++)
+        {
+            string n = _desktops[i].Name.ToLowerInvariant();
+            if (n.Length == 0) continue;
+            double score = 1.0 - (double)Levenshtein(w, n) / Math.Max(w.Length, n.Length);
+            if (score > bestScore) { bestScore = score; best = i; }
+        }
+        return best >= 0 ? (best, MatchKind.Fuzzy) : (-1, MatchKind.None);
+    }
+
+    private static int Levenshtein(string a, string b)
+    {
+        var prev = new int[b.Length + 1];
+        var cur = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++) prev[j] = j;
+        for (int i = 1; i <= a.Length; i++)
+        {
+            cur[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+                cur[j] = Math.Min(Math.Min(prev[j] + 1, cur[j - 1] + 1),
+                                  prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+            (prev, cur) = (cur, prev);
+        }
+        return prev[b.Length];
+    }
+
+    /// <summary>
+    /// Move every chip into the desktop row its workspace name points at, keeping the screen
+    /// column it's already in. Chips with no confident match are left where they are. Like
+    /// every other edit in here it's only a proposal until OK.
+    /// </summary>
+    private void AutoAssign()
+    {
+        // Snapshot first: chips moved into a not-yet-visited cell would otherwise be counted twice.
+        var chips = _bodyCells
+            .SelectMany(bc => bc.panel.Controls.Cast<Control>().Select(c => (ctl: c, bc.screen)))
+            .Where(x => x.ctl.Tag is Chip)
+            .ToList();
+
+        var counts = new int[4];
+        _grid?.SuspendLayout();
+        foreach (var (ctl, screen) in chips)
+        {
+            var chip = (Chip)ctl.Tag!;
+            var (idx, kind) = MatchDesktop(chip.Workspace);
+            counts[(int)kind]++;
+            _tips.SetToolTip(chip.Label, idx < 0
+                ? $"{chip.Workspace} — no desktop name is close enough"
+                : $"{chip.Workspace} → {_desktops[idx].Name} ({kind.ToString().ToLowerInvariant()} match)");
+            if (idx < 0) continue;
+            var target = _bodyCells.First(bc => bc.desktop.Id == _desktops[idx].Id && ReferenceEquals(bc.screen, screen)).panel;
+            if (!ReferenceEquals(target, ctl.Parent)) target.Controls.Add(ctl);
+        }
+        _grid?.ResumeLayout(false);
+
+        if (_hint != null)
+            _hint.Text = $"Auto-assign: {counts[(int)MatchKind.Exact]} exact, {counts[(int)MatchKind.Prefix]} prefix, " +
+                         $"{counts[(int)MatchKind.Fuzzy]} fuzzy, {counts[(int)MatchKind.None]} unmatched (hover a chip for why)";
         RelayoutRows();
     }
 
@@ -447,6 +566,12 @@ internal sealed class ArrangeWindowsDialog : Form
     {
         if (_grid == null) return;
 
+        // Every RowStyles.Height assignment re-lays out the table on the spot, so the loop
+        // below has to run inside one suspended transaction or the rows resize (and repaint)
+        // one by one.
+        SuspendLayout();
+        _grid.SuspendLayout();
+
         int total = HeaderRow;
         for (int r = 0; r < _desktops.Count; r++)
         {
@@ -456,7 +581,7 @@ internal sealed class ArrangeWindowsDialog : Form
                     maxChips = Math.Max(maxChips, panel.Controls.Count);
             // Desktops with nothing on them stay a slim (but still droppable) strip.
             int h = maxChips == 0 ? 34 : 12 + maxChips * (ChipHeight + ChipGap);
-            _grid.RowStyles[r + 1].Height = h;
+            if (_grid.RowStyles[r + 1].Height != h) _grid.RowStyles[r + 1].Height = h;
             total += h;
         }
 
@@ -465,9 +590,13 @@ internal sealed class ArrangeWindowsDialog : Form
         int wantH = total + _desktops.Count + 2 + 20 + (_bar?.Height ?? 0) + (_header?.Height ?? 0);
 
         var wa = Screen.FromPoint(Location.IsEmpty ? Cursor.Position : new Point(Left + 8, Top + 8)).WorkingArea;
-        ClientSize = new Size(
+        var want = new Size(
             Math.Min(wantW, (int)(wa.Width * 0.95)),
             Math.Min(wantH, (int)(wa.Height * 0.92)));
+        if (ClientSize != want) ClientSize = want;
+
+        _grid.ResumeLayout(true);
+        ResumeLayout(true);
     }
 
     private int InitialDesktopIndex(VsCodeTracker.OpenWindow w, WorkspaceLocation? remembered)
@@ -522,6 +651,9 @@ internal sealed class ArrangeWindowsDialog : Form
                 loc.MonitorWidth = screen.Width;
                 loc.MonitorHeight = screen.Height;
                 loc.Snap = chip.Snap;
+                // Chosen by hand, so the 2s scan must not talk it back down to wherever the
+                // window actually ended up — see WorkspaceLocation.Pinned.
+                loc.Pinned = true;
 
                 _desktop.PlaceWindow(chip.Hwnd, loc, desktop.Id);
                 _layout.Workspaces[chip.Workspace] = loc;
@@ -532,7 +664,7 @@ internal sealed class ArrangeWindowsDialog : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _snapMenu.Dispose();
+        if (disposing) { _snapMenu.Dispose(); _tips.Dispose(); }
         base.Dispose(disposing);
     }
 }
