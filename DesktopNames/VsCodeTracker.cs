@@ -23,6 +23,8 @@ internal sealed class VsCodeTracker : IDisposable
     private readonly Settings _settings;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly HashSet<IntPtr> _established = new();
+    private readonly Dictionary<IntPtr, Guid> _lastDesktop = new();
+    private readonly Dictionary<IntPtr, string?> _lastMonitor = new();
 
     public VsCodeTracker(DesktopService desktop, Settings settings)
     {
@@ -50,10 +52,16 @@ internal sealed class VsCodeTracker : IDisposable
         int moved = 0;
         foreach (var w in EnumerateOpenWorkspaceWindows())
         {
-            if (!_settings.Workspaces.TryGetValue(w.Workspace, out var saved)) continue;
-            _desktop.PlaceWindow(w.Hwnd, saved, saved.DesktopId);
+            if (!_settings.Workspaces.TryGetValue(w.Workspace, out var saved))
+            {
+                Log.Tracker($"restore skip '{w.Workspace}' — no saved entry for this screen setup");
+                continue;
+            }
+            bool ok = _desktop.PlaceWindow(w.Hwnd, saved, saved.DesktopId);
+            Log.Tracker($"restore '{w.Workspace}' {w.DesktopId} -> {saved.DesktopId} {(ok ? "ok" : "failed")}");
             moved++;
         }
+        Log.Tracker($"restore layout: {moved} window(s) placed");
         return moved;
     }
 
@@ -82,6 +90,7 @@ internal sealed class VsCodeTracker : IDisposable
             target.MonitorY = screen.Monitor.Top;
             target.MonitorWidth = screen.Width;
             target.MonitorHeight = screen.Height;
+            target.Pinned = true;   // explicit, same as the arrange dialog — Scan must not undo it
 
             _desktop.PlaceWindow(w.Hwnd, target, Guid.Empty);
             _settings.Workspaces[w.Workspace] = target;
@@ -158,11 +167,42 @@ internal sealed class VsCodeTracker : IDisposable
 
             var currentMonitor = MonitorRef.FromHwnd(hwnd);
 
+            // Only a move observed between two scans of the same window may change the
+            // workspace's saved desktop. A window seen for the first time (VS Code restoring
+            // after a reboot spawns every window on the current desktop) or one sitting still
+            // keeps its saved binding, so "Restore VS Code layout" has something to restore.
+            // Exception: a saved desktop that no longer exists is dead — adopt the live one.
+            bool movedSinceLastScan = !firstSight &&
+                _lastDesktop.TryGetValue(hwnd, out var prevDesktop) && prevDesktop != currentDesktop;
+            bool screenChanged = !firstSight &&
+                _lastMonitor.TryGetValue(hwnd, out var prevMonitor) &&
+                !string.Equals(prevMonitor, currentMonitor?.DeviceId, StringComparison.OrdinalIgnoreCase);
+            _lastDesktop[hwnd] = currentDesktop;
+            _lastMonitor[hwnd] = currentMonitor?.DeviceId;
+
+            _settings.Workspaces.TryGetValue(workspace, out var known);
+
+            // An assignment made by hand in the arrange dialog outranks anything observed.
+            // The desktop was already protected above, but the monitor, snap and placement
+            // below were not: they were rewritten from the live window every 2s, so a screen
+            // the window never actually reached (or a later nudge) silently undid the choice.
+            // Physically moving the window retires the pin and passive learning resumes.
+            if (known is { Pinned: true })
+            {
+                if (!movedSinceLastScan && !screenChanged) return true;
+                known.Pinned = false;
+                dirty = true;
+            }
+
+            Guid recordDesktop = currentDesktop;
+            if (!movedSinceLastScan && known != null && _desktop.DesktopExists(known.DesktopId))
+                recordDesktop = known.DesktopId;
+
             // CRUD the observation to the now-current (desktop, monitor, placement).
             // Manual moves via the user's AHK Win+Ctrl+N flow through this path.
             var observed = new WorkspaceLocation
             {
-                DesktopId = currentDesktop,
+                DesktopId = recordDesktop,
                 MonitorDeviceId = currentMonitor?.DeviceId,
                 MonitorX = currentMonitor?.RectX ?? 0,
                 MonitorY = currentMonitor?.RectY ?? 0,
@@ -177,6 +217,11 @@ internal sealed class VsCodeTracker : IDisposable
 
         _established.Clear();
         foreach (var h in seenThisScan) _established.Add(h);
+        foreach (var h in _lastDesktop.Keys.Where(h => !seenThisScan.Contains(h)).ToList())
+        {
+            _lastDesktop.Remove(h);
+            _lastMonitor.Remove(h);
+        }
 
         if (dirty) _settings.Save();
     }

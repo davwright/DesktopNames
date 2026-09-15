@@ -9,6 +9,7 @@ namespace DesktopNames;
 ///   <c>pipe</c>     — connection accepted / parsed / replied
 ///   <c>resolver</c> — which resolver path won (vscodePid / walk-up / learned / sticky / unresolved)
 ///   <c>state</c>    — SessionState mutations (apply / sweep reap / consume)
+///   <c>tracker</c>  — VsCodeTracker layout restores (per-window outcome)
 ///   <c>startup</c>  — which build wrote the lines below it (see Program.GetBuildStamp)
 /// </summary>
 internal static class Log
@@ -31,6 +32,7 @@ internal static class Log
     }
 
     public static void Pipe(string msg)     => Write("pipe",     msg);
+    public static void Tracker(string msg)  => Write("tracker",  msg);
     public static void Resolver(string msg) => Write("resolver", msg);
     public static void State(string msg)    => Write("state",    msg);
     public static void Screens(string msg)  => Write("screens",  msg);

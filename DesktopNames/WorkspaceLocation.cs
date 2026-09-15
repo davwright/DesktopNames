@@ -43,6 +43,14 @@ internal sealed class WorkspaceLocation
     /// </summary>
     public SnapMode Snap { get; set; }
 
+    /// <summary>
+    /// This entry was assigned by hand in the arrange dialog, not merely observed. The 2s
+    /// scan leaves a pinned entry alone, so a choice survives a placement that silently
+    /// failed. Physically moving the window (to another desktop or another screen) retires
+    /// the pin and passive learning resumes.
+    /// </summary>
+    public bool Pinned { get; set; }
+
     public WorkspaceLocation Clone() => (WorkspaceLocation)MemberwiseClone();
 }
 
@@ -138,6 +146,7 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
                 case "WindowWidth":     result.WindowWidth     = reader.GetInt32(); break;
                 case "WindowHeight":    result.WindowHeight    = reader.GetInt32(); break;
                 case "Snap":            result.Snap            = Enum.TryParse<SnapMode>(reader.GetString(), out var sm) ? sm : SnapMode.Free; break;
+                case "Pinned":          result.Pinned          = reader.GetBoolean(); break;
                 // Legacy: pre-snap files only recorded "was it maximized".
                 case "WindowMaximized": if (reader.GetBoolean() && result.Snap == SnapMode.Free) result.Snap = SnapMode.Max; break;
                 default:                reader.Skip();         break;
@@ -166,6 +175,7 @@ internal sealed class WorkspaceLocationJsonConverter : JsonConverter<WorkspaceLo
             writer.WriteNumber("WindowHeight",  value.WindowHeight);
         }
         if (value.Snap != SnapMode.Free) writer.WriteString("Snap", value.Snap.ToString());
+        if (value.Pinned) writer.WriteBoolean("Pinned", true);
         writer.WriteEndObject();
     }
 }

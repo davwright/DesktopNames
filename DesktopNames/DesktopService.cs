@@ -232,6 +232,9 @@ internal sealed class DesktopService : IDisposable
     /// Translate a desktop GUID to its zero-based index via VDA.
     /// Returns -1 if not found.
     /// </summary>
+    /// <summary>Whether a desktop with this GUID currently exists (false when VDA isn't loaded).</summary>
+    public bool DesktopExists(Guid id) => IndexFromGuid(id) >= 0;
+
     private static int IndexFromGuid(Guid id)
     {
         if (!VdaDll.IsLoaded) return -1;
