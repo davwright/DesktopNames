@@ -26,6 +26,15 @@ internal sealed class Settings
     /// </summary>
     public Dictionary<Guid, string> DesktopNotes { get; set; } = new();
 
+    /// <summary>
+    /// Workspace folder (full path, lower-case) → desktop, set by dragging a session in the
+    /// reassign flyout. Outranks the rootName-keyed <see cref="ScreenLayout.Workspaces"/>, which
+    /// can't tell c:\git\evolx\osis_fixes from c:\git\osis-dev\osis_fixes.
+    /// </summary>
+    public Dictionary<string, Guid> FolderDesktops { get; set; } = new();
+
+    public static string FolderKey(string folder) => folder.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
+
     // VSCode workspace → last observed location (desktop + monitor + snap position), kept per
     // monitor arrangement. Always tracked passively: every scan CRUDs the entry to match where
     // the window currently lives, so manual moves via the user's AHK script (Win+Ctrl+N) become

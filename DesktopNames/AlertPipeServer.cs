@@ -387,7 +387,7 @@ internal sealed class AlertPipeServer : IDisposable
 
     /// <summary>
     /// Resolution order (from authoritative-now to learned-history):
-    /// 1. ide-lock — the launching window's own workspace folders, joined via the session's
+    /// 1. ide-lock — a folder pinned by a flyout drag (exact path), else the launching window's own workspace folders, joined via the session's
     ///    inherited CLAUDE_CODE_SSE_PORT. Exact; immune to cwd wandering and title parsing.
     /// 2. vscodePid — only resolves when a single VS Code window exists (see below).
     /// 3. sticky session/transcript cache (works after the originating window closed).
@@ -399,6 +399,11 @@ internal sealed class AlertPipeServer : IDisposable
     {
         foreach (var folder in _claudeSessions.WorkspaceFoldersFor(msg.SessionId))
         {
+            if (_settings.FolderDesktops.TryGetValue(Settings.FolderKey(folder), out var pinned))
+            {
+                Log.Resolver($"  via=folder-pin({folder}) -> {pinned}");
+                return (pinned, null, true);
+            }
             foreach (var rootName in RootNamesForFolder(folder))
             {
                 if (_settings.Workspaces.TryGetValue(rootName, out var loc) &&
@@ -474,6 +479,19 @@ internal sealed class AlertPipeServer : IDisposable
     /// every genuine VS Code workspace window owned by the PID and only trust the result when
     /// they're unanimous; otherwise we decline so cwd-walkup / workspace-index can resolve.
     /// </summary>
+    /// <summary>
+    /// Persist a drag from the reassign flyout against the session's exact workspace folders,
+    /// so every later session in those folders resolves to <paramref name="desktopId"/>.
+    /// Returns the folders pinned; empty for a session with no ide-lock folders.
+    /// </summary>
+    public IReadOnlyList<string> PinSessionFolders(string sessionId, Guid desktopId)
+    {
+        var folders = _claudeSessions.WorkspaceFoldersFor(sessionId);
+        foreach (var f in folders) _settings.FolderDesktops[Settings.FolderKey(f)] = desktopId;
+        if (folders.Count > 0) _settings.Save();
+        return folders;
+    }
+
     /// <summary>
     /// rootName candidates for a cwd, used by the overlay's reassign command to locate the
     /// session's VS Code window: every ancestor folder basename (covers plain-folder

@@ -905,9 +905,11 @@ internal sealed class HostForm : Form
 
         _sessionState?.MoveSessionToDesktop(source, sessionId, targetDesktop);
         _sessionState?.RecordResolution(sessionId, null, cwd, targetDesktop);
+        var pinned = _alertServer?.PinSessionFolders(sessionId, targetDesktop) ?? Array.Empty<string>();
         RefreshAllOverlays();
         Log.Resolver($"reassign session={sessionId} src={source} cwd={cwd} -> {targetDesktop} " +
-                     $"window={(hwnd == IntPtr.Zero ? "not-found" : moved ? "moved" : "already-there")}");
+                     $"window={(hwnd == IntPtr.Zero ? "not-found" : moved ? "moved" : "already-there")} " +
+                     $"pinned=[{string.Join(";", pinned)}]");
     }
 
     /// <summary>Dismiss one session's indicator (the flyout's per-row "✕").</summary>
