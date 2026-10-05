@@ -3,7 +3,7 @@ namespace DesktopNames;
 /// <summary>
 /// Append-only debug log for the alert pipeline. Mirrors ClaudeHook's log format so
 /// you can grep both files together. Writes to %APPDATA%\DesktopNames\desktopnames.log.
-/// Rotates at 512KB by renaming current to .1. Gated by <see cref="Settings.AlertLogEnabled"/>.
+/// Rotates to .1 once the current file is 4h old, so 4-8h of history is always on disk. Gated by <see cref="Settings.AlertLogEnabled"/>.
 ///
 /// Categories (loose convention so greps work):
 ///   <c>pipe</c>     — connection accepted / parsed / replied
@@ -17,7 +17,7 @@ internal static class Log
     private static readonly object _lock = new();
     private static string? _path;
     private static bool _enabled;
-    private const long MaxBytes = 512 * 1024;
+    private static readonly TimeSpan MaxAge = TimeSpan.FromHours(4);
 
     /// <summary>Configure once at startup. Subsequent calls update the enabled flag.</summary>
     public static void Configure(bool enabled)
@@ -45,24 +45,25 @@ internal static class Log
         {
             lock (_lock)
             {
-                MaybeRotate();
+                bool rotated = MaybeRotate();
                 var line = $"{DateTime.Now:HH:mm:ss.fff}  {category,-8}  {msg}{Environment.NewLine}";
                 File.AppendAllText(_path, line);
+                // Windows tunneling hands a re-created name the old file's creation time for ~15s.
+                if (rotated) File.SetCreationTimeUtc(_path, DateTime.UtcNow);
             }
         }
         catch { /* logging must never throw */ }
     }
 
-    private static void MaybeRotate()
+    private static bool MaybeRotate()
     {
         try
         {
             var fi = new FileInfo(_path!);
-            if (!fi.Exists || fi.Length < MaxBytes) return;
-            var old = _path + ".1";
-            if (File.Exists(old)) File.Delete(old);
-            File.Move(_path!, old);
+            if (!fi.Exists || DateTime.UtcNow - fi.CreationTimeUtc < MaxAge) return false;
+            File.Move(_path!, _path + ".1", overwrite: true);
+            return true;
         }
-        catch { }
+        catch { return false; }
     }
 }
