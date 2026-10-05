@@ -97,6 +97,10 @@ internal sealed class SessionEntry
     /// <summary>The tool name when <see cref="HookEvent"/> is PreToolUse/PostToolUse.</summary>
     public string ToolName { get; set; } = "";
 
+    /// <summary>The turn ended (Ready, open to input) but background agents / shells / Monitors
+    /// are still running and Claude will resume when they report. Shown as ⏳ on a green button.</summary>
+    public bool BackgroundActive { get; set; }
+
     /// <summary>
     /// True once the user has acted on this entry (clicked the button, switched to the desktop).
     /// Aggregation treats consumed entries as <see cref="StateKind.None"/> so the color clears
@@ -178,6 +182,7 @@ internal sealed class SessionState
         public string HookEvent { get; set; } = "";
         public string ToolName { get; set; } = "";
         public string Cwd { get; set; } = "";
+        public bool BackgroundActive { get; set; }
         public bool Consumed { get; set; }
     }
 
@@ -196,7 +201,7 @@ internal sealed class SessionState
                         RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
-                        Consumed = e.Consumed,
+                        BackgroundActive = e.BackgroundActive, Consumed = e.Consumed,
                     });
             Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
             File.WriteAllText(StatePath, JsonSerializer.Serialize(list));
@@ -230,7 +235,7 @@ internal sealed class SessionState
                     Activity = p.Activity,
                     Title = p.Title, Body = p.Body, SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
-                    Cwd = p.Cwd, Consumed = p.Consumed,
+                    Cwd = p.Cwd, BackgroundActive = p.BackgroundActive, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore
                 };
                 if (p.Asks != null) restored.Asks.AddRange(p.Asks);
@@ -255,7 +260,8 @@ internal sealed class SessionState
                            string title, string body,
                            int sessionPid, int vsCodePid,
                            string? hookEvent = null, string? toolName = null,
-                           string? toolDescription = null, string cwd = "")
+                           string? toolDescription = null, string cwd = "",
+                           bool backgroundActive = false)
     {
         var key = (source, sessionId);
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
@@ -276,7 +282,7 @@ internal sealed class SessionState
 
             effective = UpsertEntry(desktopId, source, sessionId, activity, ask, title, body,
                                     sessionPid, vsCodePid, hookEvent ?? "", toolName ?? "",
-                                    toolDescription ?? "", cwd ?? "");
+                                    toolDescription ?? "", cwd ?? "", backgroundActive);
             _location[key] = desktopId;
         }
 
@@ -374,7 +380,7 @@ internal sealed class SessionState
         {
             case StateKind.Asking: return "?";
             case StateKind.Error:  return "!";
-            case StateKind.Ready:  return null; // resting state, no glyph
+            case StateKind.Ready:  return dominant.BackgroundActive ? "⏳" : null; // open to input; ⏳ while background work runs
             case StateKind.Busy:
                 // PreToolUse → acting (tool letter). UserPromptSubmit/SessionStart → thinking.
                 if (dominant.HookEvent == "PreToolUse")
@@ -669,7 +675,8 @@ internal sealed class SessionState
     private StateKind UpsertEntry(Guid desktopId, string source, string sessionId,
                                   StateKind? activity, AskChange ask, string title, string body,
                                   int sessionPid, int vsCodePid,
-                                  string hookEvent, string toolName, string toolDescription, string cwd)
+                                  string hookEvent, string toolName, string toolDescription, string cwd,
+                                  bool backgroundActive)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list))
         {
@@ -711,6 +718,7 @@ internal sealed class SessionState
         existing.Consumed = false;
         existing.HookEvent = hookEvent;
         existing.ToolName = toolName;
+        existing.BackgroundActive = backgroundActive;
         if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;
         PushRecentBody(existing, body);
         return existing.State;

@@ -186,7 +186,8 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.HookEvent,
                             msg.ToolName,
                             msg.ToolDescription,
-                            msg.Cwd ?? "");
+                            msg.Cwd ?? "",
+                            msg.HookEvent == "Stop" && msg.BackgroundActive);
                         reply.Ok = false;
                         reply.Error = "vscode-window-not-found";
                         reply.UserMessage = userHint;
@@ -214,7 +215,8 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.HookEvent,
                             msg.ToolName,
                             msg.ToolDescription,
-                            msg.Cwd ?? "");
+                            msg.Cwd ?? "",
+                            msg.HookEvent == "Stop" && msg.BackgroundActive);
 
                         // Learn from this resolution so siblings + future hooks resolve faster.
                         // Idle should drop sticky bindings; everything else cements them.
@@ -358,9 +360,10 @@ internal sealed class AlertPipeServer : IDisposable
                     // Claude asked in its closing message, which is a new one.
                     if (msg.LastMessageEndsWithQuestion == true)
                     { t = new(StateKind.Ready, AskChange.Set); return true; }
-                    // Background work still running (live Monitor watcher, or run_in_background
-                    // Bash) → still Busy. The turn ended but Claude is watching something.
-                    t = new(msg.BackgroundActive ? StateKind.Busy : StateKind.Ready, AskChange.Clear);
+                    // The turn ended, so Claude is open to input even if background work (agents,
+                    // run_in_background Bash, a Monitor) still runs: Ready. BackgroundActive is
+                    // carried on the entry and shown as ⏳ next to the green.
+                    t = new(StateKind.Ready, AskChange.Clear);
                     return true;
                 case "StopFailure":
                     t = new(StateKind.Error, AskChange.Clear); return true;
