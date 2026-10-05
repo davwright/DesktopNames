@@ -267,6 +267,7 @@ internal sealed class SessionState
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
         var prevPrevAgg = prevDesktop != Guid.Empty ? GetAggregate(prevDesktop) : default;
         var prevTargetAgg = GetAggregate(desktopId);
+        var prevTargetGlyph = GetGlyph(desktopId);
 
         StateKind effective = StateKind.None;
         if (remove)
@@ -293,7 +294,12 @@ internal sealed class SessionState
             if (!AggregateEquals(prevPrevAgg, nowAgg)) Changed?.Invoke(prevDesktop);
         }
         var targetNow = GetAggregate(desktopId);
-        if (!AggregateEquals(prevTargetAgg, targetNow)) Changed?.Invoke(desktopId);
+        // Ready ⏳ -> Ready (background work finished) keeps the aggregate but drops the glyph;
+        // without this the hourglass would stay painted.
+        // (Busy tool letters are repainted by the pulse animation, so only Ready needs it.)
+        if (!AggregateEquals(prevTargetAgg, targetNow) ||
+            (targetNow.state == StateKind.Ready && prevTargetGlyph != GetGlyph(desktopId)))
+            Changed?.Invoke(desktopId);
         return effective;
     }
 
