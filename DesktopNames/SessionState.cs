@@ -124,8 +124,9 @@ internal sealed class BackgroundWork
     public string Description { get; set; } = "";
     /// <summary>Agents only: its latest tool call ("Bash: Fetch botcomponents…").</summary>
     public string Activity { get; set; } = "";
-    /// <summary>First time DN saw it — Claude Code doesn't report a start time.</summary>
-    public DateTime StartedUtc { get; init; }
+    /// <summary>When it started (creation time of its task output file, sent by ClaudeHook). Null
+    /// until a Stop reports it, e.g. for an agent first seen through its own tool call.</summary>
+    public DateTime? StartedUtc { get; set; }
 }
 
 /// <summary>
@@ -304,7 +305,7 @@ internal sealed class SessionState
                            string? hookEvent = null, string? toolName = null,
                            string? toolDescription = null, string cwd = "",
                            bool backgroundActive = false,
-                           IReadOnlyList<(string Id, string Type, string Description)>? backgroundTasks = null)
+                           IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)>? backgroundTasks = null)
     {
         var key = (source, sessionId);
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
@@ -327,7 +328,7 @@ internal sealed class SessionState
             effective = UpsertEntry(desktopId, source, sessionId, activity, ask, title, body,
                                     sessionPid, vsCodePid, hookEvent ?? "", toolName ?? "",
                                     toolDescription ?? "", cwd ?? "", backgroundActive,
-                                    backgroundTasks ?? Array.Empty<(string, string, string)>());
+                                    backgroundTasks ?? Array.Empty<(string, string, string, DateTime?)>());
             _location[key] = desktopId;
         }
 
@@ -384,10 +385,10 @@ internal sealed class SessionState
                 var counts = e.Background.Values.GroupBy(w => w.Kind)
                     .Select(g => $"{g.Count()} {g.Key}{(g.Count() == 1 ? "" : "s")}");
                 sb.Append('\n').Append(TipBgHead).Append("⏳ ").Append(string.Join(" · ", counts));
-                foreach (var w in e.Background.Values.OrderBy(w => w.StartedUtc))
+                foreach (var w in e.Background.Values.OrderBy(w => w.StartedUtc ?? DateTime.MaxValue))
                 {
                     sb.Append('\n').Append(TipBg).Append(w.Kind).Append("  ").Append(TaskbarOverlay.Truncate(w.Description, 70))
-                      .Append('\t').Append(FormatAge(w.StartedUtc));
+                      .Append('\t').Append(w.StartedUtc is { } started ? FormatAge(started) : "");
                     if (w.Activity.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(w.Activity, 80));
                 }
             }
@@ -650,7 +651,7 @@ internal sealed class SessionState
             // Seen before the session's Stop listed it: the agent type stands in for the
             // description until that Stop supplies the real one.
             entry.Background[agentId] = work = new BackgroundWork
-                { Kind = "agent", Description = agentType, StartedUtc = DateTime.UtcNow };
+                { Kind = "agent", Description = agentType };
         work.Activity = line;
         return true;
     }
@@ -762,7 +763,7 @@ internal sealed class SessionState
                                   int sessionPid, int vsCodePid,
                                   string hookEvent, string toolName, string toolDescription, string cwd,
                                   bool backgroundActive,
-                                  IReadOnlyList<(string Id, string Type, string Description)> backgroundTasks)
+                                  IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)> backgroundTasks)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list))
         {
@@ -815,15 +816,16 @@ internal sealed class SessionState
     /// <summary>A Stop lists every background task still running: keep those (with their start time
     /// and last activity), add new ones, drop the rest.</summary>
     private static void ReconcileBackground(SessionEntry entry,
-                                            IReadOnlyList<(string Id, string Type, string Description)> tasks)
+                                            IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)> tasks)
     {
         var running = new Dictionary<string, BackgroundWork>();
-        foreach (var (id, type, description) in tasks)
+        foreach (var (id, type, description, startedUtc) in tasks)
         {
             var work = entry.Background.TryGetValue(id, out var w) ? w
-                     : new BackgroundWork { StartedUtc = DateTime.UtcNow };
+                     : new BackgroundWork();
             work.Kind = type == "subagent" ? "agent" : type;
             work.Description = description;
+            if (startedUtc != null) work.StartedUtc = startedUtc;
             running[id] = work;
         }
         entry.Background.Clear();

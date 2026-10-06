@@ -198,7 +198,7 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.ToolDescription,
                             msg.Cwd ?? "",
                             msg.HookEvent == "Stop" && msg.BackgroundActive,
-                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "")).ToList());
+                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "", t.StartedUtc)).ToList());
                         reply.Ok = false;
                         reply.Error = "vscode-window-not-found";
                         reply.UserMessage = userHint;
@@ -228,7 +228,7 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.ToolDescription,
                             msg.Cwd ?? "",
                             msg.HookEvent == "Stop" && msg.BackgroundActive,
-                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "")).ToList());
+                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "", t.StartedUtc)).ToList());
 
                         // Learn from this resolution so siblings + future hooks resolve faster.
                         // Idle should drop sticky bindings; everything else cements them.
@@ -624,6 +624,7 @@ internal sealed class AlertPipeServer : IDisposable
         public string? Id { get; set; }
         public string? Type { get; set; }
         public string? Description { get; set; }
+        public DateTime? StartedUtc { get; set; }
     }
 
     private sealed class AlertMessage
