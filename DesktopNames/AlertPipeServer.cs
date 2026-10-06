@@ -164,6 +164,15 @@ internal sealed class AlertPipeServer : IDisposable
                     if (!string.IsNullOrEmpty(msg.LastMessageTail))
                         body = msg.LastMessageTail!.Replace("\r", " ").Replace("\n", " ").Trim();
 
+                    if (transition.Agent)
+                    {
+                        bool known = _state.ApplyAgent(msg.Source ?? "unknown", msg.SessionId!, msg.AgentId!,
+                                                       msg.AgentType ?? "agent", body, stop: msg.HookEvent == "SubagentStop");
+                        reply.Ok = true;
+                        Log.State($"agent session={msg.SessionId} agent={msg.AgentType}/{msg.AgentId} {msg.HookEvent} sessionKnown={known} '{body}'");
+                        return;
+                    }
+
                     if (target == Guid.Empty && !transition.Remove)
                     {
                         // Park the session on the unresolved sentinel desktop so the "?"
@@ -315,7 +324,9 @@ internal sealed class AlertPipeServer : IDisposable
     /// background tool finishing doesn't answer the prompt. <c>Activity == null</c> means
     /// "this event says nothing about what the session is doing".
     /// </summary>
-    private readonly record struct Transition(StateKind? Activity, AskChange Ask, bool Remove = false);
+    /// <param name="Agent">A background agent's own tool call or its SubagentStop: recorded on the
+    /// session for the flyout, never a change to the session's colour.</param>
+    private readonly record struct Transition(StateKind? Activity, AskChange Ask, bool Remove = false, bool Agent = false);
 
     /// <summary>
     /// Maps a Claude hook event to its effect. Source of truth for the color semantics the
@@ -326,6 +337,13 @@ internal sealed class AlertPipeServer : IDisposable
     private static bool TryClassify(AlertMessage msg, out Transition t)
     {
         string? ev = msg.HookEvent;
+        // An agent's question still reaches the session as a question (below); only its work
+        // and its end are agent activity.
+        if (!string.IsNullOrEmpty(msg.AgentId) && ev is "PreToolUse" or "SubagentStop")
+        {
+            t = new(null, AskChange.None, Agent: true);
+            return true;
+        }
         if (!string.IsNullOrEmpty(ev))
         {
             switch (ev)
@@ -621,6 +639,9 @@ internal sealed class AlertPipeServer : IDisposable
         // toolName alone — e.g. "Edit Program.cs" instead of "Edit". Null on all other events.
         public string? ToolDescription { get; set; }
         public string? Message { get; set; }
+        // Set when the hook fired inside a background agent (Agent tool) of this session.
+        public string? AgentId { get; set; }
+        public string? AgentType { get; set; }
 
         // Sent by ClaudeHook (2026-05-20+):
         // - ErrorType: kind of StopFailure (e.g. "rate_limit", "authentication_failed").

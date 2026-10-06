@@ -211,7 +211,8 @@ internal sealed class SessionFlyout : Form
     private static string RowLabel(SessionState.SessionRef s)
     {
         string sid = s.SessionId.Length >= 2 ? s.SessionId[..2] : s.SessionId;
-        return $"{s.Label} ({sid} · {s.State.ToString().ToLowerInvariant()}, {SessionState.FormatAge(s.LastSeenUtc)})";
+        string agents = s.AgentCount == 0 ? "" : $" · ⏳ {s.AgentCount} agent{(s.AgentCount == 1 ? "" : "s")}";
+        return $"{s.Label} ({sid} · {s.State.ToString().ToLowerInvariant()}, {SessionState.FormatAge(s.LastSeenUtc)}{agents})";
     }
 
     /// <summary>The recent message lines shown under the header — the same bodies the hovertext

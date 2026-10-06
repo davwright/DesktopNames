@@ -101,6 +101,11 @@ internal sealed class SessionEntry
     /// are still running and Claude will resume when they report. Shown as ⏳ on a green button.</summary>
     public bool BackgroundActive { get; set; }
 
+    /// <summary>Background agents of this session that are still working: agentId → type and the
+    /// last thing it did. Filled by their PreToolUse, dropped at SubagentStop or at a Stop with no
+    /// background work left. Not persisted — a restart forgets in-flight agents.</summary>
+    public Dictionary<string, (string Type, string Line)> Agents { get; } = new();
+
     /// <summary>
     /// True once the user has acted on this entry (clicked the button, switched to the desktop).
     /// Aggregation treats consumed entries as <see cref="StateKind.None"/> so the color clears
@@ -574,7 +579,22 @@ internal sealed class SessionState
     /// the same message context as the taskbar hovertext.</summary>
     public readonly record struct SessionRef(
         string Source, string SessionId, string Label, string Cwd, StateKind State,
-        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies);
+        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies, int AgentCount);
+
+    /// <summary>
+    /// Record what a background agent of a known session is doing (or that it ended). Never
+    /// touches the session's state or colour. Returns false when the session isn't tracked.
+    /// </summary>
+    public bool ApplyAgent(string source, string sessionId, string agentId, string agentType, string line, bool stop)
+    {
+        if (!_location.TryGetValue((source, sessionId), out var desktop) ||
+            !_byDesktop.TryGetValue(desktop, out var list)) return false;
+        var entry = list.FirstOrDefault(e => e.Source == source && e.SessionId == sessionId);
+        if (entry == null) return false;
+        if (stop) entry.Agents.Remove(agentId);
+        else entry.Agents[agentId] = (agentType, line);
+        return true;
+    }
 
     /// <summary>
     /// Every session currently located on <paramref name="desktopId"/> (consumed or not),
@@ -590,8 +610,10 @@ internal sealed class SessionState
             string label = !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd)
                          : !string.IsNullOrEmpty(e.Title) ? e.Title
                          : e.SessionId;
+            // The agents' current work follows the session's own recent lines, one line each.
+            var lines = e.RecentBodies.Concat(e.Agents.Values.Select(a => $"⏳ {a.Type}: {a.Line}")).ToArray();
             result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc,
-                                      e.RecentBodies.ToArray()));
+                                      lines, e.Agents.Count));
         }
         return result;
     }
@@ -725,6 +747,7 @@ internal sealed class SessionState
         existing.HookEvent = hookEvent;
         existing.ToolName = toolName;
         existing.BackgroundActive = backgroundActive;
+        if ((hookEvent == "Stop" && !backgroundActive) || hookEvent == "SessionStart") existing.Agents.Clear();
         if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;
         PushRecentBody(existing, body);
         return existing.State;
