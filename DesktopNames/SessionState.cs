@@ -345,6 +345,10 @@ internal sealed class SessionState
         if (!AggregateEquals(prevTargetAgg, targetNow) ||
             (targetNow.state == StateKind.Ready && prevTargetGlyph != GetGlyph(desktopId)))
             Changed?.Invoke(desktopId);
+        // Every event changes a session, but Changed fires only when a desktop's look changes:
+        // a SessionEnd on a desktop a busier session dominates was never saved, and the next
+        // DN restart brought the ended session back.
+        SaveToDisk();
         return effective;
     }
 
@@ -646,13 +650,17 @@ internal sealed class SessionState
             !_byDesktop.TryGetValue(desktop, out var list)) return false;
         var entry = list.FirstOrDefault(e => e.Source == source && e.SessionId == sessionId);
         if (entry == null) return false;
-        if (stop) { entry.Background.Remove(agentId); return true; }
-        if (!entry.Background.TryGetValue(agentId, out var work))
-            // Seen before the session's Stop listed it: the agent type stands in for the
-            // description until that Stop supplies the real one.
-            entry.Background[agentId] = work = new BackgroundWork
-                { Kind = "agent", Description = agentType };
-        work.Activity = line;
+        if (stop) entry.Background.Remove(agentId);
+        else
+        {
+            if (!entry.Background.TryGetValue(agentId, out var work))
+                // Seen before the session's Stop listed it: the agent type stands in for the
+                // description until that Stop supplies the real one.
+                entry.Background[agentId] = work = new BackgroundWork
+                    { Kind = "agent", Description = agentType };
+            work.Activity = line;
+        }
+        SaveToDisk();
         return true;
     }
 
