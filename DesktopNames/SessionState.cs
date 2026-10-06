@@ -101,10 +101,11 @@ internal sealed class SessionEntry
     /// are still running and Claude will resume when they report. Shown as ⏳ on a green button.</summary>
     public bool BackgroundActive { get; set; }
 
-    /// <summary>Background agents of this session that are still working: agentId → type and the
-    /// last thing it did. Filled by their PreToolUse, dropped at SubagentStop or at a Stop with no
-    /// background work left. Not persisted — a restart forgets in-flight agents.</summary>
-    public Dictionary<string, (string Type, string Line)> Agents { get; } = new();
+    /// <summary>Background work of this session still running, by task id (= agent id for agents):
+    /// what it is, what it last did, since when. Set from the Stop's background_tasks list and from
+    /// each agent's own PreToolUse; an agent leaves at SubagentStop, everything at a Stop with no
+    /// background work. Persisted with the session, so a DN restart keeps it.</summary>
+    public Dictionary<string, BackgroundWork> Background { get; } = new();
 
     /// <summary>
     /// True once the user has acted on this entry (clicked the button, switched to the desktop).
@@ -112,6 +113,19 @@ internal sealed class SessionEntry
     /// until the next message updates state.
     /// </summary>
     public bool Consumed { get; set; }
+}
+
+/// <summary>One background task of a session: an agent or a run_in_background shell.</summary>
+internal sealed class BackgroundWork
+{
+    /// <summary>"agent", "shell", or whatever type Claude Code reports.</summary>
+    public string Kind { get; set; } = "";
+    /// <summary>The task's own description ("Runbook without pac + BR sheet", "Serve the kpmg folder").</summary>
+    public string Description { get; set; } = "";
+    /// <summary>Agents only: its latest tool call ("Bash: Fetch botcomponents…").</summary>
+    public string Activity { get; set; } = "";
+    /// <summary>First time DN saw it — Claude Code doesn't report a start time.</summary>
+    public DateTime StartedUtc { get; init; }
 }
 
 /// <summary>
@@ -134,9 +148,29 @@ internal sealed class SessionState
     /// the cwd sub-line (dim). <see cref="StripTipMarkers"/> removes them for plain-text consumers.</summary>
     internal const char TipItalic = (char)0x1F;
     internal const char TipDim = (char)0x1E;
+    /// <summary>Session header; the next char is the session's <see cref="StateKind"/> as a digit (state dot).</summary>
+    internal const char TipHeader = (char)0x1D;
+    /// <summary>"⏳ 2 agents · 1 shell" summary line.</summary>
+    internal const char TipBgHead = (char)0x1C;
+    /// <summary>One background task: "kind  description" + '\t' + right-aligned run time.</summary>
+    internal const char TipBg = (char)0x1B;
+    /// <summary>An agent's latest tool call, under its task line.</summary>
+    internal const char TipBgSub = (char)0x1A;
 
-    public static string StripTipMarkers(string s) =>
-        s.Replace(TipItalic.ToString(), "").Replace(TipDim.ToString(), "    ");
+    public static string StripTipMarkers(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == TipHeader) { i++; continue; }              // drop the state digit too
+            if (c == TipItalic || c == TipBgHead) continue;
+            if (c == TipDim || c == TipBg) { sb.Append("    "); continue; }
+            if (c == TipBgSub) { sb.Append("        "); continue; }
+            sb.Append(c == '\t' ? " · " : c.ToString());
+        }
+        return sb.ToString();
+    }
 
     public event Action<Guid>? Changed;
 
@@ -188,6 +222,7 @@ internal sealed class SessionState
         public string ToolName { get; set; } = "";
         public string Cwd { get; set; } = "";
         public bool BackgroundActive { get; set; }
+        public Dictionary<string, BackgroundWork>? Background { get; set; }
         public bool Consumed { get; set; }
     }
 
@@ -207,6 +242,7 @@ internal sealed class SessionState
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
                         BackgroundActive = e.BackgroundActive, Consumed = e.Consumed,
+                        Background = new Dictionary<string, BackgroundWork>(e.Background),
                     });
             Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
             File.WriteAllText(StatePath, JsonSerializer.Serialize(list));
@@ -245,6 +281,7 @@ internal sealed class SessionState
                 };
                 if (p.Asks != null) restored.Asks.AddRange(p.Asks);
                 if (p.RecentBodies != null) restored.RecentBodies.AddRange(p.RecentBodies);
+                if (p.Background != null) foreach (var (id, w) in p.Background) restored.Background[id] = w;
                 bucket.Add(restored);
                 _location[(p.Source, p.SessionId)] = p.DesktopId;
             }
@@ -266,7 +303,8 @@ internal sealed class SessionState
                            int sessionPid, int vsCodePid,
                            string? hookEvent = null, string? toolName = null,
                            string? toolDescription = null, string cwd = "",
-                           bool backgroundActive = false)
+                           bool backgroundActive = false,
+                           IReadOnlyList<(string Id, string Type, string Description)>? backgroundTasks = null)
     {
         var key = (source, sessionId);
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
@@ -288,7 +326,8 @@ internal sealed class SessionState
 
             effective = UpsertEntry(desktopId, source, sessionId, activity, ask, title, body,
                                     sessionPid, vsCodePid, hookEvent ?? "", toolName ?? "",
-                                    toolDescription ?? "", cwd ?? "", backgroundActive);
+                                    toolDescription ?? "", cwd ?? "", backgroundActive,
+                                    backgroundTasks ?? Array.Empty<(string, string, string)>());
             _location[key] = desktopId;
         }
 
@@ -332,15 +371,30 @@ internal sealed class SessionState
             // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
             // collide (two sessions in the same folder, or one whose cwd wandered there).
             var sid = e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
-            // Three lines per session: a regular header, the Claude message italic on its own
-            // line, then the full cwd dim below it (the real disambiguator when the title's leaf
-            // name is generic). TipItalic/TipDim mark the latter two for the owner-drawn tooltip.
-            string line = $"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})";
-            if (!string.IsNullOrEmpty(e.Body)) line += "\n" + TipItalic + e.Body;
-            if (!string.IsNullOrEmpty(e.Cwd)) line += "\n" + TipDim + e.Cwd;
-            lines.Add(line);
+            // Per session: a header with a state dot, the Claude message italic, the background
+            // work still running (count, then one line per task with its run time, an agent's
+            // latest tool call under it), then the full cwd dim (the real disambiguator when the
+            // title's leaf name is generic). The Tip* markers style them in the owner-drawn tooltip.
+            var sb = new System.Text.StringBuilder();
+            sb.Append(TipHeader).Append((char)('0' + (int)e.State))
+              .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
+            if (!string.IsNullOrEmpty(e.Body)) sb.Append('\n').Append(TipItalic).Append(e.Body);
+            if (e.Background.Count > 0)
+            {
+                var counts = e.Background.Values.GroupBy(w => w.Kind)
+                    .Select(g => $"{g.Count()} {g.Key}{(g.Count() == 1 ? "" : "s")}");
+                sb.Append('\n').Append(TipBgHead).Append("⏳ ").Append(string.Join(" · ", counts));
+                foreach (var w in e.Background.Values.OrderBy(w => w.StartedUtc))
+                {
+                    sb.Append('\n').Append(TipBg).Append(w.Kind).Append("  ").Append(TaskbarOverlay.Truncate(w.Description, 70))
+                      .Append('\t').Append(FormatAge(w.StartedUtc));
+                    if (w.Activity.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(w.Activity, 80));
+                }
+            }
+            if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);
+            lines.Add(sb.ToString());
         }
-        return (max, count, string.Join("\n", lines));
+        return (max, count, string.Join("\n\n", lines));
     }
 
     /// <summary>Compact relative age since last activity: "10s", "5m", "4h", "3d".</summary>
@@ -579,7 +633,7 @@ internal sealed class SessionState
     /// the same message context as the taskbar hovertext.</summary>
     public readonly record struct SessionRef(
         string Source, string SessionId, string Label, string Cwd, StateKind State,
-        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies, int AgentCount);
+        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies);
 
     /// <summary>
     /// Record what a background agent of a known session is doing (or that it ended). Never
@@ -591,8 +645,13 @@ internal sealed class SessionState
             !_byDesktop.TryGetValue(desktop, out var list)) return false;
         var entry = list.FirstOrDefault(e => e.Source == source && e.SessionId == sessionId);
         if (entry == null) return false;
-        if (stop) entry.Agents.Remove(agentId);
-        else entry.Agents[agentId] = (agentType, line);
+        if (stop) { entry.Background.Remove(agentId); return true; }
+        if (!entry.Background.TryGetValue(agentId, out var work))
+            // Seen before the session's Stop listed it: the agent type stands in for the
+            // description until that Stop supplies the real one.
+            entry.Background[agentId] = work = new BackgroundWork
+                { Kind = "agent", Description = agentType, StartedUtc = DateTime.UtcNow };
+        work.Activity = line;
         return true;
     }
 
@@ -610,10 +669,8 @@ internal sealed class SessionState
             string label = !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd)
                          : !string.IsNullOrEmpty(e.Title) ? e.Title
                          : e.SessionId;
-            // The agents' current work follows the session's own recent lines, one line each.
-            var lines = e.RecentBodies.Concat(e.Agents.Values.Select(a => $"⏳ {a.Type}: {a.Line}")).ToArray();
             result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc,
-                                      lines, e.Agents.Count));
+                                      e.RecentBodies.ToArray()));
         }
         return result;
     }
@@ -704,7 +761,8 @@ internal sealed class SessionState
                                   StateKind? activity, AskChange ask, string title, string body,
                                   int sessionPid, int vsCodePid,
                                   string hookEvent, string toolName, string toolDescription, string cwd,
-                                  bool backgroundActive)
+                                  bool backgroundActive,
+                                  IReadOnlyList<(string Id, string Type, string Description)> backgroundTasks)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list))
         {
@@ -747,10 +805,29 @@ internal sealed class SessionState
         existing.HookEvent = hookEvent;
         existing.ToolName = toolName;
         existing.BackgroundActive = backgroundActive;
-        if ((hookEvent == "Stop" && !backgroundActive) || hookEvent == "SessionStart") existing.Agents.Clear();
+        if (hookEvent == "SessionStart") existing.Background.Clear();
+        if (hookEvent == "Stop") ReconcileBackground(existing, backgroundTasks);
         if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;
         PushRecentBody(existing, body);
         return existing.State;
+    }
+
+    /// <summary>A Stop lists every background task still running: keep those (with their start time
+    /// and last activity), add new ones, drop the rest.</summary>
+    private static void ReconcileBackground(SessionEntry entry,
+                                            IReadOnlyList<(string Id, string Type, string Description)> tasks)
+    {
+        var running = new Dictionary<string, BackgroundWork>();
+        foreach (var (id, type, description) in tasks)
+        {
+            var work = entry.Background.TryGetValue(id, out var w) ? w
+                     : new BackgroundWork { StartedUtc = DateTime.UtcNow };
+            work.Kind = type == "subagent" ? "agent" : type;
+            work.Description = description;
+            running[id] = work;
+        }
+        entry.Background.Clear();
+        foreach (var (id, w) in running) entry.Background[id] = w;
     }
 
     private static void ApplyAskChange(SessionEntry entry, AskChange ask, string sessionId,

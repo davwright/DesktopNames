@@ -33,9 +33,9 @@ internal sealed class TaskbarOverlay : Form
     private string _tooltipText = "";
     private readonly Font _ttFont = (Font)(SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont).Clone();
     private Font _ttItalic = null!;
+    private Font _ttBold = null!;
     private static readonly TextFormatFlags TipFlags =
         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
-    private const int TipPad = 5;
     private const int TipIndent = 14;
 
     // Reassign-drag state. Plain press-drag on any desktop button starts a *reorder* drag
@@ -97,6 +97,7 @@ internal sealed class TaskbarOverlay : Form
         _refreshTimer.Start();
 
         _ttItalic = new Font(_ttFont, FontStyle.Italic);
+        _ttBold = new Font(_ttFont, FontStyle.Bold);
         _stateTooltip.Popup += OnTooltipPopup;
         _stateTooltip.Draw += OnTooltipDraw;
 
@@ -439,7 +440,7 @@ internal sealed class TaskbarOverlay : Form
         return string.Join("+", parts);
     }
 
-    private static string Truncate(string s, int max) =>
+    internal static string Truncate(string s, int max) =>
         s.Length <= max ? s : s.Substring(0, max - 1) + "…";
 
     /// <summary>Right-click menu for the synthetic "?" unresolved button.</summary>
@@ -450,7 +451,7 @@ internal sealed class TaskbarOverlay : Form
         _contextMenu.Items.Add(new ToolStripMenuItem($"— {count} unresolved session{(count == 1 ? "" : "s")} —") { Enabled = false });
         if (!string.IsNullOrEmpty(tip))
         {
-            foreach (var line in SessionState.StripTipMarkers(tip).Split('\n'))
+            foreach (var line in SessionState.StripTipMarkers(tip).Split('\n').Where(l => l.Length > 0))
                 _contextMenu.Items.Add(new ToolStripMenuItem(line) { Enabled = false });
         }
         _contextMenu.Items.Add(new ToolStripSeparator());
@@ -1151,46 +1152,92 @@ internal sealed class TaskbarOverlay : Form
         return note + "\n\n" + stateTip;
     }
 
-    /// <summary>Split the current tooltip text into styled lines: the header regular, the
-    /// TipItalic-marked Claude message italic + indented, the TipDim-marked cwd dim + indented.</summary>
-    private IEnumerable<(string text, Font font, Color color, int indent)> TipLines()
+    // Hover card palette — the same as the session flyout, so the two read as one design.
+    private Color TipBack   => _isDarkMode ? Color.FromArgb(40, 40, 40)    : Color.FromArgb(248, 248, 248);
+    private Color TipBorder => _isDarkMode ? Color.FromArgb(90, 90, 90)    : Color.FromArgb(190, 190, 190);
+    private Color TipFore   => _isDarkMode ? Color.White                   : Color.FromArgb(25, 25, 25);
+    private Color TipDimFg  => _isDarkMode ? Color.FromArgb(170, 170, 170) : Color.FromArgb(110, 110, 110);
+
+    /// <summary>One styled line of the hover card. <c>Right</c> is drawn right-aligned (a run time);
+    /// <c>Dot</c> paints a state-coloured dot before a session header.</summary>
+    private readonly record struct TipLine(string Text, string Right, Font Font, Color Color, int Indent, StateKind? Dot);
+
+    /// <summary>Split the current tooltip text into styled lines by their Tip* markers (see
+    /// SessionState): session header bold with a state dot, Claude message italic, background
+    /// work with run times, the cwd dim. Unmarked lines (the desktop note) are plain.</summary>
+    private IEnumerable<TipLine> TipLines()
     {
         foreach (var raw in _tooltipText.Split('\n'))
         {
-            if (raw.Length == 0) { yield return ("", _ttFont, Color.Empty, 0); continue; }
-            if (raw[0] == SessionState.TipItalic)
-                yield return (raw[1..], _ttItalic, SystemColors.InfoText, TipIndent);
-            else if (raw[0] == SessionState.TipDim)
-                yield return (raw[1..], _ttFont, SystemColors.GrayText, TipIndent);
+            if (raw.Length == 0) { yield return new("", "", _ttFont, Color.Empty, 0, null); continue; }
+            char m = raw[0];
+            if (m == SessionState.TipHeader)
+                yield return new(raw[2..], "", _ttBold, TipFore, TipIndent, (StateKind)(raw[1] - '0'));
+            else if (m == SessionState.TipItalic)
+                yield return new(raw[1..], "", _ttItalic, TipFore, TipIndent, null);
+            else if (m == SessionState.TipBgHead)
+                yield return new(raw[1..], "", _ttFont, TipFore, TipIndent, null);
+            else if (m == SessionState.TipBg)
+            {
+                int tab = raw.LastIndexOf('\t');
+                yield return tab < 0 ? new(raw[1..], "", _ttFont, TipFore, TipIndent * 2, null)
+                                     : new(raw[1..tab], raw[(tab + 1)..], _ttFont, TipFore, TipIndent * 2, null);
+            }
+            else if (m == SessionState.TipBgSub)
+                yield return new(raw[1..], "", _ttItalic, TipDimFg, TipIndent * 3, null);
+            else if (m == SessionState.TipDim)
+                yield return new(raw[1..], "", _ttFont, TipDimFg, TipIndent, null);
             else
-                yield return (raw, _ttFont, SystemColors.InfoText, 0);
+                yield return new(raw, "", _ttFont, TipFore, 0, null);
         }
     }
+
+    private const int TipCardPad = 10;
+    private const int TipRightGap = 18;
+
+    private static Size TipMeasure(string text, Font font) =>
+        TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags);
 
     private void OnTooltipPopup(object? sender, PopupEventArgs e)
     {
         int w = 0, h = 0;
-        foreach (var (text, font, _, indent) in TipLines())
+        foreach (var l in TipLines())
         {
-            if (text.Length == 0) { h += font.Height / 2; continue; }
-            var sz = TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags);
-            w = Math.Max(w, sz.Width + indent);
-            h += sz.Height;
+            if (l.Text.Length == 0) { h += l.Font.Height / 2; continue; }
+            var sz = TipMeasure(l.Text, l.Font);
+            int right = l.Right.Length == 0 ? 0 : TipRightGap + TipMeasure(l.Right, l.Font).Width;
+            w = Math.Max(w, l.Indent + sz.Width + right);
+            h += sz.Height + 1;
         }
-        e.ToolTipSize = new Size(w + TipPad * 2, h + TipPad * 2);
+        e.ToolTipSize = new Size(w + TipCardPad * 2, h + TipCardPad * 2);
     }
 
     private void OnTooltipDraw(object? sender, DrawToolTipEventArgs e)
     {
-        e.DrawBackground();
-        e.DrawBorder();
-        int y = e.Bounds.Top + TipPad;
-        foreach (var (text, font, color, indent) in TipLines())
+        var g = e.Graphics;
+        using (var back = new SolidBrush(TipBack)) g.FillRectangle(back, e.Bounds);
+        using (var pen = new Pen(TipBorder))
+            g.DrawRectangle(pen, e.Bounds.X, e.Bounds.Y, e.Bounds.Width - 1, e.Bounds.Height - 1);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        int left = e.Bounds.Left + TipCardPad, rightEdge = e.Bounds.Right - TipCardPad;
+        int y = e.Bounds.Top + TipCardPad;
+        foreach (var l in TipLines())
         {
-            if (text.Length == 0) { y += font.Height / 2; continue; }
-            TextRenderer.DrawText(e.Graphics, text, font,
-                new Point(e.Bounds.Left + TipPad + indent, y), color, TipFlags);
-            y += TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags).Height;
+            if (l.Text.Length == 0) { y += l.Font.Height / 2; continue; }
+            int lineH = TipMeasure(l.Text, l.Font).Height;
+            if (l.Dot is { } state)
+            {
+                const int d = 8;
+                using var dot = new SolidBrush(SessionFlyout.StateColor(state));
+                g.FillEllipse(dot, left + (TipIndent - d) / 2 - 1, y + (lineH - d) / 2, d, d);
+            }
+            TextRenderer.DrawText(g, l.Text, l.Font, new Point(left + l.Indent, y), l.Color, TipFlags);
+            if (l.Right.Length > 0)
+            {
+                int rw = TipMeasure(l.Right, l.Font).Width;
+                TextRenderer.DrawText(g, l.Right, l.Font, new Point(rightEdge - rw, y), TipDimFg, TipFlags);
+            }
+            y += lineH + 1;
         }
     }
 
@@ -1373,6 +1420,7 @@ internal sealed class TaskbarOverlay : Form
         _stateTooltip.Dispose();
         _ttFont.Dispose();
         _ttItalic.Dispose();
+        _ttBold.Dispose();
         base.OnFormClosing(e);
     }
 

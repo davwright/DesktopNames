@@ -134,6 +134,7 @@ internal sealed class AlertPipeServer : IDisposable
         string extras = "";
         if (!string.IsNullOrEmpty(msg.NotificationKind)) extras += $" notif={msg.NotificationKind}";
         if (!string.IsNullOrEmpty(msg.ErrorType))        extras += $" err={msg.ErrorType}";
+        if (msg.BackgroundTasks is { Count: > 0 } bg)  extras += $" bg={bg.Count}";
         string effect = transition.Remove ? "remove"
                       : $"{(transition.Activity?.ToString() ?? "activity-unchanged")}/ask={transition.Ask}";
         Log.Pipe($"IN  session={msg.SessionId} hook={msg.HookEvent ?? "-"} -> {effect} cwd={msg.Cwd} vscodePid={msg.VsCodePid} parentPid={msg.ParentPid} walk={msg.WalkOutcome ?? "-"}{extras}");
@@ -196,7 +197,8 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.ToolName,
                             msg.ToolDescription,
                             msg.Cwd ?? "",
-                            msg.HookEvent == "Stop" && msg.BackgroundActive);
+                            msg.HookEvent == "Stop" && msg.BackgroundActive,
+                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "")).ToList());
                         reply.Ok = false;
                         reply.Error = "vscode-window-not-found";
                         reply.UserMessage = userHint;
@@ -225,7 +227,8 @@ internal sealed class AlertPipeServer : IDisposable
                             msg.ToolName,
                             msg.ToolDescription,
                             msg.Cwd ?? "",
-                            msg.HookEvent == "Stop" && msg.BackgroundActive);
+                            msg.HookEvent == "Stop" && msg.BackgroundActive,
+                            msg.BackgroundTasks?.Select(t => (t.Id ?? "", t.Type ?? "", t.Description ?? "")).ToList());
 
                         // Learn from this resolution so siblings + future hooks resolve faster.
                         // Idle should drop sticky bindings; everything else cements them.
@@ -616,6 +619,13 @@ internal sealed class AlertPipeServer : IDisposable
         return Guid.Empty;
     }
 
+    private sealed class BackgroundTaskIn
+    {
+        public string? Id { get; set; }
+        public string? Type { get; set; }
+        public string? Description { get; set; }
+    }
+
     private sealed class AlertMessage
     {
         // core
@@ -642,6 +652,8 @@ internal sealed class AlertPipeServer : IDisposable
         // Set when the hook fired inside a background agent (Agent tool) of this session.
         public string? AgentId { get; set; }
         public string? AgentType { get; set; }
+        // Stop only: the background tasks still running (shells, agents) for the hover.
+        public List<BackgroundTaskIn>? BackgroundTasks { get; set; }
 
         // Sent by ClaudeHook (2026-05-20+):
         // - ErrorType: kind of StopFailure (e.g. "rate_limit", "authentication_failed").
