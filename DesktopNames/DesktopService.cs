@@ -32,6 +32,28 @@ internal sealed class DesktopService : IDisposable
         try { VdaDll.CreateDesktop(); DesktopsChanged?.Invoke(); } catch { }
     }
 
+    /// <summary>Append a desktop at the end of the list, name it, and return its id. Throws on failure.</summary>
+    public Guid CreateNamedDesktop(string name)
+    {
+        if (VdaDll.CreateDesktop() < 0) throw new InvalidOperationException("CreateDesktop failed");
+        int idx = VdaDll.GetDesktopCount() - 1;
+        if (VdaDll.SetDesktopName(idx, name) < 0)
+            throw new InvalidOperationException($"SetDesktopName({idx}, \"{name}\") failed");
+        var id = VdaDll.GetDesktopIdByNumber(idx);
+        DesktopsChanged?.Invoke();
+        return id;
+    }
+
+    /// <summary>Remove a desktop by id; its remaining windows move to the first desktop. Throws if
+    /// it is the first desktop or no longer exists.</summary>
+    public void RemoveDesktop(Guid desktopId)
+    {
+        int idx = IndexFromGuid(desktopId);
+        if (idx <= 0) throw new InvalidOperationException($"desktop {desktopId} is first or gone (index {idx})");
+        VdaDll.RemoveDesktop(idx, 0);
+        DesktopsChanged?.Invoke();
+    }
+
     public void RemoveCurrentDesktop()
     {
         if (!VdaDll.IsLoaded) return;

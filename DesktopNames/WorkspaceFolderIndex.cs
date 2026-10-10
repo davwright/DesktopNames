@@ -218,6 +218,28 @@ internal sealed class WorkspaceFolderIndex
     }
 
     /// <summary>
+    /// Every folder VS Code has ever opened in folder mode that still exists on disk, with the
+    /// last time its workspaceStorage entry was touched (≈ last opened). Backs the project
+    /// switcher's list, so a project stays listed after its desktop is recycled.
+    /// </summary>
+    public static List<(string folder, DateTime lastUsedUtc)> AllOpenedFolders()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Code", "User", "workspaceStorage");
+        var result = new List<(string, DateTime)>();
+        foreach (var dir in new DirectoryInfo(root).GetDirectories())
+        {
+            var wf = Path.Combine(dir.FullName, "workspace.json");
+            if (!File.Exists(wf)) continue;
+            using var doc = JsonDocument.Parse(File.ReadAllText(wf));
+            if (!doc.RootElement.TryGetProperty("folder", out var f)) continue;
+            string path = NormalizePath(UriToPath(f.GetString()));
+            if (path.Length > 0 && Directory.Exists(path)) result.Add((path, dir.LastWriteTimeUtc));
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Decode a VSCode file URI to a Windows path. <c>file:///c%3A/path</c> → <c>c:\path</c>.
     /// Using <c>new Uri().LocalPath</c> here is wrong: for percent-encoded drive letters it
     /// returns <c>/c:/path</c> which becomes <c>\c:\path</c> after slash replacement —

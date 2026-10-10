@@ -37,6 +37,7 @@ internal static class Log
     public static void State(string msg)    => Write("state",    msg);
     public static void Screens(string msg)  => Write("screens",  msg);
     public static void Startup(string msg)  => Write("startup",  msg);
+    public static void Projects(string msg) => Write("projects", msg);
 
     private static void Write(string category, string msg)
     {

@@ -9,7 +9,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.2.34</Version>
+    <Version>1.2.36</Version>
     <!-- publish.ps1 supplies the short sha (plus .dirty). Without this the SDK appends the
          full sha again, turning "1.2.19+c13a95c" into "1.2.19+c13a95c.c13a95c5b57...". -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>

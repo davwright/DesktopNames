@@ -35,6 +35,15 @@ internal sealed class Settings
 
     public static string FolderKey(string folder) => folder.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
 
+    /// <summary>Where the project switcher (Win+J) creates new project folders and lists existing ones.</summary>
+    public string ProjectsRoot { get; set; } = @"C:\git\projects";
+
+    /// <summary>
+    /// A project desktop (one VS Code has lived on) is removed once it has had no VS Code window
+    /// and no Claude session for this long. 0 disables recycling.
+    /// </summary>
+    public int ProjectRecycleMinutes { get; set; } = 20;
+
     // VSCode workspace → last observed location (desktop + monitor + snap position), kept per
     // monitor arrangement. Always tracked passively: every scan CRUDs the entry to match where
     // the window currently lives, so manual moves via the user's AHK script (Win+Ctrl+N) become
@@ -213,6 +222,7 @@ internal sealed class Settings
             ["OpenCurrentDesktopMenu"] = "Win+Insert",  // opens the per-desktop context menu
             ["PrevWaitingDesktop"] = "Win+Oem4",   // Win+[ — previous desktop with an asking/ready Claude
             ["NextWaitingDesktop"] = "Win+Oem6",   // Win+] — next desktop with an asking/ready Claude
+            ["OpenProjects"]       = "Win+J",      // project switcher: open / create a project on its own desktop
         };
         // Win+Ctrl+1..9,0 → desktops 1..10. Add Shift → desktops 11..20.
         for (int i = 1; i <= 20; i++)

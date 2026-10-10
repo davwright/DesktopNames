@@ -467,6 +467,7 @@ internal sealed class HostForm : Form
     private readonly List<TaskbarOverlay> _overlays = new();
     private HotkeyManager? _hotkeys;
     private VsCodeTracker? _vscodeTracker;
+    private ProjectSwitcher? _projects;
     private IntPtr _foregroundHook;
     private IntPtr _locationHook;
     private NativeMethods.WinEventDelegate? _foregroundDelegate;
@@ -605,6 +606,7 @@ internal sealed class HostForm : Form
             InstallWinEventHooks();
             _lastDesktopId = _desktopService.GetCurrentDesktopId();
             _vscodeTracker = new VsCodeTracker(_desktopService, _settings);
+            _projects = new ProjectSwitcher(_desktopService, _settings, _vscodeTracker, _sessionState);
         };
 
         // RenameDesktop / CreateDesktop / RemoveDesktop / MoveDesktop all fire this.
@@ -718,6 +720,8 @@ internal sealed class HostForm : Form
         });
         TryRegister("PrevWaitingDesktop", "Previous waiting Claude", () => JumpToWaitingClaude(-1));
         TryRegister("NextWaitingDesktop", "Next waiting Claude",     () => JumpToWaitingClaude(+1));
+        // Deferred out of WndProc so the modal loop doesn't run inside the hotkey dispatch.
+        TryRegister("OpenProjects", "Project switcher", () => BeginInvoke(() => _projects?.ShowDialog()));
 
         // Switch-to-desktop hotkeys. Loop variable must be captured into a local
         // so each handler closure binds its own index.
@@ -920,7 +924,7 @@ internal sealed class HostForm : Form
     }
 
     /// <summary>Find an open VS Code workspace window whose rootName is in <paramref name="rootNames"/>.</summary>
-    private static IntPtr FindVsCodeWindow(IReadOnlyCollection<string> rootNames)
+    internal static IntPtr FindVsCodeWindow(IReadOnlyCollection<string> rootNames)
     {
         if (rootNames.Count == 0) return IntPtr.Zero;
         IntPtr found = IntPtr.Zero;
@@ -974,6 +978,7 @@ internal sealed class HostForm : Form
         _alertServer?.Dispose();
         _alertPulse?.Dispose();
         _vscodeTracker?.Dispose();
+        _projects?.Dispose();
         _hotkeys?.Dispose();
         if (_foregroundHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_foregroundHook);
         if (_locationHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_locationHook);
