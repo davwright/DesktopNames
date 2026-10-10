@@ -256,8 +256,10 @@ internal sealed class ProjectsDialog : Form
     private readonly TextBox _search = new() { Dock = DockStyle.Top, Font = new Font("Segoe UI", 12f), PlaceholderText = "Type to filter, or a new project name" };
     private readonly ListView _list = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = true, HideSelection = false, OwnerDraw = true };
     // Buttons size to their text: fixed sizes clip at display scaling above 100%.
-    private readonly Button _open = new() { Text = "Open", AutoSize = true, MinimumSize = new Size(90, 0) };
-    private readonly Button _create = new() { Text = "New project", AutoSize = true, MinimumSize = new Size(90, 0) };
+    private readonly Button _open = new() { Text = "Open (Enter)", AutoSize = true };
+    private readonly Button _create = new() { Text = "New project (Ctrl+Enter)", AutoSize = true };
+    private readonly Button _rename = new() { Text = "Rename desktop (F2)", AutoSize = true };
+    private readonly Button _hide = new() { Text = "Remove from list (Del)", AutoSize = true };
     private readonly Icon _vscodeIcon = LoadIcon("vscode.ico");
     private readonly Icon _claudeIcon = LoadIcon("claude.ico");
     private Col _sortCol = Col.Number;
@@ -283,7 +285,7 @@ internal sealed class ProjectsDialog : Form
 
         // Primary screen, whatever desktop or monitor the user is on.
         var work = Screen.PrimaryScreen!.WorkingArea;
-        Size = new Size(900, 600);
+        Size = new Size(1040, 600);
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
 
@@ -299,16 +301,16 @@ internal sealed class ProjectsDialog : Form
         _list.ColumnClick += (_, e) => SortBy((Col)e.Column);
         _list.DoubleClick += (_, _) => Accept();
         _list.KeyDown += OnListKeyDown;
-        _list.ContextMenuStrip = BuildRowMenu();
+        _list.SelectedIndexChanged += (_, _) => UpdateButtons();
 
-        var cancel = new Button { Text = "Cancel", AutoSize = true, MinimumSize = new Size(90, 0), DialogResult = DialogResult.Cancel };
+        var cancel = new Button { Text = "Cancel (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
         var closeIdle = new Button { Text = "Close idle desktops…", AutoSize = true };
         closeIdle.Click += (_, _) => CloseIdleDesktops();
         var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(6) };
-        bar.Controls.AddRange(new Control[] { cancel, _open, _create, closeIdle });
+        bar.Controls.AddRange(new Control[] { cancel, _open, _create, _rename, _hide, closeIdle });
         var hint = new Label { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
-            Text = $"Enter opens · Ctrl+Enter creates a new project in {projectsRoot} · F2 renames the desktop · Del removes from the list" };
+            Text = $"New projects are created in {projectsRoot}" };
 
         Controls.Add(_list);
         Controls.Add(_search);
@@ -320,6 +322,8 @@ internal sealed class ProjectsDialog : Form
         _search.KeyDown += OnSearchKeyDown;
         _open.Click += (_, _) => Accept();
         _create.Click += (_, _) => CreateNew();
+        _rename.Click += (_, _) => RenameDesktop();
+        _hide.Click += (_, _) => HideSelected();
         Shown += (_, _) => { Activate(); _search.Focus(); };
 
         RefreshState();
@@ -371,9 +375,17 @@ internal sealed class ProjectsDialog : Form
             _list.Columns[i].Text = Headers[i] + ((Col)i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
         _list.EndUpdate();
 
-        bool exact = _projects.Any(p => p.Name.Equals(q, StringComparison.OrdinalIgnoreCase));
-        _create.Enabled = q.Length > 0 && !exact;
-        _open.Enabled = _list.Items.Count > 0;
+        UpdateButtons();
+    }
+
+    private void UpdateButtons()
+    {
+        string q = _search.Text.Trim();
+        var sel = SelectedProjects();
+        _create.Enabled = q.Length > 0 && !_projects.Any(p => p.Name.Equals(q, StringComparison.OrdinalIgnoreCase));
+        _open.Enabled = sel.Count == 1;
+        _rename.Enabled = sel.Count == 1 && sel[0].Desktop != null;
+        _hide.Enabled = sel.Count > 0;
     }
 
     private IComparable SortKey(ProjectSwitcher.Project p) => _sortCol switch
@@ -448,23 +460,6 @@ internal sealed class ProjectsDialog : Form
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
-    private ContextMenuStrip BuildRowMenu()
-    {
-        var menu = new ContextMenuStrip();
-        var open = new ToolStripMenuItem("Open", null, (_, _) => Accept());
-        var rename = new ToolStripMenuItem("Rename desktop…", null, (_, _) => RenameDesktop()) { ShortcutKeyDisplayString = "F2" };
-        var hide = new ToolStripMenuItem("Remove from list", null, (_, _) => HideSelected()) { ShortcutKeyDisplayString = "Del" };
-        menu.Items.AddRange(new ToolStripItem[] { open, rename, hide });
-        menu.Opening += (_, e) =>
-        {
-            var sel = SelectedProjects();
-            if (sel.Count == 0) { e.Cancel = true; return; }
-            open.Enabled = sel.Count == 1;
-            rename.Enabled = sel.Count == 1 && sel[0].Desktop != null;
-        };
-        return menu;
-    }
-
     private List<ProjectSwitcher.Project> SelectedProjects() =>
         _list.SelectedItems.Cast<ListViewItem>().Select(i => (ProjectSwitcher.Project)i.Tag!).ToList();
 
@@ -486,7 +481,16 @@ internal sealed class ProjectsDialog : Form
         _switcher.HideProjects(sel.Select(p => p.Folder));
         var gone = sel.Select(p => p.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
         _folders = _folders.Where(f => !gone.Contains(f.folder)).ToList();
+
+        // Keep the cursor where it was (now on the next row), so Del can clear a run of rows.
+        int at = _list.SelectedIndices.Cast<int>().Min();
         RefreshState();
+        if (_list.Items.Count == 0) return;
+        _list.SelectedItems.Clear();
+        var next = _list.Items[Math.Min(at, _list.Items.Count - 1)];
+        next.Selected = true;
+        next.Focused = true;
+        next.EnsureVisible();
     }
 
     private void CloseIdleDesktops()
