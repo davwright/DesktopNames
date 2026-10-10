@@ -372,34 +372,62 @@ internal sealed class SessionState
         {
             if (e.Consumed) continue;
             if (e.State == max) count++;
-            var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
-            // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
-            // collide (two sessions in the same folder, or one whose cwd wandered there).
-            var sid = e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
-            // Per session: a header with a state dot, the Claude message italic, the background
-            // work still running (count, then one line per task with its run time, an agent's
-            // latest tool call under it), then the full cwd dim (the real disambiguator when the
-            // title's leaf name is generic). The Tip* markers style them in the owner-drawn tooltip.
-            var sb = new System.Text.StringBuilder();
-            sb.Append(TipHeader).Append((char)('0' + (int)e.State))
-              .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
-            if (!string.IsNullOrEmpty(e.Body)) sb.Append('\n').Append(TipItalic).Append(e.Body);
-            if (e.Background.Count > 0)
-            {
-                var counts = e.Background.Values.GroupBy(w => w.Kind)
-                    .Select(g => $"{g.Count()} {g.Key}{(g.Count() == 1 ? "" : "s")}");
-                sb.Append('\n').Append(TipBgHead).Append("⏳ ").Append(string.Join(" · ", counts));
-                foreach (var w in e.Background.Values.OrderBy(w => w.StartedUtc ?? DateTime.MaxValue))
-                {
-                    sb.Append('\n').Append(TipBg).Append(w.Kind).Append("  ").Append(TaskbarOverlay.Truncate(w.Description, 70))
-                      .Append('\t').Append(w.StartedUtc is { } started ? FormatAge(started) : "");
-                    if (w.Activity.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(w.Activity, 80));
-                }
-            }
-            if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);
-            lines.Add(sb.ToString());
+            lines.Add(DescribeEntry(e));
         }
         return (max, count, string.Join("\n\n", lines));
+    }
+
+    /// <summary>
+    /// One session's tooltip block, Tip* markers included: header with state, the Claude
+    /// message, background work, then the cwd.
+    /// </summary>
+    private static string DescribeEntry(SessionEntry e)
+    {
+        var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
+        // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
+        // collide (two sessions in the same folder, or one whose cwd wandered there).
+        var sid = e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
+        // Per session: a header with a state dot, the Claude message italic, the background
+        // work still running (count, then one line per task with its run time, an agent's
+        // latest tool call under it), then the full cwd dim (the real disambiguator when the
+        // title's leaf name is generic). The Tip* markers style them in the owner-drawn tooltip.
+        var sb = new System.Text.StringBuilder();
+        sb.Append(TipHeader).Append((char)('0' + (int)e.State))
+          .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
+        if (!string.IsNullOrEmpty(e.Body)) sb.Append('\n').Append(TipItalic).Append(e.Body);
+        if (e.Background.Count > 0)
+        {
+            var counts = e.Background.Values.GroupBy(w => w.Kind)
+                .Select(g => $"{g.Count()} {g.Key}{(g.Count() == 1 ? "" : "s")}");
+            sb.Append('\n').Append(TipBgHead).Append("⏳ ").Append(string.Join(" · ", counts));
+            foreach (var w in e.Background.Values.OrderBy(w => w.StartedUtc ?? DateTime.MaxValue))
+            {
+                sb.Append('\n').Append(TipBg).Append(w.Kind).Append("  ").Append(TaskbarOverlay.Truncate(w.Description, 70))
+                  .Append('\t').Append(w.StartedUtc is { } started ? FormatAge(started) : "");
+                if (w.Activity.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(w.Activity, 80));
+            }
+        }
+        if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The tooltip block for one session (as the taskbar shows it) followed by its recent
+    /// messages, newest first. Empty when the session is no longer tracked.
+    /// </summary>
+    public string DescribeSession(string source, string sessionId)
+    {
+        if (!_location.TryGetValue((source, sessionId), out var desktop) || !_byDesktop.TryGetValue(desktop, out var list)) return "";
+        var e = list.FirstOrDefault(x => x.Source == source && x.SessionId == sessionId);
+        if (e == null) return "";
+        var sb = new System.Text.StringBuilder(DescribeEntry(e));
+        var recent = e.RecentBodies.AsEnumerable().Reverse().Where(b => b != e.Body).ToList();
+        if (recent.Count > 0)
+        {
+            sb.Append("\n\nRecent:");
+            foreach (var r in recent) sb.Append("\n  • ").Append(r);
+        }
+        return sb.ToString();
     }
 
     /// <summary>Compact relative age since last activity: "10s", "5m", "4h", "3d".</summary>

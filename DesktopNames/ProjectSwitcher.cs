@@ -266,10 +266,21 @@ internal sealed class ProjectSwitcher : IDisposable
 
     /// <summary>Reassign a row's Claude sessions to <paramref name="target"/> (dragged Claude
     /// cell) — the same correction the taskbar flyout's drag makes.</summary>
-    public void ReassignClaude(Row row, DesktopInfo target)
+    public void ReassignClaude(IReadOnlyCollection<SessionState.SessionRef> sessions, DesktopInfo target)
     {
-        foreach (var s in row.Sessions) Program.Host!.ReassignSession(s.Source, s.SessionId, s.Cwd, target.Id);
-        Log.Projects($"reassigned {row.Sessions.Count} Claude session(s) of '{row.Name}' -> desktop {target.Index + 1}");
+        foreach (var s in sessions) Program.Host!.ReassignSession(s.Source, s.SessionId, s.Cwd, target.Id);
+        Log.Projects($"reassigned {sessions.Count} Claude session(s) [{string.Join(", ", sessions.Select(s => s.Label))}] -> desktop {target.Index + 1}");
+    }
+
+    /// <summary>What the taskbar tooltip says about one session, plus its recent messages.</summary>
+    public string DescribeSession(SessionState.SessionRef s) => _sessions?.DescribeSession(s.Source, s.SessionId) ?? "";
+
+    /// <summary>A desktop for a row that has none (a VS Code dropped on it): named after it,
+    /// placed after the active desktops.</summary>
+    public DesktopInfo CreateDesktopFor(Row row)
+    {
+        Guid id = CreateProjectDesktop(row.Name);
+        return _desktop.GetDesktops().First(d => d.Id == id);
     }
 
     /// <summary>
@@ -379,18 +390,7 @@ internal sealed class ProjectSwitcher : IDisposable
         IntPtr hwnd = project.VsCodeHwnd;
 
         bool created = project.Desktop == null;
-        Guid target = project.Desktop?.Id ?? _desktop.CreateNamedDesktop(project.Name);
-        if (created)
-        {
-            // Slot it in right after the last desktop with a coloured tab (a Claude state or the
-            // blue marker), not behind the idle ones at the end.
-            var desktops = _desktop.GetDesktops();
-            int lastActive = desktops
-                .Where(d => d.Id != target && ((_sessions?.GetAggregate(d.Id).state ?? StateKind.None) != StateKind.None
-                                               || _settings.IsDesktopHighlighted(d.Id)))
-                .Select(d => d.Index).DefaultIfEmpty(0).Max();
-            if (lastActive + 1 < desktops.Count - 1) _desktop.MoveDesktopToIndex(target, lastActive + 1);
-        }
+        Guid target = project.Desktop?.Id ?? CreateProjectDesktop(project.Name);
 
         if (hwnd != IntPtr.Zero && _desktop.GetDesktopForWindow(hwnd) != target && !_desktop.MoveWindowToDesktop(hwnd, target))
             throw new InvalidOperationException($"Could not move the '{project.Name}' VS Code window to its desktop.");
@@ -410,6 +410,23 @@ internal sealed class ProjectSwitcher : IDisposable
         FollowPin(project.Folder, target);
         _idleSince.Remove(target);
         Log.Projects($"open '{project.Name}' {project.Folder ?? "(no folder)"} desktop={target}{(created ? " (created)" : "")} window={(hwnd != IntPtr.Zero ? "existing" : project.Folder != null ? "launched" : "none")}");
+    }
+
+    /// <summary>
+    /// A new desktop named <paramref name="name"/>, slotted in right after the last desktop with a
+    /// coloured tab (a Claude state or the blue marker), not behind the idle ones at the end.
+    /// </summary>
+    private Guid CreateProjectDesktop(string name)
+    {
+        Guid target = _desktop.CreateNamedDesktop(name);
+        var desktops = _desktop.GetDesktops();
+        int lastActive = desktops
+            .Where(d => d.Id != target && ((_sessions?.GetAggregate(d.Id).state ?? StateKind.None) != StateKind.None
+                                           || _settings.IsDesktopHighlighted(d.Id)))
+            .Select(d => d.Index).DefaultIfEmpty(0).Max();
+        if (lastActive + 1 < desktops.Count - 1) _desktop.MoveDesktopToIndex(target, lastActive + 1);
+        Log.Projects($"created desktop '{name}' at {Math.Min(lastActive + 2, desktops.Count)}");
+        return target;
     }
 
     /// <summary>A reassign pin for this folder must follow it, or its Claude sessions resolve to the old desktop.</summary>
@@ -468,8 +485,9 @@ internal sealed class ProjectsDialog : Form
     /// <summary>One list column: its kind, and for a screen column the monitor it stands for.</summary>
     private sealed record ColDef(Col Kind, string Header, int Width, MonitorDescriptor? Screen = null);
 
-    /// <summary>What is being dragged: which project, and which kind of cell the drag started on.</summary>
-    private sealed record DragItem(ProjectSwitcher.Row Row, Col Kind);
+    /// <summary>What is being dragged: which row, which kind of cell the drag started on, and for
+    /// a Claude pill the one session it stands for.</summary>
+    private sealed record DragItem(ProjectSwitcher.Row Row, Col Kind, SessionState.SessionRef? Session = null);
 
     private readonly ProjectSwitcher _switcher;
     private readonly List<MonitorDescriptor> _screens;
@@ -490,6 +508,9 @@ internal sealed class ProjectsDialog : Form
     private int _sortCol;
     private bool _sortDesc;
     private int _pressCol = -1;
+    private SessionState.SessionRef? _pressSession;
+    private readonly ToolTip _tip = new() { UseAnimation = false, UseFading = false };
+    private string? _tipKey;
     private int _dropIndex = -1, _dropCol = -1;
 
     /// <summary>Set when the user picked an existing row.</summary>
@@ -513,7 +534,7 @@ internal sealed class ProjectsDialog : Form
         };
         for (int i = 0; i < _screens.Count; i++)
             _cols.Add(new(Col.Screen, _screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}", 160, _screens[i]));
-        _cols.Add(new(Col.Claude, "Claude", 135));
+        _cols.Add(new(Col.Claude, "Claude", 170));
         _cols.Add(new(Col.Project, "Project", 150));
         _cols.Add(new(Col.Folder, "Folder", 280));
         _cols.Add(new(Col.LastUsed, "Last used", 80));
@@ -549,7 +570,9 @@ internal sealed class ProjectsDialog : Form
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
         // What a drag does depends on the cell it starts on (see OnItemDrag).
         _list.AllowDrop = true;
-        _list.MouseDown += (_, e) => _pressCol = ColumnAt(e.Location);
+        _list.MouseDown += (_, e) => { _pressCol = ColumnAt(e.Location); _pressSession = PillAt(e.Location)?.session; };
+        _list.MouseMove += (_, e) => UpdateTip(e.Location);
+        _list.MouseLeave += (_, _) => { _tipKey = null; _tip.Hide(_list); };
         _list.MouseClick += (_, e) => { if (KindAt(ColumnAt(e.Location)) == Col.Screen) ShowSnapPicker(e.Location); };
         _list.ItemDrag += OnItemDrag;
         _list.DragOver += OnDragOver;
@@ -608,6 +631,7 @@ internal sealed class ProjectsDialog : Form
         {
             _headerHover?.ReleaseHandle();
             _screenPopup.Dispose();
+            _tip.Dispose();
             _vscodeIcon.Dispose();
             _claudeIcon.Dispose();
         }
@@ -714,11 +738,17 @@ internal sealed class ProjectsDialog : Form
             case Col.Claude:
                 if (p.ClaudeCount == 0) break;
                 g.DrawIcon(_claudeIcon, new Rectangle(r.X + 4, r.Y + (r.Height - 16) / 2, 16, 16));
-                var pill = new Rectangle(r.X + 24, r.Y + 3, r.Width - 28, r.Height - 6);
-                string word = p.ClaudeState == StateKind.None ? "idle" : p.ClaudeState.ToString().ToLowerInvariant();
-                DrawPill(g, pill, $"{word}{(p.Glyph is { } gl && p.ClaudeState == StateKind.Busy ? " " + gl : "")}",
-                    p.ClaudeState == StateKind.None ? null : SessionFlyout.StateColor(p.ClaudeState), fg);
-                if (p.ClaudeCount >= 2) TaskbarOverlay.DrawCountBadge(g, pill, p.ClaudeCount);
+                // One pill per session, so two Claudes in one window are two things to hover and drag.
+                var pills = ClaudePills(r, p.Sessions.Count);
+                for (int i = 0; i < pills.Count; i++)
+                {
+                    var st = p.Sessions[i].State;
+                    string word = st == StateKind.None ? "idle" : st.ToString().ToLowerInvariant();
+                    string label = pills[i].Width >= 46
+                        ? word + (p.Sessions.Count == 1 && st == StateKind.Busy && p.Glyph is { } gl ? " " + gl : "")
+                        : word[..1].ToUpperInvariant();
+                    DrawPill(g, pills[i], label, st == StateKind.None ? null : SessionFlyout.StateColor(st), fg);
+                }
                 break;
 
             case Col.Screen:
@@ -791,7 +821,9 @@ internal sealed class ProjectsDialog : Form
             _ => false,
         };
         if (!draggable) return;
-        _list.DoDragDrop(new DragItem(p, kind!.Value), DragDropEffects.Move);
+        _tipKey = null;
+        _tip.Hide(_list);
+        _list.DoDragDrop(new DragItem(p, kind!.Value, kind == Col.Claude ? _pressSession : null), DragDropEffects.Move);
         SetDropTarget(-1, -1);
     }
 
@@ -799,18 +831,21 @@ internal sealed class ProjectsDialog : Form
     /// Where a drop would land: the row's desktop, plus — for a VS Code chip over a screen
     /// column — that screen. Null when it would change nothing.
     /// </summary>
-    private (DragItem drag, int index, int col, DesktopInfo desktop, MonitorDescriptor? screen)? DropTarget(DragEventArgs e)
+    private (DragItem drag, int index, int col, ProjectSwitcher.Row row, DesktopInfo? desktop, MonitorDescriptor? screen)? DropTarget(DragEventArgs e)
     {
         if (e.Data?.GetData(typeof(DragItem)) is not DragItem drag) return null;
         var pt = _list.PointToClient(new Point(e.X, e.Y));
         var item = _list.GetItemAt(5, pt.Y);
-        if (item?.Tag is not ProjectSwitcher.Row { Desktop: { } d }) return null;
+        if (item?.Tag is not ProjectSwitcher.Row row) return null;
+        var d = row.Desktop;
+        // A VS Code dropped on a project that has no desktop gets one created for it.
+        if (d == null && !(drag.Kind == Col.Screen && row.Folder != null)) return null;
         int col = ColumnAt(pt);
         var screen = drag.Kind == Col.Screen && KindAt(col) == Col.Screen ? _cols[col].Screen : null;
-        bool newDesktop = d.Id != drag.Row.Desktop?.Id;
+        bool newDesktop = d == null || d.Id != drag.Row.Desktop?.Id;
         bool newScreen = screen != null && screen.Handle != drag.Row.Screen?.Handle;
         if (!newDesktop && !newScreen) return null;
-        return (drag, item.Index, screen != null ? col : -1, d, screen);
+        return (drag, item.Index, screen != null ? col : -1, row, d, screen);
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
@@ -831,15 +866,52 @@ internal sealed class ProjectsDialog : Form
             switch (target.drag.Kind)
             {
                 case Col.Screen:
-                    if (target.desktop.Id != p.Desktop?.Id) _switcher.MoveVsCode(p, target.desktop);
+                    var desk = target.desktop ?? _switcher.CreateDesktopFor(target.row);
+                    if (desk.Id != p.Desktop?.Id) _switcher.MoveVsCode(p, desk);
                     if (target.screen != null && target.screen.Handle != p.Screen?.Handle) _switcher.PlaceVsCode(p, target.screen, p.Snap);
                     break;
-                case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop.Index); break;
-                case Col.Claude: _switcher.ReassignClaude(p, target.desktop); break;
+                case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop!.Index); break;
+                case Col.Claude:
+                    _switcher.ReassignClaude(target.drag.Session is { } one ? new[] { one } : p.Sessions.ToArray(), target.desktop!);
+                    break;
             }
         }
         catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
         RefreshState();
+    }
+
+    /// <summary>Where each of a row's session pills sits inside its Claude cell, after the icon.</summary>
+    private static List<Rectangle> ClaudePills(Rectangle cell, int n)
+    {
+        const int gap = 3;
+        var rects = new List<Rectangle>(n);
+        if (n == 0) return rects;
+        int x0 = cell.X + 24, avail = cell.Right - 3 - x0;
+        int w = Math.Max(12, (avail - gap * (n - 1)) / n);
+        for (int i = 0; i < n; i++) rects.Add(new Rectangle(x0 + i * (w + gap), cell.Y + 3, w, cell.Height - 6));
+        return rects;
+    }
+
+    /// <summary>The Claude session pill under a point in the list, if any.</summary>
+    private (ProjectSwitcher.Row row, SessionState.SessionRef session)? PillAt(Point pt)
+    {
+        var hit = _list.HitTest(pt);
+        if (hit.Item?.Tag is not ProjectSwitcher.Row row || hit.SubItem == null) return null;
+        if (_cols[hit.Item.SubItems.IndexOf(hit.SubItem)].Kind != Col.Claude) return null;
+        int i = ClaudePills(hit.SubItem.Bounds, row.Sessions.Count).FindIndex(r => r.Contains(pt));
+        return i < 0 ? null : (row, row.Sessions[i]);
+    }
+
+    /// <summary>Hovering a Claude pill shows that session's state, message, background work and recent messages.</summary>
+    private void UpdateTip(Point pt)
+    {
+        var hit = PillAt(pt);
+        string? key = hit is { } h ? h.session.Source + "|" + h.session.SessionId : null;
+        if (key == _tipKey) return;
+        _tipKey = key;
+        string text = hit is { } x ? SessionState.StripTipMarkers(_switcher.DescribeSession(x.session)) : "";
+        if (text.Length == 0) { _tip.Hide(_list); return; }
+        _tip.Show(text, _list, pt.X + 16, pt.Y + 20, 30_000);
     }
 
     /// <summary>Click a VS Code chip: pick its snap position on that screen, applied at once.</summary>
@@ -941,7 +1013,8 @@ internal sealed class ProjectsDialog : Form
             "Drag the # cell onto another row to reorder desktops.\n" +
             "Drag a VS Code chip onto another row to move the window to that desktop, and/or into another screen column to move it to that screen.\n" +
             "Click a VS Code chip to change its snap position (full screen, halves, quarters).\n" +
-            "Drag the Claude cell onto another row to reassign that desktop's Claude sessions.\n" +
+            "Each Claude session is a pill: hover it for its recent messages, drag it onto another row to reassign that session.\n" +
+            "Dropping a VS Code chip on a project with no desktop creates that desktop.\n" +
             "Hover a screen column's header to see the monitor arrangement.\n\n" +
             "F2 renames the desktop, Del removes projects from the list. Click a column header to sort.\n" +
             "The title shows the screen setup (Windows → Rename this screen setup).\n" +
