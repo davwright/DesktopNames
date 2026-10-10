@@ -718,6 +718,8 @@ internal sealed class HostForm : Form
                 if (!o.IsDisposed && o.TryOpenContextMenuForCurrentDesktop()) return;
             }
         });
+        TryRegister("ToggleBlueHighlight", "Toggle blue highlight", () => ToggleBlueHighlight(_desktopService.GetCurrentDesktopId()));
+        TryRegister("ClearHighlight", "Clear highlight", () => ClearHighlight(_desktopService.GetCurrentDesktopId()));
         TryRegister("PrevWaitingDesktop", "Previous waiting Claude", () => JumpToWaitingClaude(-1));
         TryRegister("NextWaitingDesktop", "Next waiting Claude",     () => JumpToWaitingClaude(+1));
         // Deferred out of WndProc so the modal loop doesn't run inside the hotkey dispatch.
@@ -849,6 +851,25 @@ internal sealed class HostForm : Form
         if (target == null) return;
         _desktopService.SwitchToDesktop(target);
         RefreshAllOverlays();
+    }
+
+    /// <summary>
+    /// Toggle the manual blue marker. Turning it on also dismisses the current Claude colour,
+    /// so an asking desktop turns blue in one step; the blue clears itself on Claude's next status.
+    /// </summary>
+    public void ToggleBlueHighlight(Guid desktopId)
+    {
+        bool turningOn = !_settings.IsDesktopHighlighted(desktopId);
+        _settings.ToggleDesktopHighlight(desktopId);
+        if (turningOn) _sessionState?.Consume(desktopId);
+    }
+
+    /// <summary>Clear whatever colour the tab shows: dismiss the Claude colour until its next
+    /// state change, and drop the blue marker.</summary>
+    public void ClearHighlight(Guid desktopId)
+    {
+        _sessionState?.Consume(desktopId);
+        if (_settings.IsDesktopHighlighted(desktopId)) _settings.ToggleDesktopHighlight(desktopId);
     }
 
     /// <summary>

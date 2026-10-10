@@ -108,7 +108,13 @@ internal sealed class TaskbarOverlay : Form
             _menuOpenForeground = NativeMethods.GetForegroundWindow();
             _menuBlurTimer.Start();
         };
-        _contextMenu.Closed += (_, _) => _menuBlurTimer.Stop();
+        _contextMenu.Closed += (_, _) =>
+        {
+            _menuBlurTimer.Stop();
+            var after = _afterMenuClosed;
+            _afterMenuClosed = null;
+            if (after != null) BeginInvoke(after);
+        };
         _menuBlurTimer.Tick += (_, _) =>
         {
             var fg = NativeMethods.GetForegroundWindow();
@@ -231,7 +237,9 @@ internal sealed class TaskbarOverlay : Form
         }
 
         using var popup = new RenameEditPopup(desktop.Name, screenRect, IsValid, _isDarkMode);
-        if (popup.ShowDialog() == DialogResult.OK)
+        var result = popup.ShowDialog();
+        Log.Ui($"rename '{desktop.Name}' -> {result} '{popup.Value}' ({popup.CloseReason})");
+        if (result == DialogResult.OK)
         {
             var newName = popup.Value;
             if (newName.Length > 0 && newName != desktop.Name)
@@ -240,6 +248,7 @@ internal sealed class TaskbarOverlay : Form
     }
 
     private DesktopInfo? _rightClickedDesktop;
+    private Action? _afterMenuClosed;
 
     private void BuildContextMenu()
     {
@@ -265,7 +274,9 @@ internal sealed class TaskbarOverlay : Form
                     LabelWithShortcut("Select", $"SwitchToDesktop{d.Index + 1}"),
                     null, (_, _) => _desktopService.SwitchToDesktop(d));
             }
-            _contextMenu.Items.Add("Rename...", null, (_, _) => PromptRename(d));
+            // Item Click fires while the menu is still up; the popup must wait for it to close,
+            // or the menu's teardown takes focus back and the popup cancels itself.
+            _contextMenu.Items.Add("Rename...", null, (_, _) => _afterMenuClosed = () => PromptRename(d));
 
             // Make first / Make last operate on the right-clicked desktop. The COM API
             // exposes "move current desktop to index", so non-current targets are
@@ -286,28 +297,22 @@ internal sealed class TaskbarOverlay : Form
             var (clearState, _, _) = _sessionState?.GetAggregate(d.Id) ?? default;
             var clearItem = new ToolStripMenuItem("Clear highlight")
             {
-                Enabled = clearState != StateKind.None,
+                Enabled = clearState != StateKind.None || _settings.IsDesktopHighlighted(d.Id),
+                ShortcutKeyDisplayString = "Ctrl+Shift+click",
                 ToolTipText = "Dismiss this desktop's colour until Claude's next state change"
             };
-            clearItem.Click += (_, _) => _sessionState?.Consume(d.Id);
+            clearItem.Click += (_, _) => Program.Host?.ClearHighlight(d.Id);
             _contextMenu.Items.Add(clearItem);
 
             // Manual blue marker — a persistent user highlight, independent of Claude state.
-            // Turning it on also consumes any current Claude status, so a yellow "asking"
-            // desktop converts to blue in one click (no separate "Clear highlight" needed).
-            // The blue then clears itself when Claude's next status arrives on this desktop.
             var highlightItem = new ToolStripMenuItem("Blue highlight")
             {
                 Checked = _settings.IsDesktopHighlighted(d.Id),
                 CheckOnClick = false,
+                ShortcutKeyDisplayString = "Shift+click",
                 ToolTipText = "Mark blue (clears the current Claude colour); auto-clears on Claude's next status"
             };
-            highlightItem.Click += (_, _) =>
-            {
-                bool turningOn = !_settings.IsDesktopHighlighted(d.Id);
-                _settings.ToggleDesktopHighlight(d.Id);
-                if (turningOn) _sessionState?.Consume(d.Id);
-            };
+            highlightItem.Click += (_, _) => Program.Host?.ToggleBlueHighlight(d.Id);
             _contextMenu.Items.Add(highlightItem);
 
             var existingNote = _settings.GetDesktopNote(d.Id);
@@ -372,7 +377,7 @@ internal sealed class TaskbarOverlay : Form
             renameCurrent.Click += (_, _) =>
             {
                 var current = _desktops.FirstOrDefault(d => d.IsCurrent);
-                if (current != null) PromptRename(current);
+                if (current != null) _afterMenuClosed = () => PromptRename(current);
             };
             _contextMenu.Items.Add(renameCurrent);
         }
@@ -1316,6 +1321,13 @@ internal sealed class TaskbarOverlay : Form
                 if (desktop.Id == SessionState.UnresolvedDesktopId)
                 {
                     OpenReassignFlyout(desktop, RectangleToScreen(_buttons[i].Bounds));
+                    break;
+                }
+
+                if ((ModifierKeys & Keys.Shift) != 0)
+                {
+                    if ((ModifierKeys & Keys.Control) != 0) Program.Host?.ClearHighlight(desktop.Id);
+                    else Program.Host?.ToggleBlueHighlight(desktop.Id);
                     break;
                 }
 

@@ -226,6 +226,8 @@ internal sealed class Settings
             ["MoveDesktopLast"]  = "Win+Alt+End",
             ["ToggleHide"]       = "Win+Alt+H",
             ["OpenCurrentDesktopMenu"] = "Win+Insert",  // opens the per-desktop context menu
+            ["ToggleBlueHighlight"] = "Win+Shift+Insert",     // current desktop; Shift+click does it on any tab
+            ["ClearHighlight"]      = "Win+Ctrl+Shift+Insert", // current desktop; Ctrl+Shift+click does it on any tab
             ["PrevWaitingDesktop"] = "Win+Oem4",   // Win+[ — previous desktop with an asking/ready Claude
             ["NextWaitingDesktop"] = "Win+Oem6",   // Win+] — next desktop with an asking/ready Claude
             ["OpenProjects"]       = "Win+J",      // project switcher: open / create a project on its own desktop

@@ -17,6 +17,9 @@ internal sealed class RenameEditPopup : Form
 
     public string Value => _textBox.Text.Trim();
 
+    /// <summary>What ended the edit: enter, escape, or focus-away. Logged by the caller.</summary>
+    public string CloseReason { get; private set; } = "";
+
     public RenameEditPopup(string initial, Rectangle screenBounds, Func<string, bool> isValid, bool isDark)
     {
         _isValid = isValid;
@@ -84,13 +87,10 @@ internal sealed class RenameEditPopup : Form
             _textBox.Focus();
         };
 
-        // Click-outside / focus-away cancels — but only after a short grace window.
-        // ShowDialog's activation flip and the host's WinEventHook-driven overlay
-        // refresh both cause spurious Deactivate events in the first ~150ms.
+        // Click-outside / focus-away cancels, once the popup has actually held focus. Callers
+        // open it only after any context menu has closed, so nothing else takes focus back.
         bool canDismiss = false;
-        var graceTimer = new System.Windows.Forms.Timer { Interval = 250 };
-        graceTimer.Tick += (_, _) => { graceTimer.Stop(); graceTimer.Dispose(); canDismiss = true; };
-        Shown += (_, _) => graceTimer.Start();
+        Activated += (_, _) => canDismiss = true;
 
         Deactivate += (_, _) =>
         {
@@ -98,6 +98,7 @@ internal sealed class RenameEditPopup : Form
             BeginInvoke(() =>
             {
                 if (IsDisposed) return;
+                CloseReason = "focus-away";
                 DialogResult = DialogResult.Cancel;
                 Close();
             });
@@ -108,6 +109,7 @@ internal sealed class RenameEditPopup : Form
     {
         if (keyData == Keys.Escape)
         {
+            CloseReason = "escape";
             DialogResult = DialogResult.Cancel;
             Close();
             return true;
@@ -116,6 +118,7 @@ internal sealed class RenameEditPopup : Form
         {
             if (_isValid(_textBox.Text))
             {
+                CloseReason = "enter";
                 DialogResult = DialogResult.OK;
                 Close();
             }
