@@ -896,10 +896,13 @@ internal sealed class HostForm : Form
         if (_settings.IsDesktopHighlighted(desktopId)) _settings.ToggleDesktopHighlight(desktopId);
     }
 
-    /// <summary>Titles of open VS Code workspaces that contain <paramref name="folder"/>, for a folder
-    /// that is open as part of a multi-folder workspace rather than under its own name.</summary>
-    public IReadOnlyCollection<string> WorkspaceRootNamesFor(string folder) =>
-        _alertServer?.WorkspaceRootNamesFor(folder) ?? Array.Empty<string>();
+    /// <summary>Root folders of the workspace whose VS Code window title shows <paramref name="rootName"/>.</summary>
+    public IReadOnlyList<string> FoldersForWindowTitle(string rootName) =>
+        _alertServer?.FoldersForWindowTitle(rootName) ?? Array.Empty<string>();
+
+    /// <summary>Workspace folders of the VS Code window a Claude session runs in.</summary>
+    public IReadOnlyList<string> SessionWorkspaceFolders(string sessionId) =>
+        _alertServer?.SessionWorkspaceFolders(sessionId) ?? Array.Empty<string>();
 
     /// <summary>Overlay command: open the DesktopNames window (the same one Win+J opens).</summary>
     public void ShowProjects() => _projects?.ShowDialog();

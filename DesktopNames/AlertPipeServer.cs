@@ -522,9 +522,11 @@ internal sealed class AlertPipeServer : IDisposable
     /// workspaces where rootName == folder name) plus any .code-workspace rootNames the
     /// workspace index maps for this cwd.
     /// </summary>
-    /// <summary>Window-title rootNames of the open VS Code workspaces that contain <paramref name="folder"/>
-    /// (e.g. "Untitled (Workspace)" for a multi-folder workspace), from the workspace index only.</summary>
-    public IReadOnlyCollection<string> WorkspaceRootNamesFor(string folder) => _wsIndex.FindRootNamesExact(folder);
+    /// <summary>Root folders of the workspace whose VS Code window title shows <paramref name="rootName"/>.</summary>
+    public IReadOnlyList<string> FoldersForWindowTitle(string rootName) => _wsIndex.FoldersForRootName(rootName);
+
+    /// <summary>Workspace folders of the VS Code window a Claude session runs in (exact, via the ide lock).</summary>
+    public IReadOnlyList<string> SessionWorkspaceFolders(string sessionId) => _claudeSessions.WorkspaceFoldersFor(sessionId);
 
     public IReadOnlyCollection<string> RootNameCandidatesFor(string? cwd)
     {

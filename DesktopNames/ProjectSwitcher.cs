@@ -12,13 +12,31 @@ namespace DesktopNames;
 /// </summary>
 internal sealed class ProjectSwitcher : IDisposable
 {
-    /// <summary>A project row: its folder plus the live state of its desktop, VS Code window and Claude sessions.</summary>
-    public sealed record Project(
-        string Folder, string Name, DateTime LastUsedUtc, DesktopInfo? Desktop,
-        IntPtr VsCodeHwnd, MonitorDescriptor? Screen, SnapMode Snap,
-        StateKind ClaudeState, int ClaudeCount, string? Glyph)
+    /// <summary>
+    /// What runs where: one row per open VS Code window, per Claude session no window claims, and
+    /// per project folder with neither. The chain is desktop → VS Code window → its Claude
+    /// sessions → its folders. <see cref="Folders"/> empty means the window or session could not
+    /// be linked to a folder; <see cref="FoldersAmbiguous"/> means two windows share a title and
+    /// nothing tells which folder is which.
+    /// </summary>
+    public sealed record Row(
+        DesktopInfo? Desktop, bool Unresolved,
+        IntPtr VsCodeHwnd, string? WindowTitle, MonitorDescriptor? Screen, SnapMode Snap,
+        IReadOnlyList<SessionState.SessionRef> Sessions, string? Glyph,
+        IReadOnlyList<string> Folders, bool FoldersAmbiguous, DateTime LastUsedUtc)
     {
         public bool VsCodeOpen => VsCodeHwnd != IntPtr.Zero;
+        /// <summary>The folder Open, Remove and pins act on.</summary>
+        public string? Folder => Folders.Count > 0 ? Folders[0] : null;
+        public string Name => WindowTitle ?? (Folder != null ? Path.GetFileName(Folder) : "");
+        public int ClaudeCount => Sessions.Count;
+        /// <summary>Most urgent state among this row's sessions, the taskbar's order.</summary>
+        public StateKind ClaudeState =>
+            Sessions.Any(s => s.State == StateKind.Asking) ? StateKind.Asking
+            : Sessions.Any(s => s.State == StateKind.Error) ? StateKind.Error
+            : Sessions.Any(s => s.State == StateKind.Busy) ? StateKind.Busy
+            : Sessions.Any(s => s.State == StateKind.Ready) ? StateKind.Ready
+            : StateKind.None;
     }
 
     private readonly DesktopService _desktop;
@@ -60,8 +78,8 @@ internal sealed class ProjectSwitcher : IDisposable
                     if (_dialog.ShowDialog() != DialogResult.OK) return;
                 }
                 finally { if (_sessions != null) _sessions.Changed -= OnSessionsChanged; }
-                if (_dialog.NewProjectName != null) Open(CreateFolder(_dialog.NewProjectName));
-                else Open(_dialog.ChosenFolder!);
+                if (_dialog.NewProjectName != null) OpenNew(CreateFolder(_dialog.NewProjectName));
+                else Open(_dialog.ChosenRow!);
             }
         }
         catch (Exception ex) { ReportError(ex); }
@@ -98,46 +116,128 @@ internal sealed class ProjectSwitcher : IDisposable
             .ToList();
     }
 
-    /// <summary>Attach the live desktop / VS Code / Claude state to each folder.</summary>
-    public List<Project> Describe(List<(string folder, DateTime lastUsedUtc)> folders)
+    private sealed class RowBuilder
     {
+        public DesktopInfo? Desktop;
+        public bool Unresolved;
+        public VsCodeTracker.OpenWindow? Window;
+        public List<string> Folders = new();
+        public bool Ambiguous;
+        public List<SessionState.SessionRef> Sessions = new();
+    }
+
+    private static bool SameFolder(string a, string b) => Settings.FolderKey(a) == Settings.FolderKey(b);
+
+    private static bool IsUnder(string path, string folder)
+    {
+        string p = Settings.FolderKey(path), f = Settings.FolderKey(folder);
+        return p == f || p.StartsWith(f + "\\", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Build the rows from what is actually running. 1: every open VS Code window, with the root
+    /// folders of the workspace its title names. 2: every Claude session, onto the window row on
+    /// its desktop whose folders its own window has (exact, via the ide lock), else whose folder
+    /// its cwd is in; a session no window claims gets its own row on its desktop. 3: every
+    /// project folder nothing above has, on the desktop named after it if there is one.
+    /// </summary>
+    public List<Row> Describe(List<(string folder, DateTime lastUsedUtc)> folders)
+    {
+        var host = Program.Host!;
         var desktops = _desktop.GetDesktops();
         var windows = _tracker.EnumerateOpenWorkspaceWindows();
         var screens = MonitorRef.EnumerateAll();
-        var result = new List<Project>(folders.Count);
-        foreach (var (folder, lastUsed) in folders)
+
+        var sessions = new List<(SessionState.SessionRef s, Guid desktop, IReadOnlyList<string> folders)>();
+        if (_sessions != null)
+            foreach (var id in desktops.Select(d => d.Id).Append(SessionState.UnresolvedDesktopId))
+                foreach (var s in _sessions.GetSessions(id))
+                    sessions.Add((s, id, host.SessionWorkspaceFolders(s.SessionId)));
+
+        var rows = new List<RowBuilder>();
+        foreach (var w in windows)
         {
-            string name = Path.GetFileName(folder);
-            // Its own window (titled with the folder name), else a multi-folder workspace that contains it.
-            var window = windows.FirstOrDefault(w => w.Workspace.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (window.Hwnd == IntPtr.Zero)
+            var indexed = host.FoldersForWindowTitle(w.Workspace).ToList();
+            var named = folders.Where(f => Path.GetFileName(f.folder).Equals(w.Workspace, StringComparison.OrdinalIgnoreCase))
+                               .Select(f => f.folder).ToList();
+            int sameTitle = windows.Count(o => o.Workspace == w.Workspace);
+            List<string> candidates;
+            bool ambiguous;
+            if (sameTitle == 1)
             {
-                var containing = Program.Host!.WorkspaceRootNamesFor(folder);
-                window = windows.FirstOrDefault(w => containing.Contains(w.Workspace));
+                // The index knows the workspace's root folders (several for a multi-folder workspace);
+                // without it, folders of that name — more than one of those is a guess.
+                candidates = indexed.Count > 0 ? indexed : named;
+                ambiguous = indexed.Count == 0 && named.Count > 1;
             }
-            // Where its VS Code window is, when open (so renames and drags are followed); else the desktop named after it.
-            var desktop = (window.Hwnd != IntPtr.Zero ? desktops.FirstOrDefault(d => d.Id == window.DesktopId) : null)
-                       ?? desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            StateKind state = StateKind.None;
-            int count = 0;
-            string? glyph = null;
-            if (desktop != null && _sessions != null)
+            else
             {
-                state = _sessions.GetAggregate(desktop.Id).state;
-                count = _sessions.LiveCount(desktop.Id);
-                glyph = _sessions.GetGlyph(desktop.Id);
+                // Same title on several windows (one folder name in several repos). Only a Claude
+                // session on this window's desktop can say which folder this one has, and only if
+                // no other window with that title shares the desktop.
+                var pool = indexed.Concat(named).DistinctBy(Settings.FolderKey).ToList();
+                var onDesktop = sessions.Where(x => x.desktop == w.DesktopId).SelectMany(x => x.folders).ToList();
+                var picked = pool.Where(c => onDesktop.Any(f => SameFolder(f, c))).ToList();
+                bool alone = windows.Count(o => o.Workspace == w.Workspace && o.DesktopId == w.DesktopId) == 1;
+                candidates = alone && picked.Count == 1 ? picked : pool;
+                ambiguous = candidates.Count > 1;
             }
+            rows.Add(new RowBuilder { Desktop = desktops.FirstOrDefault(d => d.Id == w.DesktopId), Window = w, Folders = candidates, Ambiguous = ambiguous });
+        }
+
+        foreach (var (s, id, sf) in sessions)
+        {
+            var onDesktop = rows.Where(r => r.Window != null && r.Desktop?.Id == id).ToList();
+            var row = onDesktop.FirstOrDefault(r => r.Folders.Any(f => sf.Any(x => SameFolder(x, f))))
+                   ?? onDesktop.FirstOrDefault(r => s.Cwd.Length > 0 && r.Folders.Any(f => IsUnder(s.Cwd, f)));
+            if (row == null)
+            {
+                string? folder = sf.Count > 0 ? sf[0] : null;
+                row = rows.FirstOrDefault(r => r.Window == null && (r.Desktop?.Id ?? SessionState.UnresolvedDesktopId) == id
+                                               && (folder == null ? r.Folders.Count == 0 : r.Folders.Any(f => SameFolder(f, folder))));
+                if (row == null)
+                {
+                    row = new RowBuilder
+                    {
+                        Desktop = desktops.FirstOrDefault(d => d.Id == id),
+                        Unresolved = id == SessionState.UnresolvedDesktopId,
+                        Folders = sf.ToList(),
+                    };
+                    rows.Add(row);
+                }
+            }
+            row.Sessions.Add(s);
+        }
+
+        foreach (var (folder, _) in folders)
+            if (!rows.Any(r => r.Folders.Any(f => SameFolder(f, folder))))
+            {
+                string name = Path.GetFileName(folder);
+                rows.Add(new RowBuilder { Desktop = desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase)), Folders = { folder } });
+            }
+
+        var lastUsed = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (folder, t) in folders) lastUsed[Settings.FolderKey(folder)] = t;
+
+        return rows.Select(r =>
+        {
             MonitorDescriptor? screen = null;
             SnapMode snap = SnapMode.Free;
-            if (window.Hwnd != IntPtr.Zero)
+            if (r.Window is { } w)
             {
-                IntPtr mon = NativeMethods.MonitorFromWindow(window.Hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                IntPtr mon = NativeMethods.MonitorFromWindow(w.Hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
                 screen = screens.FirstOrDefault(s => s.Handle == mon);
-                if (screen != null) snap = SnapGeometry.Detect(window.Hwnd, screen.Work);
+                if (screen != null) snap = SnapGeometry.Detect(w.Hwnd, screen.Work);
             }
-            result.Add(new Project(folder, name, lastUsed, desktop, window.Hwnd, screen, snap, state, count, glyph));
-        }
-        return result;
+            // The desktop's glyph belongs to this row only when the row holds all of that desktop's sessions.
+            string? glyph = r.Desktop != null && _sessions != null && r.Sessions.Count > 0
+                            && r.Sessions.Count == _sessions.GetSessions(r.Desktop.Id).Count ? _sessions.GetGlyph(r.Desktop.Id) : null;
+            var used = r.Folders.Select(f => lastUsed.TryGetValue(Settings.FolderKey(f), out var t) ? t : DateTime.MinValue)
+                                .DefaultIfEmpty(DateTime.MinValue).Max();
+            if (used == DateTime.MinValue && (r.Window != null || r.Sessions.Count > 0)) used = DateTime.UtcNow;
+            return new Row(r.Desktop, r.Unresolved, r.Window?.Hwnd ?? IntPtr.Zero, r.Window?.Workspace, screen, snap,
+                r.Sessions, glyph, r.Folders, r.Ambiguous, used);
+        }).ToList();
     }
 
     public void HideProjects(IEnumerable<string> folders)
@@ -147,19 +247,13 @@ internal sealed class ProjectSwitcher : IDisposable
     }
 
     /// <summary>Move a project's open VS Code window to another desktop (dragged in the switcher).</summary>
-    public void MoveVsCode(Project project, DesktopInfo target)
+    public void MoveVsCode(Row project, DesktopInfo target)
     {
         IntPtr hwnd = project.VsCodeHwnd;
         if (hwnd == IntPtr.Zero) throw new InvalidOperationException($"The '{project.Name}' VS Code window is not open.");
         if (!_desktop.MoveWindowToDesktop(hwnd, target.Id))
             throw new InvalidOperationException($"Could not move the '{project.Name}' VS Code window to desktop {target.Index + 1}.");
-        // A reassign pin for this folder must follow it, or its Claude sessions resolve to the old desktop.
-        string key = Settings.FolderKey(project.Folder);
-        if (_settings.FolderDesktops.ContainsKey(key))
-        {
-            _settings.FolderDesktops[key] = target.Id;
-            _settings.Save();
-        }
+        FollowPin(project.Folder, target.Id);
         Log.Projects($"moved VS Code '{project.Name}' -> desktop {target.Index + 1} '{target.Name}'");
     }
 
@@ -170,13 +264,12 @@ internal sealed class ProjectSwitcher : IDisposable
         Log.Projects($"moved desktop '{source.Name}' {source.Index + 1} -> {targetIndex + 1}");
     }
 
-    /// <summary>Reassign every Claude session on <paramref name="source"/> to <paramref name="target"/>
-    /// (dragged Claude cell) — the same correction the taskbar flyout's drag makes.</summary>
-    public void ReassignClaude(DesktopInfo source, DesktopInfo target)
+    /// <summary>Reassign a row's Claude sessions to <paramref name="target"/> (dragged Claude
+    /// cell) — the same correction the taskbar flyout's drag makes.</summary>
+    public void ReassignClaude(Row row, DesktopInfo target)
     {
-        var sessions = _sessions?.GetSessions(source.Id) ?? new();
-        foreach (var s in sessions) Program.Host!.ReassignSession(s.Source, s.SessionId, s.Cwd, target.Id);
-        Log.Projects($"reassigned {sessions.Count} Claude session(s) desktop {source.Index + 1} -> {target.Index + 1}");
+        foreach (var s in row.Sessions) Program.Host!.ReassignSession(s.Source, s.SessionId, s.Cwd, target.Id);
+        Log.Projects($"reassigned {row.Sessions.Count} Claude session(s) of '{row.Name}' -> desktop {target.Index + 1}");
     }
 
     /// <summary>
@@ -184,7 +277,7 @@ internal sealed class ProjectSwitcher : IDisposable
     /// keeping its desktop, and remember it for this screen setup. Pinned, because it was chosen
     /// by hand: the tracker's scan must not talk it back to wherever the window ends up.
     /// </summary>
-    public void PlaceVsCode(Project p, MonitorDescriptor screen, SnapMode snap)
+    public void PlaceVsCode(Row p, MonitorDescriptor screen, SnapMode snap)
     {
         var loc = new WorkspaceLocation();
         MonitorRef.CaptureWindowPlacement(p.VsCodeHwnd, loc);
@@ -197,7 +290,7 @@ internal sealed class ProjectSwitcher : IDisposable
         loc.Snap = snap;
         loc.Pinned = true;
         _desktop.PlaceWindow(p.VsCodeHwnd, loc, Guid.Empty);
-        _settings.Workspaces[p.Name] = loc;
+        _settings.Workspaces[p.WindowTitle!] = loc;
         _settings.Save();
         Log.Projects($"placed VS Code '{p.Name}' on screen {screen.Number} {snap}");
     }
@@ -270,14 +363,19 @@ internal sealed class ProjectSwitcher : IDisposable
         return folder;
     }
 
+    /// <summary>A new project folder: open it the same way as a listed one.</summary>
+    private void OpenNew(string folder) =>
+        Open(Describe(new() { (folder, DateTime.UtcNow) }).First(r => r.Folders.Any(f => SameFolder(f, folder))));
+
     /// <summary>
-    /// Bring the project's desktop and VS Code window together: its desktop (by name, else the
-    /// one its VS Code window is on, else a new one appended at the end), the open VS Code window
-    /// moved onto it, or VS Code launched there if none is open.
+    /// Bring a row's desktop and VS Code window together: its desktop (the one its window is on,
+    /// else the one named after it, else a new one after the active desktops), the open VS Code
+    /// window moved onto it, or VS Code launched there on its folder if none is open.
     /// </summary>
-    private void Open(string folder)
+    private void Open(Row project)
     {
-        var project = Describe(new() { (folder, DateTime.UtcNow) })[0];
+        if (project.Desktop == null && project.Folder == null)
+            throw new InvalidOperationException($"'{project.Name}' has neither a desktop nor a folder to open.");
         IntPtr hwnd = project.VsCodeHwnd;
 
         bool created = project.Desktop == null;
@@ -300,24 +398,28 @@ internal sealed class ProjectSwitcher : IDisposable
         _desktop.SwitchToDesktop(_desktop.GetDesktops().First(d => d.Id == target));
 
         // New windows open on the current desktop, so launch only after the switch.
-        if (hwnd == IntPtr.Zero)
+        if (hwnd == IntPtr.Zero && project.Folder != null)
         {
-            using var p = Process.Start(new ProcessStartInfo("cmd.exe", $"/c code \"{folder}\"")
+            using var p = Process.Start(new ProcessStartInfo("cmd.exe", $"/c code \"{project.Folder}\"")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
             }) ?? throw new InvalidOperationException("Could not start VS Code.");
         }
 
-        // A reassign pin for this folder must follow it, or its Claude sessions resolve to the old desktop.
-        string key = Settings.FolderKey(folder);
-        if (_settings.FolderDesktops.ContainsKey(key))
-        {
-            _settings.FolderDesktops[key] = target;
-            _settings.Save();
-        }
+        FollowPin(project.Folder, target);
         _idleSince.Remove(target);
-        Log.Projects($"open {folder} desktop={target}{(created ? " (created)" : "")} window={(hwnd == IntPtr.Zero ? "launched" : "existing")}");
+        Log.Projects($"open '{project.Name}' {project.Folder ?? "(no folder)"} desktop={target}{(created ? " (created)" : "")} window={(hwnd != IntPtr.Zero ? "existing" : project.Folder != null ? "launched" : "none")}");
+    }
+
+    /// <summary>A reassign pin for this folder must follow it, or its Claude sessions resolve to the old desktop.</summary>
+    private void FollowPin(string? folder, Guid desktop)
+    {
+        if (folder == null) return;
+        string key = Settings.FolderKey(folder);
+        if (!_settings.FolderDesktops.ContainsKey(key)) return;
+        _settings.FolderDesktops[key] = desktop;
+        _settings.Save();
     }
 
     private void RecycleTick()
@@ -361,19 +463,19 @@ internal sealed class ProjectSwitcher : IDisposable
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { Number, Desktop, Project, Claude, Screen, Folder, LastUsed }
+    private enum Col { Number, Desktop, Screen, Claude, Project, Folder, LastUsed }
 
     /// <summary>One list column: its kind, and for a screen column the monitor it stands for.</summary>
     private sealed record ColDef(Col Kind, string Header, int Width, MonitorDescriptor? Screen = null);
 
     /// <summary>What is being dragged: which project, and which kind of cell the drag started on.</summary>
-    private sealed record DragItem(ProjectSwitcher.Project Project, Col Kind);
+    private sealed record DragItem(ProjectSwitcher.Row Row, Col Kind);
 
     private readonly ProjectSwitcher _switcher;
     private readonly List<MonitorDescriptor> _screens;
     private readonly List<ColDef> _cols;
     private List<(string folder, DateTime lastUsedUtc)> _folders;
-    private List<ProjectSwitcher.Project> _projects = new();
+    private List<ProjectSwitcher.Row> _projects = new();
     private readonly TextBox _search = new() { Dock = DockStyle.Top, Font = new Font("Segoe UI", 12f), PlaceholderText = "Type to filter, or a new project name" };
     private readonly ListView _list = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = true, HideSelection = false, OwnerDraw = true };
     // Buttons size to their text: fixed sizes clip at display scaling above 100%.
@@ -390,8 +492,8 @@ internal sealed class ProjectsDialog : Form
     private int _pressCol = -1;
     private int _dropIndex = -1, _dropCol = -1;
 
-    /// <summary>Set when the user picked an existing project.</summary>
-    public string? ChosenFolder { get; private set; }
+    /// <summary>Set when the user picked an existing row.</summary>
+    public ProjectSwitcher.Row? ChosenRow { get; private set; }
     /// <summary>Set when the user asked for a new project with this folder name.</summary>
     public string? NewProjectName { get; private set; }
 
@@ -402,15 +504,17 @@ internal sealed class ProjectsDialog : Form
         // Left to right as they physically stand.
         _screens = MonitorRef.EnumerateAll().OrderBy(s => s.Monitor.Left).ThenBy(s => s.Monitor.Top).ToList();
         _screenPopup = new ScreenLayoutPopup(_screens);
+        // Left to right the way things hang together: desktop → VS Code window (per screen) →
+        // its Claude sessions → the folders that window has open.
         _cols = new()
         {
             new(Col.Number, "#", 50),
-            new(Col.Desktop, "Desktop", 150),
-            new(Col.Project, "Project", 160),
-            new(Col.Claude, "Claude", 135),
+            new(Col.Desktop, "Desktop", 140),
         };
         for (int i = 0; i < _screens.Count; i++)
-            _cols.Add(new(Col.Screen, _screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}", 125, _screens[i]));
+            _cols.Add(new(Col.Screen, _screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}", 160, _screens[i]));
+        _cols.Add(new(Col.Claude, "Claude", 135));
+        _cols.Add(new(Col.Project, "Project", 150));
         _cols.Add(new(Col.Folder, "Folder", 280));
         _cols.Add(new(Col.LastUsed, "Last used", 80));
 
@@ -519,12 +623,13 @@ internal sealed class ProjectsDialog : Form
 
     private void Fill()
     {
-        var selected = SelectedProjects().Select(p => p.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selected = SelectedProjects().Select(Key).ToHashSet();
         // Rebuilding the items resets the scroll; put the same row back at the top afterwards.
         int top = _list.TopItem?.Index ?? 0;
         string q = _search.Text.Trim();
         var rows = _projects.Where(p => q.Length == 0 || p.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
-                                        || (p.Desktop?.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+                                        || (p.Desktop?.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
+                                        || p.Folders.Any(f => Path.GetFileName(f).Contains(q, StringComparison.OrdinalIgnoreCase)));
         rows = _sortDesc ? rows.OrderByDescending(SortKey) : rows.OrderBy(SortKey);
 
         _list.BeginUpdate();
@@ -533,14 +638,16 @@ internal sealed class ProjectsDialog : Form
         {
             var cells = _cols.Select(c => c.Kind switch
             {
-                Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : "",
-                Col.Desktop => p.Desktop?.Name ?? "",
+                Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : p.Unresolved ? "?" : "",
+                Col.Desktop => p.Desktop?.Name ?? (p.Unresolved ? "unresolved" : ""),
                 Col.Project => p.Name,
-                Col.Folder => p.Folder,
+                Col.Folder => p.Folders.Count == 0 ? (p.VsCodeOpen || p.ClaudeCount > 0 ? "not linked" : "")
+                            : p.FoldersAmbiguous ? string.Join(" | ", p.Folders) + "  (can't tell which)"
+                            : string.Join("; ", p.Folders),
                 Col.LastUsed => SessionState.FormatAge(p.LastUsedUtc),
                 _ => "",
             }).ToArray();
-            _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(p.Folder) });
+            _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(Key(p)) });
         }
         if (_list.SelectedItems.Count == 0 && _list.Items.Count > 0) _list.Items[0].Selected = true;
         for (int i = 0; i < _cols.Count; i++)
@@ -555,13 +662,17 @@ internal sealed class ProjectsDialog : Form
     {
         string q = _search.Text.Trim();
         var sel = SelectedProjects();
-        _create.Enabled = q.Length > 0 && !_projects.Any(p => p.Name.Equals(q, StringComparison.OrdinalIgnoreCase));
-        _open.Enabled = sel.Count == 1;
+        _create.Enabled = q.Length > 0 && !_projects.Any(p => p.Name.Equals(q, StringComparison.OrdinalIgnoreCase)
+                                                            || p.Folders.Any(f => Path.GetFileName(f).Equals(q, StringComparison.OrdinalIgnoreCase)));
+        _open.Enabled = sel.Count == 1 && (sel[0].Desktop != null || sel[0].Folder != null);
         _rename.Enabled = sel.Count == 1 && sel[0].Desktop != null;
-        _hide.Enabled = sel.Count > 0;
+        _hide.Enabled = sel.Any(p => p.Folders.Count > 0);
     }
 
-    private IComparable SortKey(ProjectSwitcher.Project p)
+    /// <summary>Identity of a row across refreshes, for keeping the selection.</summary>
+    private static string Key(ProjectSwitcher.Row p) => $"{p.VsCodeHwnd}|{p.Folder}|{p.Desktop?.Id}";
+
+    private IComparable SortKey(ProjectSwitcher.Row p)
     {
         var c = _cols[_sortCol];
         return c.Kind switch
@@ -575,7 +686,7 @@ internal sealed class ProjectsDialog : Form
             // Windows on this screen first.
             Col.Screen   => p.Screen?.Handle == c.Screen!.Handle ? 0 : 1,
             Col.LastUsed => p.LastUsedUtc,
-            _            => p.Folder.ToLowerInvariant(),
+            _            => (p.Folder ?? "").ToLowerInvariant(),
         };
     }
 
@@ -588,7 +699,7 @@ internal sealed class ProjectsDialog : Form
 
     private void DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
-        var p = (ProjectSwitcher.Project)e.Item!.Tag!;
+        var p = (ProjectSwitcher.Row)e.Item!.Tag!;
         var c = _cols[e.ColumnIndex];
         var g = e.Graphics;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
@@ -620,6 +731,11 @@ internal sealed class ProjectsDialog : Form
                 g.DrawIcon(_vscodeIcon, new Rectangle(chip.X + 4, chip.Y + (chip.Height - 16) / 2, 16, 16));
                 TextRenderer.DrawText(g, SnapGeometry.Label(p.Snap), _list.Font,
                     new Rectangle(chip.X + 24, chip.Y, chip.Width - 26, chip.Height), fg, Text);
+                break;
+
+            case Col.Folder when p.Folders.Count == 0:
+                using (var italic = new Font(_list.Font, FontStyle.Italic))
+                    TextRenderer.DrawText(g, e.SubItem!.Text, italic, Rectangle.Inflate(r, -4, 0), sel ? fg : SystemColors.GrayText, Text);
                 break;
 
             default:
@@ -665,7 +781,7 @@ internal sealed class ProjectsDialog : Form
     /// </summary>
     private void OnItemDrag(object? sender, ItemDragEventArgs e)
     {
-        var p = (ProjectSwitcher.Project)((ListViewItem)e.Item!).Tag!;
+        var p = (ProjectSwitcher.Row)((ListViewItem)e.Item!).Tag!;
         var kind = KindAt(_pressCol);
         bool draggable = kind switch
         {
@@ -688,11 +804,11 @@ internal sealed class ProjectsDialog : Form
         if (e.Data?.GetData(typeof(DragItem)) is not DragItem drag) return null;
         var pt = _list.PointToClient(new Point(e.X, e.Y));
         var item = _list.GetItemAt(5, pt.Y);
-        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d }) return null;
+        if (item?.Tag is not ProjectSwitcher.Row { Desktop: { } d }) return null;
         int col = ColumnAt(pt);
         var screen = drag.Kind == Col.Screen && KindAt(col) == Col.Screen ? _cols[col].Screen : null;
-        bool newDesktop = d.Id != drag.Project.Desktop?.Id;
-        bool newScreen = screen != null && screen.Handle != drag.Project.Screen?.Handle;
+        bool newDesktop = d.Id != drag.Row.Desktop?.Id;
+        bool newScreen = screen != null && screen.Handle != drag.Row.Screen?.Handle;
         if (!newDesktop && !newScreen) return null;
         return (drag, item.Index, screen != null ? col : -1, d, screen);
     }
@@ -709,7 +825,7 @@ internal sealed class ProjectsDialog : Form
         var t = DropTarget(e);
         SetDropTarget(-1, -1);
         if (t is not { } target) return;
-        var p = target.drag.Project;
+        var p = target.drag.Row;
         try
         {
             switch (target.drag.Kind)
@@ -719,7 +835,7 @@ internal sealed class ProjectsDialog : Form
                     if (target.screen != null && target.screen.Handle != p.Screen?.Handle) _switcher.PlaceVsCode(p, target.screen, p.Snap);
                     break;
                 case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop.Index); break;
-                case Col.Claude: _switcher.ReassignClaude(p.Desktop!, target.desktop); break;
+                case Col.Claude: _switcher.ReassignClaude(p, target.desktop); break;
             }
         }
         catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
@@ -731,7 +847,7 @@ internal sealed class ProjectsDialog : Form
     {
         var item = _list.GetItemAt(5, at.Y);
         var screen = _cols[ColumnAt(at)].Screen!;
-        if (item?.Tag is not ProjectSwitcher.Project { VsCodeOpen: true } p || p.Screen?.Handle != screen.Handle) return;
+        if (item?.Tag is not ProjectSwitcher.Row { VsCodeOpen: true } p || p.Screen?.Handle != screen.Handle) return;
 
         var menu = new ContextMenuStrip();
         foreach (var snap in SnapGeometry.All)
@@ -818,7 +934,10 @@ internal sealed class ProjectsDialog : Form
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Keyboard shortcuts…", null, (_, _) => Program.ShowShortcuts());
         help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
-            "Type to filter. Enter opens the selected project on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
+            "One row per open VS Code window, per Claude session no window claims, and per project folder with neither. " +
+            "Columns run desktop → VS Code (one column per screen) → its Claude sessions → its folders. " +
+            "\"not linked\" means the window or session could not be tied to a folder.\n\n" +
+            "Type to filter. Enter opens the selected row on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
             "Drag the # cell onto another row to reorder desktops.\n" +
             "Drag a VS Code chip onto another row to move the window to that desktop, and/or into another screen column to move it to that screen.\n" +
             "Click a VS Code chip to change its snap position (full screen, halves, quarters).\n" +
@@ -854,8 +973,8 @@ internal sealed class ProjectsDialog : Form
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
-    private List<ProjectSwitcher.Project> SelectedProjects() =>
-        _list.SelectedItems.Cast<ListViewItem>().Select(i => (ProjectSwitcher.Project)i.Tag!).ToList();
+    private List<ProjectSwitcher.Row> SelectedProjects() =>
+        _list.SelectedItems.Cast<ListViewItem>().Select(i => (ProjectSwitcher.Row)i.Tag!).ToList();
 
     private void RenameDesktop()
     {
@@ -872,8 +991,9 @@ internal sealed class ProjectsDialog : Form
     {
         var sel = SelectedProjects();
         if (sel.Count == 0) return;
-        _switcher.HideProjects(sel.Select(p => p.Folder));
-        var gone = sel.Select(p => p.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var gone = sel.SelectMany(p => p.Folders).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (gone.Count == 0) return;
+        _switcher.HideProjects(gone);
         _folders = _folders.Where(f => !gone.Contains(f.folder)).ToList();
 
         // Keep the cursor where it was (now on the next row), so Del can clear a run of rows.
@@ -943,7 +1063,9 @@ internal sealed class ProjectsDialog : Form
     private void Accept()
     {
         if (_list.SelectedItems.Count == 0) return;
-        ChosenFolder = ((ProjectSwitcher.Project)_list.SelectedItems[0].Tag!).Folder;
+        var row = (ProjectSwitcher.Row)_list.SelectedItems[0].Tag!;
+        if (row.Desktop == null && row.Folder == null) return;
+        ChosenRow = row;
         DialogResult = DialogResult.OK;
     }
 

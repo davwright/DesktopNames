@@ -61,18 +61,18 @@ internal sealed class WorkspaceFolderIndex
     }
 
     /// <summary>
-    /// rootNames of the open workspaces that have exactly <paramref name="folder"/> as one of
-    /// their root folders — no walking up or down, so a subfolder doesn't inherit its parent's
-    /// window. Rescans on a miss, within the same cooldown.
+    /// Root folders of the recently used workspaces whose window title shows
+    /// <paramref name="rootName"/> — a plain folder, or every folder of a multi-folder
+    /// workspace such as "Untitled (Workspace)". Rescans on a miss, within the same cooldown.
     /// </summary>
-    public IReadOnlyCollection<string> FindRootNamesExact(string folder)
+    public IReadOnlyList<string> FoldersForRootName(string rootName)
     {
-        string norm = NormalizePath(folder);
-        if (_pathToRootNames.TryGetValue(norm, out var hits)) return hits;
-        if (DateTime.UtcNow - _lastScanUtc <= ScanCooldown) return Array.Empty<string>();
+        List<string> Match() => _pathToRootNames.Where(kv => kv.Value.Contains(rootName)).Select(kv => kv.Key).ToList();
+        var hits = Match();
+        if (hits.Count > 0 || DateTime.UtcNow - _lastScanUtc <= ScanCooldown) return hits;
         Rescan();
         _lastScanUtc = DateTime.UtcNow;
-        return _pathToRootNames.TryGetValue(norm, out hits) ? hits : Array.Empty<string>();
+        return Match();
     }
 
     /// <summary>Collect every rootName known for any workspace whose folder is under cwd.</summary>
