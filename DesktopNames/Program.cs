@@ -14,7 +14,16 @@ static class Program
         // so nothing needs to be handed over — the old process can just die.
         KillExistingInstances();
 
-        var settings = Settings.Load();
+        Settings settings;
+        try { settings = Settings.Load(); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"settings.json could not be read, so DesktopNames did not start " +
+                            $"(it would otherwise overwrite your settings with defaults).\n\n{ex.Message}\n\n" +
+                            "Fix or delete %APPDATA%\\DesktopNames\\settings.json, then start DesktopNames again.",
+                "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
         Log.Configure(settings.AlertLogEnabled);
         // First line after every restart says which build produced everything below it.
         // Without this, "the fix isn't taking" and "the publish hasn't run yet" look identical.
@@ -205,6 +214,16 @@ static class Program
         string? hint = _buildVerificationHint;
         var icon = ToolTipIcon.Info;
         if (hint != null && !settings.LastTestedBuildOk) icon = ToolTipIcon.Warning;
+
+        // A blocked hotkey is otherwise invisible: the chord just does nothing.
+        var blocked = host.Hotkeys?.Registrations.Where(r => !r.Success).ToList() ?? new();
+        if (hint == null && blocked.Count > 0)
+        {
+            icon = ToolTipIcon.Warning;
+            hint = $"{blocked.Count} hotkey(s) blocked by Windows or another app: " +
+                   string.Join(", ", blocked.Select(r => r.Description.Split("  ")[0].Trim())) +
+                   ". Tray → Keyboard shortcuts for details.";
+        }
 
         if (hint == null)
         {
@@ -756,7 +775,8 @@ internal sealed class HostForm : Form
             _hotkeys!.RecordPlaceholder(fullDesc + "   (unrecognised key — edit settings.json)");
             return;
         }
-        _hotkeys!.Register(parsed.Value.mods, parsed.Value.vk, fullDesc, handler);
+        if (!_hotkeys!.Register(parsed.Value.mods, parsed.Value.vk, fullDesc, handler))
+            Log.Startup($"hotkey blocked: {binding} ({description}) err={_hotkeys.Registrations[^1].LastError}");
     }
 
     private void InstallWinEventHooks()

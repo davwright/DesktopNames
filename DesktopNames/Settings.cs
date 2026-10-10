@@ -220,10 +220,11 @@ internal sealed class Settings
     {
         var d = new Dictionary<string, string>
         {
-            ["MoveDesktopLeft"]  = "Win+Alt+Left",
-            ["MoveDesktopRight"] = "Win+Alt+Right",
-            ["MoveDesktopFirst"] = "Win+Alt+Home",
-            ["MoveDesktopLast"]  = "Win+Alt+End",
+            // Win+Alt+arrows belong to Windows Snap since the 2026-08 cumulative update.
+            ["MoveDesktopLeft"]  = "Win+Ctrl+Alt+Left",
+            ["MoveDesktopRight"] = "Win+Ctrl+Alt+Right",
+            ["MoveDesktopFirst"] = "Win+Ctrl+Alt+Home",
+            ["MoveDesktopLast"]  = "Win+Ctrl+Alt+End",
             ["ToggleHide"]       = "Win+Alt+H",
             ["OpenCurrentDesktopMenu"] = "Win+Insert",  // opens the per-desktop context menu
             ["ToggleBlueHighlight"] = "Win+Shift+Insert",     // current desktop; Shift+click does it on any tab
@@ -255,19 +256,22 @@ internal sealed class Settings
         return o;
     }
 
+    /// <summary>
+    /// Read settings.json. Throws when the file exists but can't be parsed: falling back to
+    /// defaults here used to overwrite the user's file on the next save, silently resetting
+    /// their hotkeys, notes and layouts.
+    /// </summary>
     public static Settings Load()
     {
-        Settings s;
-        try
-        {
-            if (File.Exists(FilePath))
-            {
-                var json = File.ReadAllText(FilePath);
-                s = JsonSerializer.Deserialize<Settings>(json, JsonOptions()) ?? new Settings();
-            }
-            else s = new Settings();
-        }
-        catch { s = new Settings(); }
+        var s = File.Exists(FilePath)
+            ? JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath), JsonOptions())
+              ?? throw new InvalidDataException($"{FilePath} contains null")
+            : new Settings();
+
+        // Migration: the move-desktop defaults were Win+Alt+arrows, which Windows Snap took over.
+        foreach (var (key, suffix) in new[] { ("MoveDesktopLeft", "Left"), ("MoveDesktopRight", "Right"), ("MoveDesktopFirst", "Home"), ("MoveDesktopLast", "End") })
+            if (s.Hotkeys.TryGetValue(key, out var old) && old == $"Win+Alt+{suffix}")
+                s.Hotkeys[key] = $"Win+Ctrl+Alt+{suffix}";
 
         // Migration: the flat workspace map predates per-screen-setup layouts. Adopt it as the
         // layout for whatever arrangement is plugged in now — that's the setup it was recorded on.
@@ -319,9 +323,13 @@ internal sealed class Settings
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(this, JsonOptions());
-            File.WriteAllText(FilePath, json);
+            // Write-then-rename: the process gets force-killed on every publish, and a kill in
+            // the middle of a plain overwrite leaves a truncated settings.json behind.
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, FilePath, overwrite: true);
         }
-        catch { }
+        catch (Exception ex) { Log.Startup($"settings save failed: {ex.Message}"); }
         Changed?.Invoke();
     }
 
