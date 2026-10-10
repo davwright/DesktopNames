@@ -247,16 +247,17 @@ internal sealed class ProjectSwitcher : IDisposable
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { VsCode, Claude, Project, Desktop, LastUsed, Folder }
-    private static readonly string[] Headers = { "", "Claude", "Project", "Desktop", "Last used", "Folder" };
+    private enum Col { VsCode, Claude, Project, Number, Desktop, LastUsed, Folder }
+    private static readonly string[] Headers = { "", "Claude", "Project", "#", "Desktop", "Last used", "Folder" };
 
     private readonly ProjectSwitcher _switcher;
     private List<(string folder, DateTime lastUsedUtc)> _folders;
     private List<ProjectSwitcher.Project> _projects = new();
     private readonly TextBox _search = new() { Dock = DockStyle.Top, Font = new Font("Segoe UI", 12f), PlaceholderText = "Type to filter, or a new project name" };
     private readonly ListView _list = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = true, HideSelection = false, OwnerDraw = true };
-    private readonly Button _open = new() { Text = "Open", Width = 90 };
-    private readonly Button _create = new() { Text = "New project", Width = 110 };
+    // Buttons size to their text: fixed sizes clip at display scaling above 100%.
+    private readonly Button _open = new() { Text = "Open", AutoSize = true, MinimumSize = new Size(90, 0) };
+    private readonly Button _create = new() { Text = "New project", AutoSize = true, MinimumSize = new Size(90, 0) };
     private readonly Icon _vscodeIcon = LoadIcon("vscode.ico");
     private readonly Icon _claudeIcon = LoadIcon("claude.ico");
     private Col _sortCol = Col.LastUsed;
@@ -286,7 +287,7 @@ internal sealed class ProjectsDialog : Form
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
 
-        int[] widths = { 30, 120, 180, 190, 80, 300 };
+        int[] widths = { 30, 120, 170, 50, 160, 80, 300 };
         for (int i = 0; i < Headers.Length; i++) _list.Columns.Add(Headers[i], widths[i]);
         // Row height comes from the small image list; 26px fits the tab-style pills.
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
@@ -300,12 +301,13 @@ internal sealed class ProjectsDialog : Form
         _list.KeyDown += OnListKeyDown;
         _list.ContextMenuStrip = BuildRowMenu();
 
-        var cancel = new Button { Text = "Cancel", Width = 90, DialogResult = DialogResult.Cancel };
-        var closeIdle = new Button { Text = "Close idle desktops…", Width = 150 };
+        var cancel = new Button { Text = "Cancel", AutoSize = true, MinimumSize = new Size(90, 0), DialogResult = DialogResult.Cancel };
+        var closeIdle = new Button { Text = "Close idle desktops…", AutoSize = true };
         closeIdle.Click += (_, _) => CloseIdleDesktops();
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(6) };
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(6) };
         bar.Controls.AddRange(new Control[] { cancel, _open, _create, closeIdle });
-        var hint = new Label { Dock = DockStyle.Bottom, Height = 22, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
+        var hint = new Label { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
             Text = $"Enter opens · Ctrl+Enter creates a new project in {projectsRoot} · F2 renames the desktop · Del removes from the list" };
 
         Controls.Add(_list);
@@ -358,7 +360,7 @@ internal sealed class ProjectsDialog : Form
         {
             var item = new ListViewItem(new[]
             {
-                "", "", p.Name, p.Desktop != null ? $"{p.Desktop.Index + 1}. {p.Desktop.Name}" : "",
+                "", "", p.Name, "", p.Desktop?.Name ?? "",
                 SessionState.FormatAge(p.LastUsedUtc), p.Folder,
             }) { Tag = p };
             item.Selected = selected.Contains(p.Folder);
@@ -381,7 +383,8 @@ internal sealed class ProjectsDialog : Form
         Col.Claude   => p.ClaudeCount == 0 ? 0 : p.ClaudeState switch
                         { StateKind.Asking => 5, StateKind.Error => 4, StateKind.Busy => 3, StateKind.Ready => 2, _ => 1 },
         Col.Project  => p.Name.ToLowerInvariant(),
-        Col.Desktop  => p.Desktop?.Index ?? int.MaxValue,
+        Col.Number   => p.Desktop?.Index ?? int.MaxValue,
+        Col.Desktop  => p.Desktop?.Name.ToLowerInvariant() ?? "",
         Col.LastUsed => p.LastUsedUtc,
         _            => p.Folder.ToLowerInvariant(),
     };
@@ -420,14 +423,13 @@ internal sealed class ProjectsDialog : Form
                 if (p.ClaudeCount >= 2) TaskbarOverlay.DrawCountBadge(g, pill, p.ClaudeCount);
                 break;
 
-            case Col.Desktop:
+            case Col.Number:
                 if (p.Desktop == null) break;
-                // Same label and fill as the taskbar tab: glyph in place of the dot, state colour, else the blue marker.
-                string sep = string.IsNullOrEmpty(p.Glyph) ? "." : p.Glyph;
+                // Same number, glyph and fill as the taskbar tab: state colour, else the blue marker.
                 Color? fill = p.ClaudeState != StateKind.None ? SessionFlyout.StateColor(p.ClaudeState)
                             : p.Highlighted ? TaskbarOverlay.ParseColorOrFallback(Program.Host!.Settings.AlertHighlightColor, Color.FromArgb(91, 155, 213))
                             : null;
-                DrawPill(g, new Rectangle(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6), $"{p.Desktop.Index + 1}{sep} {p.Desktop.Name}", fill, fg);
+                DrawPill(g, new Rectangle(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6), $"{p.Desktop.Index + 1}{p.Glyph}", fill, fg);
                 break;
 
             default:
