@@ -104,9 +104,9 @@ internal sealed class ProjectSwitcher : IDisposable
         {
             string name = Path.GetFileName(folder);
             var window = windows.FirstOrDefault(w => w.Workspace.Equals(name, StringComparison.OrdinalIgnoreCase));
-            // By name first; a renamed desktop still belongs to the project whose window is on it.
-            var desktop = desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
-                       ?? (window.Hwnd != IntPtr.Zero ? desktops.FirstOrDefault(d => d.Id == window.DesktopId) : null);
+            // Where its VS Code window is, when open (so renames and drags are followed); else the desktop named after it.
+            var desktop = (window.Hwnd != IntPtr.Zero ? desktops.FirstOrDefault(d => d.Id == window.DesktopId) : null)
+                       ?? desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             StateKind state = StateKind.None;
             int count = 0;
             string? glyph = null;
@@ -126,6 +126,23 @@ internal sealed class ProjectSwitcher : IDisposable
     {
         foreach (var f in folders) _settings.HiddenProjects[Settings.FolderKey(f)] = DateTime.UtcNow;
         _settings.Save();
+    }
+
+    /// <summary>Move a project's open VS Code window to another desktop (dragged in the switcher).</summary>
+    public void MoveVsCode(Project project, DesktopInfo target)
+    {
+        IntPtr hwnd = HostForm.FindVsCodeWindow(new[] { project.Name });
+        if (hwnd == IntPtr.Zero) throw new InvalidOperationException($"The '{project.Name}' VS Code window is not open.");
+        if (!_desktop.MoveWindowToDesktop(hwnd, target.Id))
+            throw new InvalidOperationException($"Could not move the '{project.Name}' VS Code window to desktop {target.Index + 1}.");
+        // A reassign pin for this folder must follow it, or its Claude sessions resolve to the old desktop.
+        string key = Settings.FolderKey(project.Folder);
+        if (_settings.FolderDesktops.ContainsKey(key))
+        {
+            _settings.FolderDesktops[key] = target.Id;
+            _settings.Save();
+        }
+        Log.Projects($"moved VS Code '{project.Name}' -> desktop {target.Index + 1} '{target.Name}'");
     }
 
     public void RenameDesktop(Guid desktopId, string name)
@@ -182,6 +199,17 @@ internal sealed class ProjectSwitcher : IDisposable
 
         bool created = project.Desktop == null;
         Guid target = project.Desktop?.Id ?? _desktop.CreateNamedDesktop(project.Name);
+        if (created)
+        {
+            // Slot it in right after the last desktop with a coloured tab (a Claude state or the
+            // blue marker), not behind the idle ones at the end.
+            var desktops = _desktop.GetDesktops();
+            int lastActive = desktops
+                .Where(d => d.Id != target && ((_sessions?.GetAggregate(d.Id).state ?? StateKind.None) != StateKind.None
+                                               || _settings.IsDesktopHighlighted(d.Id)))
+                .Select(d => d.Index).DefaultIfEmpty(0).Max();
+            if (lastActive + 1 < desktops.Count - 1) _desktop.MoveDesktopToIndex(target, lastActive + 1);
+        }
 
         if (hwnd != IntPtr.Zero && _desktop.GetDesktopForWindow(hwnd) != target && !_desktop.MoveWindowToDesktop(hwnd, target))
             throw new InvalidOperationException($"Could not move the '{project.Name}' VS Code window to its desktop.");
@@ -247,8 +275,8 @@ internal sealed class ProjectSwitcher : IDisposable
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { VsCode, Claude, Project, Number, Desktop, LastUsed, Folder }
-    private static readonly string[] Headers = { "", "Claude", "Project", "#", "Desktop", "Last used", "Folder" };
+    private enum Col { Number, Desktop, Project, Claude, VsCode, Folder, LastUsed }
+    private static readonly string[] Headers = { "#", "Desktop", "Project", "Claude", "", "Folder", "Last used" };
 
     private readonly ProjectSwitcher _switcher;
     private List<(string folder, DateTime lastUsedUtc)> _folders;
@@ -289,19 +317,25 @@ internal sealed class ProjectsDialog : Form
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
 
-        int[] widths = { 30, 120, 170, 50, 160, 80, 300 };
+        int[] widths = { 50, 160, 170, 135, 30, 300, 80 };
         for (int i = 0; i < Headers.Length; i++) _list.Columns.Add(Headers[i], widths[i]);
         // Row height comes from the small image list; 26px fits the tab-style pills.
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
         _list.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         // Folder takes the remaining width, so there is never a horizontal scrollbar.
         _list.ClientSizeChanged += (_, _) =>
-            _list.Columns[(int)Col.Folder].Width = Math.Max(120, _list.ClientSize.Width - widths[..^1].Sum());
+            _list.Columns[(int)Col.Folder].Width = Math.Max(120, _list.ClientSize.Width - widths.Where((_, i) => i != (int)Col.Folder).Sum());
         _list.DrawSubItem += DrawSubItem;
         _list.ColumnClick += (_, e) => SortBy((Col)e.Column);
         _list.DoubleClick += (_, _) => Accept();
         _list.KeyDown += OnListKeyDown;
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
+        // Drag a row with an open VS Code onto another project's row to move the window to that desktop.
+        _list.AllowDrop = true;
+        _list.ItemDrag += OnItemDrag;
+        _list.DragOver += OnDragOver;
+        _list.DragDrop += OnDragDrop;
+        _list.DragLeave += (_, _) => SetDropIndex(-1);
 
         var cancel = new Button { Text = "Cancel (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
         var closeIdle = new Button { Text = "Close idle desktops…", AutoSize = true };
@@ -362,11 +396,14 @@ internal sealed class ProjectsDialog : Form
         _list.Items.Clear();
         foreach (var p in rows)
         {
-            var item = new ListViewItem(new[]
-            {
-                "", "", p.Name, p.Desktop != null ? $"{p.Desktop.Index + 1}" : "", p.Desktop?.Name ?? "",
-                SessionState.FormatAge(p.LastUsedUtc), p.Folder,
-            }) { Tag = p };
+            var cells = new string[Headers.Length];
+            cells[(int)Col.Number] = p.Desktop != null ? $"{p.Desktop.Index + 1}" : "";
+            cells[(int)Col.Desktop] = p.Desktop?.Name ?? "";
+            cells[(int)Col.Project] = p.Name;
+            cells[(int)Col.Claude] = cells[(int)Col.VsCode] = "";
+            cells[(int)Col.Folder] = p.Folder;
+            cells[(int)Col.LastUsed] = SessionState.FormatAge(p.LastUsedUtc);
+            var item = new ListViewItem(cells) { Tag = p };
             item.Selected = selected.Contains(p.Folder);
             _list.Items.Add(item);
         }
@@ -441,6 +478,56 @@ internal sealed class ProjectsDialog : Form
                 if (font != _list.Font) font.Dispose();
                 break;
         }
+
+        if (e.ItemIndex == _dropIndex)
+        {
+            using var ring = new Pen(SystemColors.Highlight, 2f);
+            g.DrawLine(ring, r.Left, r.Top + 1, r.Right, r.Top + 1);
+            g.DrawLine(ring, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1);
+        }
+    }
+
+    private int _dropIndex = -1;
+
+    private void SetDropIndex(int index)
+    {
+        if (_dropIndex == index) return;
+        _dropIndex = index;
+        _list.Invalidate();
+    }
+
+    private void OnItemDrag(object? sender, ItemDragEventArgs e)
+    {
+        var p = (ProjectSwitcher.Project)((ListViewItem)e.Item!).Tag!;
+        if (!p.VsCodeOpen) return;
+        _list.DoDragDrop(p, DragDropEffects.Move);
+        SetDropIndex(-1);
+    }
+
+    /// <summary>The row under the cursor, if it is a project on a different desktop than the dragged one.</summary>
+    private (int index, DesktopInfo desktop)? DropTarget(DragEventArgs e)
+    {
+        if (e.Data?.GetData(typeof(ProjectSwitcher.Project)) is not ProjectSwitcher.Project source) return null;
+        var item = _list.GetItemAt(5, _list.PointToClient(new Point(e.X, e.Y)).Y);
+        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d } || d.Id == source.Desktop?.Id) return null;
+        return (item.Index, d);
+    }
+
+    private void OnDragOver(object? sender, DragEventArgs e)
+    {
+        var t = DropTarget(e);
+        e.Effect = t != null ? DragDropEffects.Move : DragDropEffects.None;
+        SetDropIndex(t?.index ?? -1);
+    }
+
+    private void OnDragDrop(object? sender, DragEventArgs e)
+    {
+        var t = DropTarget(e);
+        SetDropIndex(-1);
+        if (t == null) return;
+        try { _switcher.MoveVsCode((ProjectSwitcher.Project)e.Data!.GetData(typeof(ProjectSwitcher.Project))!, t.Value.desktop); }
+        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+        RefreshState();
     }
 
     private void DrawPill(Graphics g, Rectangle rect, string label, Color? fill, Color plainText)
