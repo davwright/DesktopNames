@@ -345,22 +345,27 @@ internal sealed class ProjectSwitcher : IDisposable
 }
 
 /// <summary>
-/// The DesktopNames window (Win+J): one row per project with its desktop, Claude state, VS Code
-/// window and the screen/snap position that window sits in. Type to filter; Enter opens the
-/// selection, Ctrl+Enter creates a new project folder; F2 renames the desktop; Del removes
-/// projects from the list. Drag the # cell to reorder desktops, the VS Code icon to move the
-/// window, the Claude cell to reassign its sessions. Click the Screen cell to place the window.
-/// Every column sorts on a header click.
+/// The DesktopNames window (Win+J): one row per project with its desktop, Claude state, and a
+/// column per screen showing which screen its VS Code window is on and in which snap position.
+/// Type to filter; Enter opens the selection, Ctrl+Enter creates a new project folder; F2
+/// renames the desktop; Del removes projects from the list. Drag the # cell to reorder
+/// desktops, the Claude cell to reassign its sessions, a VS Code chip to another desktop row
+/// and/or screen column. Click a chip to change its snap position. Hovering a screen header
+/// shows the monitor arrangement. Every column sorts on a header click.
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { Number, Desktop, Project, Claude, VsCode, Screen, Folder, LastUsed }
-    private static readonly string[] Headers = { "#", "Desktop", "Project", "Claude", "", "Screen", "Folder", "Last used" };
+    private enum Col { Number, Desktop, Project, Claude, Screen, Folder, LastUsed }
 
-    /// <summary>What is being dragged: which project, and which cell the drag started on.</summary>
+    /// <summary>One list column: its kind, and for a screen column the monitor it stands for.</summary>
+    private sealed record ColDef(Col Kind, string Header, int Width, MonitorDescriptor? Screen = null);
+
+    /// <summary>What is being dragged: which project, and which kind of cell the drag started on.</summary>
     private sealed record DragItem(ProjectSwitcher.Project Project, Col Kind);
 
     private readonly ProjectSwitcher _switcher;
+    private readonly List<MonitorDescriptor> _screens;
+    private readonly List<ColDef> _cols;
     private List<(string folder, DateTime lastUsedUtc)> _folders;
     private List<ProjectSwitcher.Project> _projects = new();
     private readonly TextBox _search = new() { Dock = DockStyle.Top, Font = new Font("Segoe UI", 12f), PlaceholderText = "Type to filter, or a new project name" };
@@ -372,8 +377,12 @@ internal sealed class ProjectsDialog : Form
     private readonly Button _hide = new() { Text = "Remove from list (Del)", AutoSize = true };
     private readonly Icon _vscodeIcon = LoadIcon("vscode.ico");
     private readonly Icon _claudeIcon = LoadIcon("claude.ico");
-    private Col _sortCol = Col.Number;
-    private bool _sortDesc = false;
+    private readonly ScreenLayoutPopup _screenPopup;
+    private HeaderHover? _headerHover;
+    private int _sortCol;
+    private bool _sortDesc;
+    private int _pressCol = -1;
+    private int _dropIndex = -1, _dropCol = -1;
 
     /// <summary>Set when the user picked an existing project.</summary>
     public string? ChosenFolder { get; private set; }
@@ -384,7 +393,22 @@ internal sealed class ProjectsDialog : Form
     {
         _switcher = switcher;
         _folders = switcher.ListFolders();
-        Text = "DesktopNames";
+        // Left to right as they physically stand.
+        _screens = MonitorRef.EnumerateAll().OrderBy(s => s.Monitor.Left).ThenBy(s => s.Monitor.Top).ToList();
+        _screenPopup = new ScreenLayoutPopup(_screens);
+        _cols = new()
+        {
+            new(Col.Number, "#", 50),
+            new(Col.Desktop, "Desktop", 150),
+            new(Col.Project, "Project", 160),
+            new(Col.Claude, "Claude", 135),
+        };
+        for (int i = 0; i < _screens.Count; i++)
+            _cols.Add(new(Col.Screen, _screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}", 125, _screens[i]));
+        _cols.Add(new(Col.Folder, "Folder", 280));
+        _cols.Add(new(Col.LastUsed, "Last used", 80));
+
+        UpdateTitle();
         Icon = Program.Host!.Icon;
         Font = new Font("Segoe UI", 9f);
         FormBorderStyle = FormBorderStyle.Sizable;
@@ -396,31 +420,31 @@ internal sealed class ProjectsDialog : Form
 
         // Primary screen, whatever desktop or monitor the user is on.
         var work = Screen.PrimaryScreen!.WorkingArea;
-        Size = new Size(1180, 620);
+        Size = new Size(Math.Min(work.Width - 40, _cols.Sum(c => c.Width) + 60), 640);
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
 
-        int[] widths = { 50, 160, 170, 135, 30, 150, 300, 80 };
-        for (int i = 0; i < Headers.Length; i++) _list.Columns.Add(Headers[i], widths[i]);
+        foreach (var c in _cols) _list.Columns.Add(c.Header, c.Width);
         // Row height comes from the small image list; 26px fits the tab-style pills.
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
         _list.DrawColumnHeader += (_, e) => e.DrawDefault = true;
         // Folder takes the remaining width, so there is never a horizontal scrollbar.
+        int folderIdx = _cols.FindIndex(c => c.Kind == Col.Folder);
         _list.ClientSizeChanged += (_, _) =>
-            _list.Columns[(int)Col.Folder].Width = Math.Max(120, _list.ClientSize.Width - widths.Where((_, i) => i != (int)Col.Folder).Sum());
+            _list.Columns[folderIdx].Width = Math.Max(120, _list.ClientSize.Width - _cols.Where((_, i) => i != folderIdx).Sum(c => c.Width));
         _list.DrawSubItem += DrawSubItem;
-        _list.ColumnClick += (_, e) => SortBy((Col)e.Column);
-        _list.DoubleClick += (_, _) => Accept();
+        _list.ColumnClick += (_, e) => SortBy(e.Column);
+        _list.DoubleClick += (_, _) => { if (KindAt(_pressCol) != Col.Screen) Accept(); };
         _list.KeyDown += OnListKeyDown;
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
-        // What a drag does depends on the cell it starts on (see OnItemDrag); the Screen cell is a picker.
+        // What a drag does depends on the cell it starts on (see OnItemDrag).
         _list.AllowDrop = true;
         _list.MouseDown += (_, e) => _pressCol = ColumnAt(e.Location);
-        _list.MouseClick += (_, e) => { if (ColumnAt(e.Location) == Col.Screen) ShowScreenPicker(e.Location); };
+        _list.MouseClick += (_, e) => { if (KindAt(ColumnAt(e.Location)) == Col.Screen) ShowSnapPicker(e.Location); };
         _list.ItemDrag += OnItemDrag;
         _list.DragOver += OnDragOver;
         _list.DragDrop += OnDragDrop;
-        _list.DragLeave += (_, _) => SetDropIndex(-1);
+        _list.DragLeave += (_, _) => SetDropTarget(-1, -1);
 
         var cancel = new Button { Text = "Cancel (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
         var closeIdle = new Button { Text = "Close idle desktops…", AutoSize = true };
@@ -446,10 +470,19 @@ internal sealed class ProjectsDialog : Form
         _create.Click += (_, _) => CreateNew();
         _rename.Click += (_, _) => RenameDesktop();
         _hide.Click += (_, _) => HideSelected();
-        Shown += (_, _) => { Activate(); _search.Focus(); };
+        Shown += (_, _) =>
+        {
+            Activate();
+            _search.Focus();
+            // Only now are the list's handles final; filling it earlier creates and then recreates them.
+            _headerHover = new HeaderHover(NativeMethods.SendMessage(_list.Handle, NativeMethods.LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero), OnHeaderHover);
+        };
 
         RefreshState();
     }
+
+    /// <summary>The title names the screen setup DesktopNames recognises from the monitors plugged in.</summary>
+    private void UpdateTitle() => Text = $"DesktopNames — {_switcher.ScreenSetupName}";
 
     private static Icon LoadIcon(string name)
     {
@@ -461,7 +494,13 @@ internal sealed class ProjectsDialog : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _vscodeIcon.Dispose(); _claudeIcon.Dispose(); }
+        if (disposing)
+        {
+            _headerHover?.ReleaseHandle();
+            _screenPopup.Dispose();
+            _vscodeIcon.Dispose();
+            _claudeIcon.Dispose();
+        }
         base.Dispose(disposing);
     }
 
@@ -475,6 +514,8 @@ internal sealed class ProjectsDialog : Form
     private void Fill()
     {
         var selected = SelectedProjects().Select(p => p.Folder).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Rebuilding the items resets the scroll; put the same row back at the top afterwards.
+        int top = _list.TopItem?.Index ?? 0;
         string q = _search.Text.Trim();
         var rows = _projects.Where(p => q.Length == 0 || p.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
                                         || (p.Desktop?.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
@@ -484,22 +525,22 @@ internal sealed class ProjectsDialog : Form
         _list.Items.Clear();
         foreach (var p in rows)
         {
-            var cells = new string[Headers.Length];
-            cells[(int)Col.Number] = p.Desktop != null ? $"{p.Desktop.Index + 1}" : "";
-            cells[(int)Col.Desktop] = p.Desktop?.Name ?? "";
-            cells[(int)Col.Project] = p.Name;
-            cells[(int)Col.Claude] = cells[(int)Col.VsCode] = "";
-            cells[(int)Col.Screen] = p.Screen != null ? $"{p.Screen.Number} · {SnapGeometry.Label(p.Snap)}" : "";
-            cells[(int)Col.Folder] = p.Folder;
-            cells[(int)Col.LastUsed] = SessionState.FormatAge(p.LastUsedUtc);
-            var item = new ListViewItem(cells) { Tag = p };
-            item.Selected = selected.Contains(p.Folder);
-            _list.Items.Add(item);
+            var cells = _cols.Select(c => c.Kind switch
+            {
+                Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : "",
+                Col.Desktop => p.Desktop?.Name ?? "",
+                Col.Project => p.Name,
+                Col.Folder => p.Folder,
+                Col.LastUsed => SessionState.FormatAge(p.LastUsedUtc),
+                _ => "",
+            }).ToArray();
+            _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(p.Folder) });
         }
         if (_list.SelectedItems.Count == 0 && _list.Items.Count > 0) _list.Items[0].Selected = true;
-        for (int i = 0; i < Headers.Length; i++)
-            _list.Columns[i].Text = Headers[i] + ((Col)i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
+        for (int i = 0; i < _cols.Count; i++)
+            _list.Columns[i].Text = _cols[i].Header + (i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
         _list.EndUpdate();
+        if (top > 0 && _list.Items.Count > 0) _list.TopItem = _list.Items[Math.Min(top, _list.Items.Count - 1)];
 
         UpdateButtons();
     }
@@ -514,30 +555,35 @@ internal sealed class ProjectsDialog : Form
         _hide.Enabled = sel.Count > 0;
     }
 
-    private IComparable SortKey(ProjectSwitcher.Project p) => _sortCol switch
+    private IComparable SortKey(ProjectSwitcher.Project p)
     {
-        Col.VsCode   => p.VsCodeOpen,
-        // Asking first when descending, matching the taskbar's priority.
-        Col.Claude   => p.ClaudeCount == 0 ? 0 : p.ClaudeState switch
-                        { StateKind.Asking => 5, StateKind.Error => 4, StateKind.Busy => 3, StateKind.Ready => 2, _ => 1 },
-        Col.Project  => p.Name.ToLowerInvariant(),
-        Col.Number   => p.Desktop?.Index ?? int.MaxValue,
-        Col.Desktop  => p.Desktop?.Name.ToLowerInvariant() ?? "",
-        Col.Screen   => p.Screen?.Number ?? int.MaxValue,
-        Col.LastUsed => p.LastUsedUtc,
-        _            => p.Folder.ToLowerInvariant(),
-    };
+        var c = _cols[_sortCol];
+        return c.Kind switch
+        {
+            // Asking first when descending, matching the taskbar's priority.
+            Col.Claude   => p.ClaudeCount == 0 ? 0 : p.ClaudeState switch
+                            { StateKind.Asking => 5, StateKind.Error => 4, StateKind.Busy => 3, StateKind.Ready => 2, _ => 1 },
+            Col.Project  => p.Name.ToLowerInvariant(),
+            Col.Number   => p.Desktop?.Index ?? int.MaxValue,
+            Col.Desktop  => p.Desktop?.Name.ToLowerInvariant() ?? "",
+            // Windows on this screen first.
+            Col.Screen   => p.Screen?.Handle == c.Screen!.Handle ? 0 : 1,
+            Col.LastUsed => p.LastUsedUtc,
+            _            => p.Folder.ToLowerInvariant(),
+        };
+    }
 
-    private void SortBy(Col col)
+    private void SortBy(int col)
     {
         if (_sortCol == col) _sortDesc = !_sortDesc;
-        else { _sortCol = col; _sortDesc = col is Col.VsCode or Col.Claude or Col.LastUsed; }
+        else { _sortCol = col; _sortDesc = _cols[col].Kind is Col.Claude or Col.LastUsed; }
         Fill();
     }
 
     private void DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         var p = (ProjectSwitcher.Project)e.Item!.Tag!;
+        var c = _cols[e.ColumnIndex];
         var g = e.Graphics;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         var r = e.Bounds;
@@ -546,12 +592,8 @@ internal sealed class ProjectsDialog : Form
         var fg = sel ? SystemColors.HighlightText : _list.ForeColor;
         const TextFormatFlags Text = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
 
-        switch ((Col)e.ColumnIndex)
+        switch (c.Kind)
         {
-            case Col.VsCode:
-                if (p.VsCodeOpen) g.DrawIcon(_vscodeIcon, new Rectangle(r.X + (r.Width - 16) / 2, r.Y + (r.Height - 16) / 2, 16, 16));
-                break;
-
             case Col.Claude:
                 if (p.ClaudeCount == 0) break;
                 g.DrawIcon(_claudeIcon, new Rectangle(r.X + 4, r.Y + (r.Height - 16) / 2, 16, 16));
@@ -562,8 +604,20 @@ internal sealed class ProjectsDialog : Form
                 if (p.ClaudeCount >= 2) TaskbarOverlay.DrawCountBadge(g, pill, p.ClaudeCount);
                 break;
 
+            case Col.Screen:
+                // The VS Code chip sits in the column of the screen its window is on.
+                if (!p.VsCodeOpen || p.Screen?.Handle != c.Screen!.Handle) break;
+                var chip = new Rectangle(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6);
+                using (var path = TaskbarOverlay.RoundedRect(chip, 6))
+                using (var pen = new Pen(Color.FromArgb(140, 0, 122, 204)))
+                    g.DrawPath(pen, path);
+                g.DrawIcon(_vscodeIcon, new Rectangle(chip.X + 4, chip.Y + (chip.Height - 16) / 2, 16, 16));
+                TextRenderer.DrawText(g, SnapGeometry.Label(p.Snap), _list.Font,
+                    new Rectangle(chip.X + 24, chip.Y, chip.Width - 26, chip.Height), fg, Text);
+                break;
+
             default:
-                var font = (Col)e.ColumnIndex == Col.Project ? new Font(_list.Font, FontStyle.Bold) : _list.Font;
+                var font = c.Kind == Col.Project ? new Font(_list.Font, FontStyle.Bold) : _list.Font;
                 TextRenderer.DrawText(g, e.SubItem!.Text, font, Rectangle.Inflate(r, -4, 0), fg, Text);
                 if (font != _list.Font) font.Dispose();
                 break;
@@ -572,76 +626,92 @@ internal sealed class ProjectsDialog : Form
         if (e.ItemIndex == _dropIndex)
         {
             using var ring = new Pen(SystemColors.Highlight, 2f);
-            g.DrawLine(ring, r.Left, r.Top + 1, r.Right, r.Top + 1);
-            g.DrawLine(ring, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1);
+            if (e.ColumnIndex == _dropCol) g.DrawRectangle(ring, Rectangle.Inflate(r, -1, -1));
+            else
+            {
+                g.DrawLine(ring, r.Left, r.Top + 1, r.Right, r.Top + 1);
+                g.DrawLine(ring, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1);
+            }
         }
     }
 
-    private int _dropIndex = -1;
-
-    private void SetDropIndex(int index)
+    private void SetDropTarget(int index, int col)
     {
-        if (_dropIndex == index) return;
+        if (_dropIndex == index && _dropCol == col) return;
         _dropIndex = index;
+        _dropCol = col;
         _list.Invalidate();
     }
 
-    private Col? _pressCol;
-
-    private Col? ColumnAt(Point clientPoint)
+    private int ColumnAt(Point clientPoint)
     {
         var hit = _list.HitTest(clientPoint);
-        if (hit.Item == null || hit.SubItem == null) return null;
-        return (Col)hit.Item.SubItems.IndexOf(hit.SubItem);
+        if (hit.Item == null || hit.SubItem == null) return -1;
+        return hit.Item.SubItems.IndexOf(hit.SubItem);
     }
 
+    private Col? KindAt(int col) => col >= 0 ? _cols[col].Kind : null;
+
     /// <summary>
-    /// A drag means what its starting cell shows: the VS Code icon moves that window, the #
-    /// reorders the desktop, the Claude cell reassigns that desktop's sessions. Any other cell
-    /// doesn't drag.
+    /// A drag means what its starting cell shows: a VS Code chip moves that window (to another
+    /// desktop row and/or screen column), the # reorders the desktop, the Claude cell reassigns
+    /// that desktop's sessions. Any other cell doesn't drag.
     /// </summary>
     private void OnItemDrag(object? sender, ItemDragEventArgs e)
     {
         var p = (ProjectSwitcher.Project)((ListViewItem)e.Item!).Tag!;
-        bool draggable = _pressCol switch
+        var kind = KindAt(_pressCol);
+        bool draggable = kind switch
         {
-            Col.VsCode => p.VsCodeOpen,
+            Col.Screen => p.VsCodeOpen && p.Screen?.Handle == _cols[_pressCol].Screen!.Handle,
             Col.Number => p.Desktop != null,
             Col.Claude => p.Desktop != null && p.ClaudeCount > 0,
             _ => false,
         };
         if (!draggable) return;
-        _list.DoDragDrop(new DragItem(p, _pressCol!.Value), DragDropEffects.Move);
-        SetDropIndex(-1);
+        _list.DoDragDrop(new DragItem(p, kind!.Value), DragDropEffects.Move);
+        SetDropTarget(-1, -1);
     }
 
-    /// <summary>The row under the cursor, if it is on a different desktop than the dragged one.</summary>
-    private (DragItem drag, int index, DesktopInfo desktop)? DropTarget(DragEventArgs e)
+    /// <summary>
+    /// Where a drop would land: the row's desktop, plus — for a VS Code chip over a screen
+    /// column — that screen. Null when it would change nothing.
+    /// </summary>
+    private (DragItem drag, int index, int col, DesktopInfo desktop, MonitorDescriptor? screen)? DropTarget(DragEventArgs e)
     {
         if (e.Data?.GetData(typeof(DragItem)) is not DragItem drag) return null;
-        var item = _list.GetItemAt(5, _list.PointToClient(new Point(e.X, e.Y)).Y);
-        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d } || d.Id == drag.Project.Desktop?.Id) return null;
-        return (drag, item.Index, d);
+        var pt = _list.PointToClient(new Point(e.X, e.Y));
+        var item = _list.GetItemAt(5, pt.Y);
+        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d }) return null;
+        int col = ColumnAt(pt);
+        var screen = drag.Kind == Col.Screen && KindAt(col) == Col.Screen ? _cols[col].Screen : null;
+        bool newDesktop = d.Id != drag.Project.Desktop?.Id;
+        bool newScreen = screen != null && screen.Handle != drag.Project.Screen?.Handle;
+        if (!newDesktop && !newScreen) return null;
+        return (drag, item.Index, screen != null ? col : -1, d, screen);
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
     {
         var t = DropTarget(e);
         e.Effect = t != null ? DragDropEffects.Move : DragDropEffects.None;
-        SetDropIndex(t?.index ?? -1);
+        SetDropTarget(t?.index ?? -1, t?.col ?? -1);
     }
 
     private void OnDragDrop(object? sender, DragEventArgs e)
     {
         var t = DropTarget(e);
-        SetDropIndex(-1);
+        SetDropTarget(-1, -1);
         if (t is not { } target) return;
         var p = target.drag.Project;
         try
         {
             switch (target.drag.Kind)
             {
-                case Col.VsCode: _switcher.MoveVsCode(p, target.desktop); break;
+                case Col.Screen:
+                    if (target.desktop.Id != p.Desktop?.Id) _switcher.MoveVsCode(p, target.desktop);
+                    if (target.screen != null && target.screen.Handle != p.Screen?.Handle) _switcher.PlaceVsCode(p, target.screen, p.Snap);
+                    break;
                 case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop.Index); break;
                 case Col.Claude: _switcher.ReassignClaude(p.Desktop!, target.desktop); break;
             }
@@ -650,33 +720,47 @@ internal sealed class ProjectsDialog : Form
         RefreshState();
     }
 
-    /// <summary>Click on a Screen cell: pick the screen and snap position for that VS Code window, applied at once.</summary>
-    private void ShowScreenPicker(Point at)
+    /// <summary>Click a VS Code chip: pick its snap position on that screen, applied at once.</summary>
+    private void ShowSnapPicker(Point at)
     {
         var item = _list.GetItemAt(5, at.Y);
-        if (item?.Tag is not ProjectSwitcher.Project { VsCodeOpen: true } p) return;
-        var screens = MonitorRef.EnumerateAll();
-        var current = screens.FirstOrDefault(s => s.Handle == p.Screen?.Handle) ?? screens.First(s => s.IsPrimary);
+        var screen = _cols[ColumnAt(at)].Screen!;
+        if (item?.Tag is not ProjectSwitcher.Project { VsCodeOpen: true } p || p.Screen?.Handle != screen.Handle) return;
 
         var menu = new ContextMenuStrip();
-        for (int i = 0; i < screens.Count; i++)
-        {
-            var s = screens[i];
-            menu.Items.Add(new ToolStripMenuItem($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
-                (_, _) => Place(p, s, p.Snap)) { Checked = s.Handle == p.Screen?.Handle });
-        }
-        menu.Items.Add(new ToolStripSeparator());
         foreach (var snap in SnapGeometry.All)
-            menu.Items.Add(new ToolStripMenuItem(SnapGeometry.Label(snap), null, (_, _) => Place(p, current, snap)) { Checked = snap == p.Snap });
+            menu.Items.Add(new ToolStripMenuItem(SnapGeometry.Label(snap), null, (_, _) =>
+            {
+                try { _switcher.PlaceVsCode(p, screen, snap); }
+                catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+                RefreshState();
+            }) { Checked = snap == p.Snap });
         menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         menu.Show(_list, at);
     }
 
-    private void Place(ProjectSwitcher.Project p, MonitorDescriptor screen, SnapMode snap)
+    /// <summary>Mouse over the column header (x in header pixels), or null when it left.
+    /// Over a screen column, show the monitor arrangement with that screen highlighted.</summary>
+    private void OnHeaderHover(int? x)
     {
-        try { _switcher.PlaceVsCode(p, screen, snap); }
-        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
-        RefreshState();
+        int col = -1;
+        if (x is int px)
+        {
+            int left = 0;
+            for (int i = 0; i < _list.Columns.Count; i++)
+            {
+                int w = _list.Columns[i].Width;
+                if (px >= left && px < left + w) { col = i; break; }
+                left += w;
+            }
+        }
+        if (col < 0 || _cols[col].Kind != Col.Screen) { _screenPopup.Hide(); return; }
+
+        int cellLeft = 0;
+        for (int i = 0; i < col; i++) cellLeft += _list.Columns[i].Width;
+        // Just under the header's real bottom edge, so the popup never covers the header and ends its own hover.
+        NativeMethods.GetWindowRect(_headerHover!.Handle, out var header);
+        _screenPopup.ShowFor(_cols[col].Screen!, new Point(header.Left + cellLeft, header.Bottom + 2));
     }
 
     private MenuStrip BuildMenu(Button closeIdle)
@@ -699,10 +783,9 @@ internal sealed class ProjectsDialog : Form
         windows.DropDownOpening += (_, _) =>
         {
             moveAll.DropDownItems.Clear();
-            var screens = MonitorRef.EnumerateAll();
-            for (int i = 0; i < screens.Count; i++)
+            for (int i = 0; i < _screens.Count; i++)
             {
-                var s = screens[i];
+                var s = _screens[i];
                 moveAll.DropDownItems.Add($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
                     (_, _) => { Program.Host!.MoveAllVsCodeToScreen(s); RefreshState(); });
             }
@@ -718,8 +801,10 @@ internal sealed class ProjectsDialog : Form
         });
         windows.DropDownItems.Add("Rename this screen setup…", null, (_, _) =>
         {
-            string? name = InputDialog.Show("Screen setup", "Name for this monitor arrangement (e.g. work, home):", _switcher.ScreenSetupName, this);
-            if (!string.IsNullOrWhiteSpace(name)) _switcher.RenameScreenSetup(name.Trim());
+            string? name = InputDialog.Show("Screen setup", "Name for this monitor arrangement (e.g. work, kitchen, bedroom):", _switcher.ScreenSetupName, this);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            _switcher.RenameScreenSetup(name.Trim());
+            UpdateTitle();
         });
         windows.DropDownItems.Add(new ToolStripSeparator());
         windows.DropDownItems.Add("Close idle desktops…", null, (_, _) => closeIdle.PerformClick());
@@ -729,14 +814,16 @@ internal sealed class ProjectsDialog : Form
         help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
             "Type to filter. Enter opens the selected project on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
             "Drag the # cell onto another row to reorder desktops.\n" +
-            "Drag the VS Code icon onto another row to move that window to its desktop.\n" +
+            "Drag a VS Code chip onto another row to move the window to that desktop, and/or into another screen column to move it to that screen.\n" +
+            "Click a VS Code chip to change its snap position (full screen, halves, quarters).\n" +
             "Drag the Claude cell onto another row to reassign that desktop's Claude sessions.\n" +
-            "Click the Screen cell to put the window on another screen or snap position.\n\n" +
+            "Hover a screen column's header to see the monitor arrangement.\n\n" +
             "F2 renames the desktop, Del removes projects from the list. Click a column header to sort.\n" +
+            "The title shows the screen setup (Windows → Rename this screen setup).\n" +
             "Closing this window keeps DesktopNames running; File → Exit quits it.",
             "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
         help.DropDownItems.Add(new ToolStripSeparator());
-        help.DropDownItems.Add($"About DesktopNames…", null, (_, _) => MessageBox.Show(this,
+        help.DropDownItems.Add("About DesktopNames…", null, (_, _) => MessageBox.Show(this,
             $"DesktopNames {Program.GetBuildStamp()}\n\nNamed virtual desktops on the taskbar, Claude session status, and one desktop per project.",
             "About DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
 
@@ -791,7 +878,6 @@ internal sealed class ProjectsDialog : Form
         var next = _list.Items[Math.Min(at, _list.Items.Count - 1)];
         next.Selected = true;
         next.Focused = true;
-        next.EnsureVisible();
     }
 
     private void CloseIdleDesktops()
@@ -859,5 +945,128 @@ internal sealed class ProjectsDialog : Form
     {
         NewProjectName = _search.Text.Trim();
         DialogResult = DialogResult.OK;
+    }
+
+    /// <summary>
+    /// Watches the list's column header (a separate native window) for the mouse, so hovering a
+    /// screen column can show the monitor arrangement. Reports the x position, or null on leave.
+    /// </summary>
+    private sealed class HeaderHover : NativeWindow
+    {
+        private readonly Action<int?> _onHover;
+        private bool _tracking;
+
+        public HeaderHover(IntPtr header, Action<int?> onHover)
+        {
+            _onHover = onHover;
+            AssignHandle(header);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == NativeMethods.WM_MOUSEMOVE)
+            {
+                if (!_tracking)
+                {
+                    // WM_MOUSELEAVE arrives only after asking for it, once per entry.
+                    var tme = new NativeMethods.TRACKMOUSEEVENT
+                    {
+                        cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
+                        dwFlags = NativeMethods.TME_LEAVE,
+                        hwndTrack = Handle,
+                    };
+                    _tracking = NativeMethods.TrackMouseEvent(ref tme);
+                }
+                _onHover((short)(m.LParam.ToInt64() & 0xFFFF));
+            }
+            else if (m.Msg == NativeMethods.WM_MOUSELEAVE)
+            {
+                _tracking = false;
+                _onHover(null);
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    /// <summary>
+    /// Miniature of the physical monitor arrangement drawn from the real monitor coordinates,
+    /// with one screen highlighted and its pixels, position, Windows display number, model and
+    /// device id spelled out. Shown without taking focus.
+    /// </summary>
+    private sealed class ScreenLayoutPopup : Form
+    {
+        private readonly List<MonitorDescriptor> _screens;
+        private MonitorDescriptor? _focus;
+
+        public ScreenLayoutPopup(List<MonitorDescriptor> screens)
+        {
+            _screens = screens;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            DoubleBuffered = true;
+            BackColor = SystemColors.Window;
+            Font = new Font("Segoe UI", 9f);
+            Size = new Size(480, 300);
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW;
+                return cp;
+            }
+        }
+
+        public void ShowFor(MonitorDescriptor screen, Point at)
+        {
+            if (_focus == screen && Visible) return;
+            _focus = screen;
+            Location = at;
+            if (!Visible) Show();
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var border = new Pen(SystemColors.ControlDark)) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+            if (_focus == null || _screens.Count == 0) return;
+
+            // Scale the union of all monitor rects into the map area, keeping proportions.
+            var map = new Rectangle(12, 12, Width - 24, 150);
+            int minX = _screens.Min(s => s.Monitor.Left), minY = _screens.Min(s => s.Monitor.Top);
+            int maxX = _screens.Max(s => s.Monitor.Right), maxY = _screens.Max(s => s.Monitor.Bottom);
+            float scale = Math.Min(map.Width / (float)(maxX - minX), map.Height / (float)(maxY - minY));
+            float ox = map.X + (map.Width - (maxX - minX) * scale) / 2, oy = map.Y + (map.Height - (maxY - minY) * scale) / 2;
+
+            foreach (var s in _screens)
+            {
+                var r = Rectangle.Round(new RectangleF(ox + (s.Monitor.Left - minX) * scale, oy + (s.Monitor.Top - minY) * scale,
+                    s.Width * scale, s.Height * scale));
+                r.Inflate(-2, -2);
+                bool focus = s.Handle == _focus.Handle;
+                using (var fill = new SolidBrush(focus ? SystemColors.Highlight : SystemColors.Control)) g.FillRectangle(fill, r);
+                using (var pen = new Pen(SystemColors.ControlDarkDark)) g.DrawRectangle(pen, r);
+                TextRenderer.DrawText(g, $"{(s.Number > 0 ? s.Number.ToString() : "?")}{(s.IsPrimary ? " ★" : "")}\n{s.Width}×{s.Height}",
+                    Font, r, focus ? SystemColors.HighlightText : SystemColors.ControlText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+            }
+
+            var f = _focus;
+            string details =
+                $"Screen {(f.Number > 0 ? f.Number.ToString() : "?")}{(f.IsPrimary ? " (primary)" : "")}{(f.Model.Length > 0 ? " — " + f.Model : "")}\n" +
+                $"{f.Width}×{f.Height} pixels at ({f.Monitor.Left}, {f.Monitor.Top}); work area {f.Work.Right - f.Work.Left}×{f.Work.Bottom - f.Work.Top}\n" +
+                $"GDI device: {f.Device}\n" +
+                $"Device id: {f.DeviceId ?? "(none)"}";
+            TextRenderer.DrawText(g, details, Font, new Rectangle(12, map.Bottom + 10, Width - 24, Height - map.Bottom - 16),
+                SystemColors.WindowText, TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
+        }
     }
 }

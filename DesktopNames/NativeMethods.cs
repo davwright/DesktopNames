@@ -73,6 +73,18 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TRACKMOUSEEVENT { public uint cbSize, dwFlags; public IntPtr hwndTrack; public uint dwHoverTime; }
+
+    [DllImport("user32.dll")]
+    public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
+
+    public const uint TME_LEAVE = 0x2;
+    public const int WM_MOUSEMOVE = 0x0200, WM_MOUSELEAVE = 0x02A3, LVM_GETHEADER = 0x101F;
+
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", SetLastError = true)]
