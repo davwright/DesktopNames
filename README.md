@@ -12,12 +12,12 @@
 
 DesktopNames puts all your named virtual desktops directly on the taskbar as clickable buttons. Click one to **switch instantly** — no Win11 scroll animation, no Task View, no waiting.
 
-Windows 11 only ships `Win+Ctrl+Left/Right` to scroll one desktop at a time — and has no built-in hotkey to jump to a specific desktop or move a window to one. The included [AutoHotkey companion script](#companion-autohotkey-hotkeys) fills that gap and is fully user-configurable. As shipped it gives you:
+Windows 11 only ships `Win+Ctrl+Left/Right` to scroll one desktop at a time — and has no built-in hotkey to jump to a specific desktop or move a window to one. DesktopNames fills that gap itself — no AutoHotkey needed:
 
-- **`Win+1..0`** — jump directly to desktops 1 through 10.
-- **`Win+Ctrl+1..0`** — move the focused window to desktop 1 through 10.
+- **`Win+1..0`** — jump directly to desktops 1 through 10; **`Win+Shift+1..0`** for 11 through 20.
+- **`Win+Ctrl+1..0`** — move the focused window to desktop 1 through 10; **`Win+Ctrl+Shift+1..0`** for 11 through 20.
 
-Edit the script to remap keys, add more desktops, or wire in your own actions.
+Every binding is in `settings.json` under `Hotkeys`. Hotkeys go through a low-level keyboard hook, so they win over chords Windows reserves for itself.
 
 ## Features
 
@@ -72,69 +72,6 @@ Right-click the system tray icon and select **Exit**.
 The app uses undocumented Windows COM interfaces (`IVirtualDesktopManagerInternal`) to enumerate desktops, read their names, and switch between them. If the COM interfaces aren't available (GUIDs change between Windows builds), it falls back to reading desktop info from the registry and switching via keyboard simulation (Ctrl+Win+Arrow).
 
 The overlay is a borderless, topmost WinForms window positioned over each taskbar using `Shell_TrayWnd` / `Shell_SecondaryTrayWnd` window detection.
-
-## Companion: AutoHotkey hotkeys
-
-DesktopNames shows which virtual desktop you're on. The script below adds the hotkeys Windows 11 doesn't: jump straight to a numbered desktop, and move the focused window to one. It's plain AutoHotkey v2 — edit it to remap keys, add desktops, or trigger your own logic.
-
-### Setup
-
-1. Install [AutoHotkey v2](https://www.autohotkey.com/).
-2. Download `VirtualDesktopAccessor.dll` for your Windows build from the [VirtualDesktopAccessor releases](https://github.com/Ciantic/VirtualDesktopAccessor/releases) and place it next to the script.
-3. Save the script below as `desktops.ahk` in the same folder as the DLL, then double-click it to run.
-4. To auto-start at login, put a shortcut to the `.ahk` file in `shell:startup` (press `Win+R`, type `shell:startup`, press Enter).
-
-### `desktops.ahk`
-
-```ahk
-#Requires AutoHotkey v2.0
-#SingleInstance Force
-
-; Load VirtualDesktopAccessor.dll from same directory as script
-dllPath := A_ScriptDir "\VirtualDesktopAccessor.dll"
-hVDA := DllCall("LoadLibrary", "Str", dllPath, "Ptr")
-if !hVDA {
-    MsgBox "Failed to load VirtualDesktopAccessor.dll`nMake sure it's in: " A_ScriptDir
-    ExitApp
-}
-
-GoToDesktop(n) {
-    global dllPath
-    DllCall(dllPath "\GoToDesktopNumber", "Int", n)
-}
-
-MoveToDesktop(n) {
-    global dllPath
-    hwnd := WinGetID("A")
-    DllCall(dllPath "\MoveWindowToDesktopNumber", "Ptr", hwnd, "Int", n)
-}
-
-; Win+1..0 — switch to desktop
-#1::GoToDesktop(0)
-#2::GoToDesktop(1)
-#3::GoToDesktop(2)
-#4::GoToDesktop(3)
-#5::GoToDesktop(4)
-#6::GoToDesktop(5)
-#7::GoToDesktop(6)
-#8::GoToDesktop(7)
-#9::GoToDesktop(8)
-#0::GoToDesktop(9)
-
-; Win+Ctrl+1..0 — move focused window to desktop
-#^1::MoveToDesktop(0)
-#^2::MoveToDesktop(1)
-#^3::MoveToDesktop(2)
-#^4::MoveToDesktop(3)
-#^5::MoveToDesktop(4)
-#^6::MoveToDesktop(5)
-#^7::MoveToDesktop(6)
-#^8::MoveToDesktop(7)
-#^9::MoveToDesktop(8)
-#^0::MoveToDesktop(9)
-```
-
-Desktops are zero-indexed in the DLL but one-indexed in the hotkeys — `Win+1` switches to the first desktop.
 
 ## Troubleshooting
 

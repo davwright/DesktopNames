@@ -59,8 +59,7 @@ return void upstream; an `int` return mismatch is harmless on x64.
 Pre-load with `NativeLibrary.SetDllImportResolver` so `[DllImport]` binds to your chosen
 copy regardless of CWD/PATH, then **smoke-test with `GetDesktopCount()`** (read-only,
 cheap; throws / returns implausible values on wrong-arch or broken DLL). Resolution
-order DesktopNames uses: explicit settings override → beside the exe (bundled copy) →
-`%OneDriveCommercial%`/`%OneDrive%`\{Dokumente,Documents}\AutoHotkey → `%USERPROFILE%`\Documents\AutoHotkey.
+order DesktopNames uses: explicit settings override → beside the exe (the project ships its own copy).
 
 ## Vtable drift — the core fragility
 

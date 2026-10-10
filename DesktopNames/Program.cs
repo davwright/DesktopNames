@@ -174,7 +174,7 @@ static class Program
     private static string? PromptForVdaDll(string? loadError)
     {
         var prompt = "DesktopNames needs VirtualDesktopAccessor.dll to move windows between virtual desktops.\n\n" +
-                     "Auto-discovery looked next to DesktopNames.exe and in your AutoHotkey folder under Documents/Dokumente.\n\n" +
+                     "It ships next to DesktopNames.exe; it was not found there.\n\n" +
                      (loadError ?? "") + "\n\n" +
                      "Click OK to browse to the DLL, or Cancel to exit.\n" +
                      "(Get it from https://github.com/Ciantic/VirtualDesktopAccessor/releases)";
@@ -329,9 +329,7 @@ static class Program
                 string suffix = r.Success ? "" :
                     r.LastError switch
                     {
-                        // 1409 covers both cases: Windows returns it for its own reserved
-                        // combos (Win+L, Win+Alt+arrows, ...) as well as for app collisions.
-                        1409 => "   (Win32 1409: reserved by Windows, or held by another running app)",
+                        -2   => "   (same chord as another binding above)",
                         -1   => "",
                         _    => $"   (Win32 error {r.LastError})"
                     };
@@ -758,6 +756,12 @@ internal sealed class HostForm : Form
                     RefreshAllOverlays();
                 }
             });
+            TryRegister($"MoveWindowToDesktop{idx}", $"Move window to desktop {idx}", () =>
+            {
+                var list = _desktopService.GetDesktops();
+                if (idx - 1 < list.Count)
+                    _desktopService.MoveWindowToDesktop(NativeMethods.GetForegroundWindow(), list[idx - 1].Id);
+            });
         }
     }
 
@@ -996,8 +1000,6 @@ internal sealed class HostForm : Form
 
     protected override void WndProc(ref Message m)
     {
-        if (_hotkeys != null && _hotkeys.HandleMessage(ref m)) return;
-
         if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
         {
             _settings.InvalidateLayout();   // different screen setup => different remembered layout

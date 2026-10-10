@@ -67,13 +67,8 @@ internal static class VdaDll
     }
 
     /// <summary>
-    /// Search order:
-    ///   1. Explicit override (typically from Settings.VdaDllPath)
-    ///   2. Same directory as DesktopNames.exe (bundled copy)
-    ///   3. %OneDriveCommercial%\Dokumente\AutoHotkey\ (German locale, this user's setup)
-    ///   4. %OneDriveCommercial%\Documents\AutoHotkey\
-    ///   5. %OneDrive%\Dokumente|Documents\AutoHotkey\
-    ///   6. %USERPROFILE%\Documents\AutoHotkey\
+    /// The settings override (Settings.VdaDllPath) if set, else the copy shipped next to
+    /// DesktopNames.exe.
     /// </summary>
     public static string? ResolveDllPath(string? settingsOverride)
     {
@@ -81,24 +76,7 @@ internal static class VdaDll
             return settingsOverride;
 
         var local = Path.Combine(AppContext.BaseDirectory, DLL_NAME);
-        if (File.Exists(local)) return local;
-
-        foreach (var envName in new[] { "OneDriveCommercial", "OneDrive" })
-        {
-            var root = Environment.GetEnvironmentVariable(envName);
-            if (string.IsNullOrEmpty(root)) continue;
-            foreach (var docs in new[] { "Dokumente", "Documents" })
-            {
-                var p = Path.Combine(root, docs, "AutoHotkey", DLL_NAME);
-                if (File.Exists(p)) return p;
-            }
-        }
-
-        var myDocs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        var ahkLocal = Path.Combine(myDocs, "AutoHotkey", DLL_NAME);
-        if (File.Exists(ahkLocal)) return ahkLocal;
-
-        return null;
+        return File.Exists(local) ? local : null;
     }
 
     // --- Exports we use ---

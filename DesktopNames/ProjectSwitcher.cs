@@ -15,7 +15,7 @@ internal sealed class ProjectSwitcher : IDisposable
     /// <summary>A project row: its folder plus the live state of its desktop, VS Code window and Claude sessions.</summary>
     public sealed record Project(
         string Folder, string Name, DateTime LastUsedUtc, DesktopInfo? Desktop,
-        bool VsCodeOpen, StateKind ClaudeState, int ClaudeCount, string? Glyph, bool Highlighted);
+        bool VsCodeOpen, StateKind ClaudeState, int ClaudeCount, string? Glyph);
 
     private readonly DesktopService _desktop;
     private readonly Settings _settings;
@@ -117,7 +117,7 @@ internal sealed class ProjectSwitcher : IDisposable
                 glyph = _sessions.GetGlyph(desktop.Id);
             }
             result.Add(new Project(folder, name, lastUsed, desktop, window.Hwnd != IntPtr.Zero,
-                state, count, glyph, desktop != null && _settings.IsDesktopHighlighted(desktop.Id)));
+                state, count, glyph));
         }
         return result;
     }
@@ -260,8 +260,8 @@ internal sealed class ProjectsDialog : Form
     private readonly Button _create = new() { Text = "New project", AutoSize = true, MinimumSize = new Size(90, 0) };
     private readonly Icon _vscodeIcon = LoadIcon("vscode.ico");
     private readonly Icon _claudeIcon = LoadIcon("claude.ico");
-    private Col _sortCol = Col.LastUsed;
-    private bool _sortDesc = true;
+    private Col _sortCol = Col.Number;
+    private bool _sortDesc = false;
 
     /// <summary>Set when the user picked an existing project.</summary>
     public string? ChosenFolder { get; private set; }
@@ -360,7 +360,7 @@ internal sealed class ProjectsDialog : Form
         {
             var item = new ListViewItem(new[]
             {
-                "", "", p.Name, "", p.Desktop?.Name ?? "",
+                "", "", p.Name, p.Desktop != null ? $"{p.Desktop.Index + 1}" : "", p.Desktop?.Name ?? "",
                 SessionState.FormatAge(p.LastUsedUtc), p.Folder,
             }) { Tag = p };
             item.Selected = selected.Contains(p.Folder);
@@ -421,15 +421,6 @@ internal sealed class ProjectsDialog : Form
                 DrawPill(g, pill, $"{word}{(p.Glyph is { } gl && p.ClaudeState == StateKind.Busy ? " " + gl : "")}",
                     p.ClaudeState == StateKind.None ? null : SessionFlyout.StateColor(p.ClaudeState), fg);
                 if (p.ClaudeCount >= 2) TaskbarOverlay.DrawCountBadge(g, pill, p.ClaudeCount);
-                break;
-
-            case Col.Number:
-                if (p.Desktop == null) break;
-                // Same number, glyph and fill as the taskbar tab: state colour, else the blue marker.
-                Color? fill = p.ClaudeState != StateKind.None ? SessionFlyout.StateColor(p.ClaudeState)
-                            : p.Highlighted ? TaskbarOverlay.ParseColorOrFallback(Program.Host!.Settings.AlertHighlightColor, Color.FromArgb(91, 155, 213))
-                            : null;
-                DrawPill(g, new Rectangle(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6), $"{p.Desktop.Index + 1}{p.Glyph}", fill, fg);
                 break;
 
             default:

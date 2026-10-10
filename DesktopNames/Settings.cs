@@ -233,12 +233,14 @@ internal sealed class Settings
             ["NextWaitingDesktop"] = "Win+Oem6",   // Win+] — next desktop with an asking/ready Claude
             ["OpenProjects"]       = "Win+J",      // project switcher: open / create a project on its own desktop
         };
-        // Win+Ctrl+1..9,0 → desktops 1..10. Add Shift → desktops 11..20.
+        // Win+1..9,0 → switch to desktop 1..10; Win+Ctrl+digit → move the focused window there.
+        // Add Shift for desktops 11..20. These replace the user's old AutoHotkey script.
         for (int i = 1; i <= 20; i++)
         {
             int digit = i % 10; // 1..9 then 0 for 10, 1..9 then 0 for 20
             string shift = i > 10 ? "Shift+" : "";
-            d[$"SwitchToDesktop{i}"] = $"Win+Ctrl+{shift}{digit}";
+            d[$"SwitchToDesktop{i}"] = $"Win+{shift}{digit}";
+            d[$"MoveWindowToDesktop{i}"] = $"Win+Ctrl+{shift}{digit}";
         }
         return d;
     }
@@ -267,6 +269,15 @@ internal sealed class Settings
             ? JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath), JsonOptions())
               ?? throw new InvalidDataException($"{FilePath} contains null")
             : new Settings();
+
+        // Migration: switch-to-desktop defaulted to Win+Ctrl+[Shift+]digit, which Windows reserves;
+        // that chord now moves the focused window, and switching is Win+[Shift+]digit.
+        for (int i = 1; i <= 20; i++)
+        {
+            string shift = i > 10 ? "Shift+" : "";
+            if (s.Hotkeys.TryGetValue($"SwitchToDesktop{i}", out var oldSwitch) && oldSwitch == $"Win+Ctrl+{shift}{i % 10}")
+                s.Hotkeys.Remove($"SwitchToDesktop{i}");
+        }
 
         // Migration: the move-desktop defaults were Win+Alt+arrows, which Windows Snap took over.
         foreach (var (key, suffix) in new[] { ("MoveDesktopLeft", "Left"), ("MoveDesktopRight", "Right"), ("MoveDesktopFirst", "Home"), ("MoveDesktopLast", "End") })

@@ -3,34 +3,59 @@ using System.Runtime.InteropServices;
 namespace DesktopNames;
 
 /// <summary>
-/// Registers global hotkeys on a hidden message-only host form and routes
-/// WM_HOTKEY into Action callbacks. RegisterHotKey is per-thread, so all
-/// registrations must happen on the same UI thread that owns the host window.
+/// Global hotkeys through a low-level keyboard hook, not RegisterHotKey: Windows reserves many
+/// Win chords (Win+1..0, Win+Ctrl+1..0, Win+Alt+arrows ...) and RegisterHotKey can never get
+/// them. A matching chord is swallowed, so Windows and other apps never see it, and its handler
+/// runs on the host's UI thread. The hook lives on its own thread with its own message loop:
+/// Windows silently drops a low-level hook whose thread stalls, which the UI thread can do.
 /// </summary>
 internal sealed class HotkeyManager : IDisposable
 {
+    // An unassigned virtual key. Tapping it while Win or Alt is held after a swallowed chord
+    // keeps Windows from treating the modifier release as "open Start" / "focus the menu bar".
+    private const byte VK_MASK = 0xE8;
+
     private readonly Form _host;
-    private readonly Dictionary<int, Action> _handlers = new();
+    private readonly object _lock = new();
+    private readonly Dictionary<(uint mods, uint vk), Action> _handlers = new();
+    private readonly HashSet<uint> _swallowedDown = new();   // hook thread only
     private readonly List<Registration> _registrations = new();
-    private int _nextId = 0x9000;
+    private readonly NativeMethods.LowLevelKeyboardProc _proc;   // kept alive: the hook holds a raw pointer to it
+    private readonly Thread _thread;
+    private uint _threadId;
+    private IntPtr _hook;
 
     public IReadOnlyList<Registration> Registrations => _registrations;
 
     public HotkeyManager(Form host)
     {
         _host = host;
+        _proc = HookProc;
+        Exception? failure = null;
+        using var started = new ManualResetEventSlim();
+        _thread = new Thread(() =>
+        {
+            _threadId = NativeMethods.GetCurrentThreadId();
+            _hook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _proc, NativeMethods.GetModuleHandle(null), 0);
+            if (_hook == IntPtr.Zero)
+                failure = new InvalidOperationException($"SetWindowsHookEx failed (Win32 {Marshal.GetLastWin32Error()})");
+            started.Set();
+            if (failure != null) return;
+            while (NativeMethods.GetMessage(out _, IntPtr.Zero, 0, 0) > 0) { }
+            NativeMethods.UnhookWindowsHookEx(_hook);
+        }) { IsBackground = true, Name = "HotkeyHook" };
+        _thread.Start();
+        started.Wait();
+        if (failure != null) throw failure;
     }
 
+    /// <summary>Bind a chord. Fails only when another binding already uses the same chord.</summary>
     public bool Register(uint modifiers, uint vk, string description, Action handler)
     {
-        int id = _nextId++;
-        bool ok = NativeMethods.RegisterHotKey(_host.Handle, id,
-            modifiers | NativeMethods.MOD_NOREPEAT, vk);
-        int err = ok ? 0 : Marshal.GetLastWin32Error();
-        _registrations.Add(new Registration(description, modifiers, vk, ok, err));
-        if (!ok) return false;
-        _handlers[id] = handler;
-        return true;
+        bool ok;
+        lock (_lock) ok = _handlers.TryAdd((modifiers, vk), handler);
+        _registrations.Add(new Registration(description, modifiers, vk, ok, ok ? 0 : -2));
+        return ok;
     }
 
     public void RecordPlaceholder(string description)
@@ -38,27 +63,62 @@ internal sealed class HotkeyManager : IDisposable
         _registrations.Add(new Registration(description, 0, 0, false, -1));
     }
 
-    public bool HandleMessage(ref Message m)
+    private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (m.Msg != NativeMethods.WM_HOTKEY) return false;
-        int id = m.WParam.ToInt32();
-        if (_handlers.TryGetValue(id, out var h))
+        if (nCode >= 0)
         {
-            try { h(); } catch { }
-            return true;
+            var kb = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+            int msg = (int)wParam;
+            bool down = msg is NativeMethods.WM_KEYDOWN or NativeMethods.WM_SYSKEYDOWN;
+            bool up = msg is NativeMethods.WM_KEYUP or NativeMethods.WM_SYSKEYUP;
+
+            // The key-up of a swallowed chord, and its auto-repeats, are swallowed too.
+            if (up && _swallowedDown.Remove(kb.vkCode)) return 1;
+            if (down && _swallowedDown.Contains(kb.vkCode)) return 1;
+
+            if (down)
+            {
+                uint mods = CurrentModifiers();
+                Action? handler;
+                lock (_lock) _handlers.TryGetValue((mods, kb.vkCode), out handler);
+                if (handler != null)
+                {
+                    _swallowedDown.Add(kb.vkCode);
+                    if ((mods & (NativeMethods.MOD_WIN | NativeMethods.MOD_ALT)) != 0)
+                    {
+                        NativeMethods.keybd_event(VK_MASK, 0, 0, UIntPtr.Zero);
+                        NativeMethods.keybd_event(VK_MASK, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    }
+                    _host.BeginInvoke(() =>
+                    {
+                        try { handler(); }
+                        catch (Exception ex) { Log.Ui($"hotkey handler failed: {ex}"); }
+                    });
+                    return 1;
+                }
+            }
         }
-        return false;
+        return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+    }
+
+    private static uint CurrentModifiers()
+    {
+        static bool Down(int vk) => NativeMethods.GetAsyncKeyState(vk) < 0;
+        uint m = 0;
+        if (Down(0x5B) || Down(0x5C)) m |= NativeMethods.MOD_WIN;      // VK_LWIN / VK_RWIN
+        if (Down(0x11)) m |= NativeMethods.MOD_CONTROL;                // VK_CONTROL
+        if (Down(0x12)) m |= NativeMethods.MOD_ALT;                    // VK_MENU
+        if (Down(0x10)) m |= NativeMethods.MOD_SHIFT;                  // VK_SHIFT
+        return m;
     }
 
     public void Dispose()
     {
-        foreach (var id in _handlers.Keys)
-        {
-            try { NativeMethods.UnregisterHotKey(_host.Handle, id); } catch { }
-        }
-        _handlers.Clear();
+        NativeMethods.PostThreadMessage(_threadId, NativeMethods.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        _thread.Join();
     }
 
+    /// <summary>LastError: 0 ok, -1 unparseable binding, -2 chord already bound to another action.</summary>
     public sealed record Registration(string Description, uint Modifiers, uint VirtualKey, bool Success, int LastError);
 }
 
