@@ -69,21 +69,6 @@ internal static class SnapGeometry
         _ => "Free — keep size",
     };
 
-    /// <summary>Compact tag shown on the arrange-dialog chips.</summary>
-    public static string Tag(SnapMode m) => m switch
-    {
-        SnapMode.Max => "FULL",
-        SnapMode.Left => "L",
-        SnapMode.Right => "R",
-        SnapMode.Top => "T",
-        SnapMode.Bottom => "B",
-        SnapMode.TopLeft => "TL",
-        SnapMode.TopRight => "TR",
-        SnapMode.BottomLeft => "BL",
-        SnapMode.BottomRight => "BR",
-        _ => "—",
-    };
-
     public static NativeMethods.RECT Rect(NativeMethods.RECT work, SnapMode mode)
     {
         int mx = work.Left + work.Width / 2;

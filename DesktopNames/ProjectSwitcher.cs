@@ -15,7 +15,11 @@ internal sealed class ProjectSwitcher : IDisposable
     /// <summary>A project row: its folder plus the live state of its desktop, VS Code window and Claude sessions.</summary>
     public sealed record Project(
         string Folder, string Name, DateTime LastUsedUtc, DesktopInfo? Desktop,
-        bool VsCodeOpen, StateKind ClaudeState, int ClaudeCount, string? Glyph);
+        IntPtr VsCodeHwnd, MonitorDescriptor? Screen, SnapMode Snap,
+        StateKind ClaudeState, int ClaudeCount, string? Glyph)
+    {
+        public bool VsCodeOpen => VsCodeHwnd != IntPtr.Zero;
+    }
 
     private readonly DesktopService _desktop;
     private readonly Settings _settings;
@@ -69,7 +73,7 @@ internal sealed class ProjectSwitcher : IDisposable
     public static void ReportError(Exception ex)
     {
         Log.Projects($"switcher failed: {ex}");
-        MessageBox.Show(ex.Message, "DesktopNames — Projects", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        MessageBox.Show(ex.Message, "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     /// <summary>
@@ -99,6 +103,7 @@ internal sealed class ProjectSwitcher : IDisposable
     {
         var desktops = _desktop.GetDesktops();
         var windows = _tracker.EnumerateOpenWorkspaceWindows();
+        var screens = MonitorRef.EnumerateAll();
         var result = new List<Project>(folders.Count);
         foreach (var (folder, lastUsed) in folders)
         {
@@ -116,8 +121,15 @@ internal sealed class ProjectSwitcher : IDisposable
                 count = _sessions.LiveCount(desktop.Id);
                 glyph = _sessions.GetGlyph(desktop.Id);
             }
-            result.Add(new Project(folder, name, lastUsed, desktop, window.Hwnd != IntPtr.Zero,
-                state, count, glyph));
+            MonitorDescriptor? screen = null;
+            SnapMode snap = SnapMode.Free;
+            if (window.Hwnd != IntPtr.Zero)
+            {
+                IntPtr mon = NativeMethods.MonitorFromWindow(window.Hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                screen = screens.FirstOrDefault(s => s.Handle == mon);
+                if (screen != null) snap = SnapGeometry.Detect(window.Hwnd, screen.Work);
+            }
+            result.Add(new Project(folder, name, lastUsed, desktop, window.Hwnd, screen, snap, state, count, glyph));
         }
         return result;
     }
@@ -143,6 +155,71 @@ internal sealed class ProjectSwitcher : IDisposable
             _settings.Save();
         }
         Log.Projects($"moved VS Code '{project.Name}' -> desktop {target.Index + 1} '{target.Name}'");
+    }
+
+    /// <summary>Reorder: put <paramref name="source"/> at <paramref name="targetIndex"/> (dragged # cell).</summary>
+    public void MoveDesktop(DesktopInfo source, int targetIndex)
+    {
+        _desktop.MoveDesktopToIndex(source.Id, targetIndex);
+        Log.Projects($"moved desktop '{source.Name}' {source.Index + 1} -> {targetIndex + 1}");
+    }
+
+    /// <summary>Reassign every Claude session on <paramref name="source"/> to <paramref name="target"/>
+    /// (dragged Claude cell) — the same correction the taskbar flyout's drag makes.</summary>
+    public void ReassignClaude(DesktopInfo source, DesktopInfo target)
+    {
+        var sessions = _sessions?.GetSessions(source.Id) ?? new();
+        foreach (var s in sessions) Program.Host!.ReassignSession(s.Source, s.SessionId, s.Cwd, target.Id);
+        Log.Projects($"reassigned {sessions.Count} Claude session(s) desktop {source.Index + 1} -> {target.Index + 1}");
+    }
+
+    /// <summary>
+    /// Put a project's VS Code window on <paramref name="screen"/> in <paramref name="snap"/>,
+    /// keeping its desktop, and remember it for this screen setup. Pinned, because it was chosen
+    /// by hand: the tracker's scan must not talk it back to wherever the window ends up.
+    /// </summary>
+    public void PlaceVsCode(Project p, MonitorDescriptor screen, SnapMode snap)
+    {
+        var loc = new WorkspaceLocation();
+        MonitorRef.CaptureWindowPlacement(p.VsCodeHwnd, loc);
+        loc.DesktopId = _desktop.GetDesktopForWindow(p.VsCodeHwnd);
+        loc.MonitorDeviceId = screen.DeviceId;
+        loc.MonitorX = screen.Monitor.Left;
+        loc.MonitorY = screen.Monitor.Top;
+        loc.MonitorWidth = screen.Width;
+        loc.MonitorHeight = screen.Height;
+        loc.Snap = snap;
+        loc.Pinned = true;
+        _desktop.PlaceWindow(p.VsCodeHwnd, loc, Guid.Empty);
+        _settings.Workspaces[p.Name] = loc;
+        _settings.Save();
+        Log.Projects($"placed VS Code '{p.Name}' on screen {screen.Number} {snap}");
+    }
+
+    /// <summary>Move every open VS Code window onto the desktop with exactly its workspace's name, if there is one.</summary>
+    public int AutoAssignByName()
+    {
+        var desktops = _desktop.GetDesktops();
+        int moved = 0;
+        foreach (var w in _tracker.EnumerateOpenWorkspaceWindows())
+        {
+            var d = desktops.FirstOrDefault(d => d.Name.Equals(w.Workspace, StringComparison.OrdinalIgnoreCase));
+            if (d == null || d.Id == w.DesktopId) continue;
+            if (!_desktop.MoveWindowToDesktop(w.Hwnd, d.Id))
+                throw new InvalidOperationException($"Could not move the '{w.Workspace}' VS Code window to desktop {d.Index + 1}.");
+            moved++;
+        }
+        Log.Projects($"auto-assign by name: {moved} window(s) moved");
+        return moved;
+    }
+
+    /// <summary>Name the current monitor arrangement ("work", "home") — its layout is remembered separately.</summary>
+    public string ScreenSetupName => _settings.Layout().DisplayName;
+
+    public void RenameScreenSetup(string name)
+    {
+        _settings.Layout().Name = name;
+        _settings.Save();
     }
 
     public void RenameDesktop(Guid desktopId, string name)
@@ -268,15 +345,20 @@ internal sealed class ProjectSwitcher : IDisposable
 }
 
 /// <summary>
-/// The Win+J switcher. Each row shows whether VS Code is open, the Claude state painted the same
-/// way as the taskbar tabs, and the desktop as its tab label. Type to filter; Enter opens the
+/// The DesktopNames window (Win+J): one row per project with its desktop, Claude state, VS Code
+/// window and the screen/snap position that window sits in. Type to filter; Enter opens the
 /// selection, Ctrl+Enter creates a new project folder; F2 renames the desktop; Del removes
-/// projects from the list. Every column sorts on a header click.
+/// projects from the list. Drag the # cell to reorder desktops, the VS Code icon to move the
+/// window, the Claude cell to reassign its sessions. Click the Screen cell to place the window.
+/// Every column sorts on a header click.
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { Number, Desktop, Project, Claude, VsCode, Folder, LastUsed }
-    private static readonly string[] Headers = { "#", "Desktop", "Project", "Claude", "", "Folder", "Last used" };
+    private enum Col { Number, Desktop, Project, Claude, VsCode, Screen, Folder, LastUsed }
+    private static readonly string[] Headers = { "#", "Desktop", "Project", "Claude", "", "Screen", "Folder", "Last used" };
+
+    /// <summary>What is being dragged: which project, and which cell the drag started on.</summary>
+    private sealed record DragItem(ProjectSwitcher.Project Project, Col Kind);
 
     private readonly ProjectSwitcher _switcher;
     private List<(string folder, DateTime lastUsedUtc)> _folders;
@@ -302,7 +384,8 @@ internal sealed class ProjectsDialog : Form
     {
         _switcher = switcher;
         _folders = switcher.ListFolders();
-        Text = "Projects";
+        Text = "DesktopNames";
+        Icon = Program.Host!.Icon;
         Font = new Font("Segoe UI", 9f);
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = false;
@@ -313,11 +396,11 @@ internal sealed class ProjectsDialog : Form
 
         // Primary screen, whatever desktop or monitor the user is on.
         var work = Screen.PrimaryScreen!.WorkingArea;
-        Size = new Size(1040, 600);
+        Size = new Size(1180, 620);
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
 
-        int[] widths = { 50, 160, 170, 135, 30, 300, 80 };
+        int[] widths = { 50, 160, 170, 135, 30, 150, 300, 80 };
         for (int i = 0; i < Headers.Length; i++) _list.Columns.Add(Headers[i], widths[i]);
         // Row height comes from the small image list; 26px fits the tab-style pills.
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
@@ -330,8 +413,10 @@ internal sealed class ProjectsDialog : Form
         _list.DoubleClick += (_, _) => Accept();
         _list.KeyDown += OnListKeyDown;
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
-        // Drag a row with an open VS Code onto another project's row to move the window to that desktop.
+        // What a drag does depends on the cell it starts on (see OnItemDrag); the Screen cell is a picker.
         _list.AllowDrop = true;
+        _list.MouseDown += (_, e) => _pressCol = ColumnAt(e.Location);
+        _list.MouseClick += (_, e) => { if (ColumnAt(e.Location) == Col.Screen) ShowScreenPicker(e.Location); };
         _list.ItemDrag += OnItemDrag;
         _list.DragOver += OnDragOver;
         _list.DragDrop += OnDragDrop;
@@ -350,6 +435,9 @@ internal sealed class ProjectsDialog : Form
         Controls.Add(_search);
         Controls.Add(hint);
         Controls.Add(bar);
+        var menu = BuildMenu(closeIdle);
+        Controls.Add(menu);
+        MainMenuStrip = menu;
         CancelButton = cancel;
 
         _search.TextChanged += (_, _) => Fill();
@@ -401,6 +489,7 @@ internal sealed class ProjectsDialog : Form
             cells[(int)Col.Desktop] = p.Desktop?.Name ?? "";
             cells[(int)Col.Project] = p.Name;
             cells[(int)Col.Claude] = cells[(int)Col.VsCode] = "";
+            cells[(int)Col.Screen] = p.Screen != null ? $"{p.Screen.Number} · {SnapGeometry.Label(p.Snap)}" : "";
             cells[(int)Col.Folder] = p.Folder;
             cells[(int)Col.LastUsed] = SessionState.FormatAge(p.LastUsedUtc);
             var item = new ListViewItem(cells) { Tag = p };
@@ -434,6 +523,7 @@ internal sealed class ProjectsDialog : Form
         Col.Project  => p.Name.ToLowerInvariant(),
         Col.Number   => p.Desktop?.Index ?? int.MaxValue,
         Col.Desktop  => p.Desktop?.Name.ToLowerInvariant() ?? "",
+        Col.Screen   => p.Screen?.Number ?? int.MaxValue,
         Col.LastUsed => p.LastUsedUtc,
         _            => p.Folder.ToLowerInvariant(),
     };
@@ -496,21 +586,42 @@ internal sealed class ProjectsDialog : Form
         _list.Invalidate();
     }
 
+    private Col? _pressCol;
+
+    private Col? ColumnAt(Point clientPoint)
+    {
+        var hit = _list.HitTest(clientPoint);
+        if (hit.Item == null || hit.SubItem == null) return null;
+        return (Col)hit.Item.SubItems.IndexOf(hit.SubItem);
+    }
+
+    /// <summary>
+    /// A drag means what its starting cell shows: the VS Code icon moves that window, the #
+    /// reorders the desktop, the Claude cell reassigns that desktop's sessions. Any other cell
+    /// doesn't drag.
+    /// </summary>
     private void OnItemDrag(object? sender, ItemDragEventArgs e)
     {
         var p = (ProjectSwitcher.Project)((ListViewItem)e.Item!).Tag!;
-        if (!p.VsCodeOpen) return;
-        _list.DoDragDrop(p, DragDropEffects.Move);
+        bool draggable = _pressCol switch
+        {
+            Col.VsCode => p.VsCodeOpen,
+            Col.Number => p.Desktop != null,
+            Col.Claude => p.Desktop != null && p.ClaudeCount > 0,
+            _ => false,
+        };
+        if (!draggable) return;
+        _list.DoDragDrop(new DragItem(p, _pressCol!.Value), DragDropEffects.Move);
         SetDropIndex(-1);
     }
 
-    /// <summary>The row under the cursor, if it is a project on a different desktop than the dragged one.</summary>
-    private (int index, DesktopInfo desktop)? DropTarget(DragEventArgs e)
+    /// <summary>The row under the cursor, if it is on a different desktop than the dragged one.</summary>
+    private (DragItem drag, int index, DesktopInfo desktop)? DropTarget(DragEventArgs e)
     {
-        if (e.Data?.GetData(typeof(ProjectSwitcher.Project)) is not ProjectSwitcher.Project source) return null;
+        if (e.Data?.GetData(typeof(DragItem)) is not DragItem drag) return null;
         var item = _list.GetItemAt(5, _list.PointToClient(new Point(e.X, e.Y)).Y);
-        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d } || d.Id == source.Desktop?.Id) return null;
-        return (item.Index, d);
+        if (item?.Tag is not ProjectSwitcher.Project { Desktop: { } d } || d.Id == drag.Project.Desktop?.Id) return null;
+        return (drag, item.Index, d);
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
@@ -524,10 +635,113 @@ internal sealed class ProjectsDialog : Form
     {
         var t = DropTarget(e);
         SetDropIndex(-1);
-        if (t == null) return;
-        try { _switcher.MoveVsCode((ProjectSwitcher.Project)e.Data!.GetData(typeof(ProjectSwitcher.Project))!, t.Value.desktop); }
+        if (t is not { } target) return;
+        var p = target.drag.Project;
+        try
+        {
+            switch (target.drag.Kind)
+            {
+                case Col.VsCode: _switcher.MoveVsCode(p, target.desktop); break;
+                case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop.Index); break;
+                case Col.Claude: _switcher.ReassignClaude(p.Desktop!, target.desktop); break;
+            }
+        }
         catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
         RefreshState();
+    }
+
+    /// <summary>Click on a Screen cell: pick the screen and snap position for that VS Code window, applied at once.</summary>
+    private void ShowScreenPicker(Point at)
+    {
+        var item = _list.GetItemAt(5, at.Y);
+        if (item?.Tag is not ProjectSwitcher.Project { VsCodeOpen: true } p) return;
+        var screens = MonitorRef.EnumerateAll();
+        var current = screens.FirstOrDefault(s => s.Handle == p.Screen?.Handle) ?? screens.First(s => s.IsPrimary);
+
+        var menu = new ContextMenuStrip();
+        for (int i = 0; i < screens.Count; i++)
+        {
+            var s = screens[i];
+            menu.Items.Add(new ToolStripMenuItem($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                (_, _) => Place(p, s, p.Snap)) { Checked = s.Handle == p.Screen?.Handle });
+        }
+        menu.Items.Add(new ToolStripSeparator());
+        foreach (var snap in SnapGeometry.All)
+            menu.Items.Add(new ToolStripMenuItem(SnapGeometry.Label(snap), null, (_, _) => Place(p, current, snap)) { Checked = snap == p.Snap });
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(_list, at);
+    }
+
+    private void Place(ProjectSwitcher.Project p, MonitorDescriptor screen, SnapMode snap)
+    {
+        try { _switcher.PlaceVsCode(p, screen, snap); }
+        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+        RefreshState();
+    }
+
+    private MenuStrip BuildMenu(Button closeIdle)
+    {
+        var menu = new MenuStrip { Dock = DockStyle.Top };
+
+        var file = new ToolStripMenuItem("&File");
+        file.DropDownItems.Add("Open settings.json", null, (_, _) => Program.OpenSettingsFile());
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add("E&xit DesktopNames", null, (_, _) =>
+        {
+            // After this dialog's modal loop has ended, not from inside it.
+            Close();
+            Program.Host!.BeginInvoke(() => Program.Host.Close());
+        });
+
+        var windows = new ToolStripMenuItem("&Windows");
+        var moveAll = new ToolStripMenuItem("Move all VS Code windows to");
+        var restore = new ToolStripMenuItem("Restore VS Code layout", null, (_, _) => { Program.Host!.RestoreVsCodeLayout(); RefreshState(); });
+        windows.DropDownOpening += (_, _) =>
+        {
+            moveAll.DropDownItems.Clear();
+            var screens = MonitorRef.EnumerateAll();
+            for (int i = 0; i < screens.Count; i++)
+            {
+                var s = screens[i];
+                moveAll.DropDownItems.Add($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                    (_, _) => { Program.Host!.MoveAllVsCodeToScreen(s); RefreshState(); });
+            }
+            restore.Text = $"Restore VS Code layout  ({_switcher.ScreenSetupName})";
+        };
+        windows.DropDownItems.Add(moveAll);
+        windows.DropDownItems.Add(restore);
+        windows.DropDownItems.Add("Put each VS Code on the desktop with its name", null, (_, _) =>
+        {
+            try { _switcher.AutoAssignByName(); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            RefreshState();
+        });
+        windows.DropDownItems.Add("Rename this screen setup…", null, (_, _) =>
+        {
+            string? name = InputDialog.Show("Screen setup", "Name for this monitor arrangement (e.g. work, home):", _switcher.ScreenSetupName, this);
+            if (!string.IsNullOrWhiteSpace(name)) _switcher.RenameScreenSetup(name.Trim());
+        });
+        windows.DropDownItems.Add(new ToolStripSeparator());
+        windows.DropDownItems.Add("Close idle desktops…", null, (_, _) => closeIdle.PerformClick());
+
+        var help = new ToolStripMenuItem("&Help");
+        help.DropDownItems.Add("Keyboard shortcuts…", null, (_, _) => Program.ShowShortcuts());
+        help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
+            "Type to filter. Enter opens the selected project on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
+            "Drag the # cell onto another row to reorder desktops.\n" +
+            "Drag the VS Code icon onto another row to move that window to its desktop.\n" +
+            "Drag the Claude cell onto another row to reassign that desktop's Claude sessions.\n" +
+            "Click the Screen cell to put the window on another screen or snap position.\n\n" +
+            "F2 renames the desktop, Del removes projects from the list. Click a column header to sort.\n" +
+            "Closing this window keeps DesktopNames running; File → Exit quits it.",
+            "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
+        help.DropDownItems.Add(new ToolStripSeparator());
+        help.DropDownItems.Add($"About DesktopNames…", null, (_, _) => MessageBox.Show(this,
+            $"DesktopNames {Program.GetBuildStamp()}\n\nNamed virtual desktops on the taskbar, Claude session status, and one desktop per project.",
+            "About DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
+
+        menu.Items.AddRange(new ToolStripItem[] { file, windows, help });
+        return menu;
     }
 
     private void DrawPill(Graphics g, Rectangle rect, string label, Color? fill, Color plainText)

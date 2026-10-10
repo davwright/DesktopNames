@@ -352,8 +352,8 @@ internal sealed class TaskbarOverlay : Form
 
         _contextMenu.Items.Add("New desktop  (Win+Ctrl+D)", null, (_, _) => _desktopService.CreateDesktop());
         _contextMenu.Items.Add("Close current desktop  (Win+Ctrl+F4)", null, (_, _) => _desktopService.RemoveCurrentDesktop());
-        _contextMenu.Items.Add("Arrange VS Code windows…", null,
-            (_, _) => Program.Host?.ShowArrangeWindowsDialog());
+        _contextMenu.Items.Add(LabelWithShortcut("Open DesktopNames window…", "OpenProjects"), null,
+            (_, _) => Program.Host?.BeginInvoke(() => Program.Host.ShowProjects()));
 
         var screens = MonitorRef.EnumerateAll();
         if (screens.Count > 1)

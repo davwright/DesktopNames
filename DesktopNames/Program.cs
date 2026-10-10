@@ -896,17 +896,8 @@ internal sealed class HostForm : Form
         if (_settings.IsDesktopHighlighted(desktopId)) _settings.ToggleDesktopHighlight(desktopId);
     }
 
-    /// <summary>
-    /// Overlay command: open the arrange-windows grid (desktops × screens) so the user can
-    /// drag each open VS Code window to where it should live, then OK to move + maximize +
-    /// remember. Replaces the old one-shot "move all to remembered" with an editable view.
-    /// </summary>
-    public void ShowArrangeWindowsDialog()
-    {
-        if (_vscodeTracker == null) return;
-        using var dlg = new ArrangeWindowsDialog(_desktopService, _settings, _vscodeTracker);
-        if (dlg.ShowDialog() == DialogResult.OK) RefreshAllOverlays();
-    }
+    /// <summary>Overlay command: open the DesktopNames window (the same one Win+J opens).</summary>
+    public void ShowProjects() => _projects?.ShowDialog();
 
     /// <summary>Overlay command: pull every open VS Code window onto one screen, each staying
     /// on its own virtual desktop and in its own snap position.</summary>

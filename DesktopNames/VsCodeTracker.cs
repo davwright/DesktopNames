@@ -90,7 +90,7 @@ internal sealed class VsCodeTracker : IDisposable
             target.MonitorY = screen.Monitor.Top;
             target.MonitorWidth = screen.Width;
             target.MonitorHeight = screen.Height;
-            target.Pinned = true;   // explicit, same as the arrange dialog — Scan must not undo it
+            target.Pinned = true;   // explicit, same as the Screen picker — Scan must not undo it
 
             _desktop.PlaceWindow(w.Hwnd, target, Guid.Empty);
             _settings.Workspaces[w.Workspace] = target;
@@ -182,7 +182,7 @@ internal sealed class VsCodeTracker : IDisposable
 
             _settings.Workspaces.TryGetValue(workspace, out var known);
 
-            // An assignment made by hand in the arrange dialog outranks anything observed.
+            // An assignment made by hand (Screen picker, move-all) outranks anything observed.
             // The desktop was already protected above, but the monitor, snap and placement
             // below were not: they were rewritten from the live window every 2s, so a screen
             // the window never actually reached (or a later nudge) silently undid the choice.

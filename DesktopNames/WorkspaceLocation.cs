@@ -44,7 +44,7 @@ internal sealed class WorkspaceLocation
     public SnapMode Snap { get; set; }
 
     /// <summary>
-    /// This entry was assigned by hand in the arrange dialog, not merely observed. The 2s
+    /// This entry was assigned by hand (the Screen picker), not merely observed. The 2s
     /// scan leaves a pinned entry alone, so a choice survives a placement that silently
     /// failed. Physically moving the window (to another desktop or another screen) retires
     /// the pin and passive learning resumes.
