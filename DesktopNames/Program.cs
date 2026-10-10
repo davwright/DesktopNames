@@ -714,55 +714,94 @@ internal sealed class HostForm : Form
     }
 
     public HotkeyManager? Hotkeys => _hotkeys;
+    public ProjectSwitcher? Projects => _projects;
     public int OverlayCount => _overlays.Count;
+    public CommandRegistry Commands { get; } = new();
+
+    /// <summary>Desktop by 1-based number from a command's "desktop" param, else the current one.</summary>
+    private Guid DesktopArg(CommandArgs a)
+    {
+        if (a.Int("desktop") is not int n) return _desktopService.GetCurrentDesktopId();
+        var list = _desktopService.GetDesktops();
+        if (n < 1 || n > list.Count) throw new ArgumentException($"no desktop {n}; there are {list.Count}");
+        return list[n - 1].Id;
+    }
+
+    private DesktopInfo DesktopNumber(CommandArgs a)
+    {
+        int n = a.RequiredInt("n");
+        var list = _desktopService.GetDesktops();
+        if (n < 1 || n > list.Count) throw new ArgumentException($"no desktop {n}; there are {list.Count}");
+        return list[n - 1];
+    }
+
+    /// <summary>
+    /// Every user action, by id. Hotkeys and the control channel both run these, so an agent can
+    /// do anything a hotkey does through the same code. Commands run on the UI thread.
+    /// </summary>
+    private void BuildCommands()
+    {
+        var c = Commands;
+        string[] none = Array.Empty<string>(), desktop = { "desktop" }, n = { "n" };
+        const string desktopDoc = "desktop: 1-based number, default the current desktop";
+        const string nDoc = "n: 1-based desktop number";
+        c.Add(new("desktop.moveLeft",  "Move desktop left",  none, "", _ => { _desktopService.MoveCurrentDesktopBy(-1); RefreshAllOverlays(); return null; }));
+        c.Add(new("desktop.moveRight", "Move desktop right", none, "", _ => { _desktopService.MoveCurrentDesktopBy(1);  RefreshAllOverlays(); return null; }));
+        c.Add(new("desktop.moveFirst", "Make desktop first", none, "", _ => { _desktopService.MoveCurrentDesktopToFirst(); RefreshAllOverlays(); return null; }));
+        c.Add(new("desktop.moveLast",  "Make desktop last",  none, "", _ => { _desktopService.MoveCurrentDesktopToLast();  RefreshAllOverlays(); return null; }));
+        c.Add(new("overlay.toggleHide", "Toggle overlay hide", none, "", _ => { _settings.Hidden = !_settings.Hidden; _settings.Save(); return new { hidden = _settings.Hidden }; }));
+        c.Add(new("desktop.menu", "Open menu for current desktop", none, "", _ =>
+        {
+            // Pops the right-click context menu for the current desktop; the first overlay with a
+            // button for it wins.
+            foreach (var o in _overlays.ToArray())
+                if (!o.IsDisposed && o.TryOpenContextMenuForCurrentDesktop()) return null;
+            return null;
+        }));
+        c.Add(new("desktop.toggleBlue", "Toggle blue highlight", desktop, desktopDoc, a => { var id = DesktopArg(a); ToggleBlueHighlight(id); return new { blue = _settings.IsDesktopHighlighted(id) }; }));
+        c.Add(new("desktop.clearHighlight", "Clear highlight", desktop, desktopDoc, a => { ClearHighlight(DesktopArg(a)); return null; }));
+        c.Add(new("claude.prevWaiting", "Previous waiting Claude", none, "", _ => { JumpToWaitingClaude(-1); return null; }));
+        c.Add(new("claude.nextWaiting", "Next waiting Claude",     none, "", _ => { JumpToWaitingClaude(+1); return null; }));
+        // Deferred: the window is modal, and its loop must not run inside the hotkey or pipe call.
+        c.Add(new("projects.open", "Open the DesktopNames window", none, "", _ => { BeginInvoke(() => _projects?.ShowDialog()); return null; }));
+        c.Add(new("desktop.switch", "Switch to desktop", n, nDoc, a => { _desktopService.SwitchToDesktop(DesktopNumber(a)); RefreshAllOverlays(); return null; }));
+        c.Add(new("window.moveToDesktop", "Move the focused window to desktop", n, nDoc, a =>
+        {
+            var d = DesktopNumber(a);
+            if (!_desktopService.MoveWindowToDesktop(NativeMethods.GetForegroundWindow(), d.Id))
+                throw new InvalidOperationException($"could not move the focused window to desktop {d.Index + 1}");
+            return null;
+        }));
+    }
 
     private void RegisterHotkeys()
     {
+        BuildCommands();
         _hotkeys = new HotkeyManager(this);
-        // Hotkey actions run on the UI/STA thread (we're inside WndProc), so direct COM calls are safe.
-        TryRegister("MoveDesktopLeft",  "Move desktop left",  () => { _desktopService.MoveCurrentDesktopBy(-1); RefreshAllOverlays(); });
-        TryRegister("MoveDesktopRight", "Move desktop right", () => { _desktopService.MoveCurrentDesktopBy(1);  RefreshAllOverlays(); });
-        TryRegister("MoveDesktopFirst", "Make desktop first", () => { _desktopService.MoveCurrentDesktopToFirst(); RefreshAllOverlays(); });
-        TryRegister("MoveDesktopLast",  "Make desktop last",  () => { _desktopService.MoveCurrentDesktopToLast();  RefreshAllOverlays(); });
-        TryRegister("ToggleHide",       "Toggle overlay hide", () => { _settings.Hidden = !_settings.Hidden; _settings.Save(); });
-        TryRegister("OpenCurrentDesktopMenu", "Open menu for current desktop", () =>
-        {
-            // Pops the right-click context menu for the current desktop, with the
-            // per-desktop section (Rename / Select / Make first / Notes / etc.) pre-populated.
-            // Tries overlays in order; the first one with a button for the current desktop wins.
-            foreach (var o in _overlays.ToArray())
-            {
-                if (!o.IsDisposed && o.TryOpenContextMenuForCurrentDesktop()) return;
-            }
-        });
-        TryRegister("ToggleBlueHighlight", "Toggle blue highlight", () => ToggleBlueHighlight(_desktopService.GetCurrentDesktopId()));
-        TryRegister("ClearHighlight", "Clear highlight", () => ClearHighlight(_desktopService.GetCurrentDesktopId()));
-        TryRegister("PrevWaitingDesktop", "Previous waiting Claude", () => JumpToWaitingClaude(-1));
-        TryRegister("NextWaitingDesktop", "Next waiting Claude",     () => JumpToWaitingClaude(+1));
-        // Deferred out of WndProc so the modal loop doesn't run inside the hotkey dispatch.
-        TryRegister("OpenProjects", "Project switcher", () => BeginInvoke(() => _projects?.ShowDialog()));
-
-        // Switch-to-desktop hotkeys. Loop variable must be captured into a local
-        // so each handler closure binds its own index.
+        // settings.json Hotkeys key → command id (+ fixed params). Hotkey handlers run on the UI thread.
+        Bind("MoveDesktopLeft", "desktop.moveLeft");
+        Bind("MoveDesktopRight", "desktop.moveRight");
+        Bind("MoveDesktopFirst", "desktop.moveFirst");
+        Bind("MoveDesktopLast", "desktop.moveLast");
+        Bind("ToggleHide", "overlay.toggleHide");
+        Bind("OpenCurrentDesktopMenu", "desktop.menu");
+        Bind("ToggleBlueHighlight", "desktop.toggleBlue");
+        Bind("ClearHighlight", "desktop.clearHighlight");
+        Bind("PrevWaitingDesktop", "claude.prevWaiting");
+        Bind("NextWaitingDesktop", "claude.nextWaiting");
+        Bind("OpenProjects", "projects.open");
         for (int i = 1; i <= 20; i++)
         {
-            int idx = i;
-            TryRegister($"SwitchToDesktop{idx}", $"Switch to desktop {idx}", () =>
-            {
-                var list = _desktopService.GetDesktops();
-                if (idx - 1 < list.Count)
-                {
-                    _desktopService.SwitchToDesktop(list[idx - 1]);
-                    RefreshAllOverlays();
-                }
-            });
-            TryRegister($"MoveWindowToDesktop{idx}", $"Move window to desktop {idx}", () =>
-            {
-                var list = _desktopService.GetDesktops();
-                if (idx - 1 < list.Count)
-                    _desktopService.MoveWindowToDesktop(NativeMethods.GetForegroundWindow(), list[idx - 1].Id);
-            });
+            Bind($"SwitchToDesktop{i}", "desktop.switch", new { n = i }, $"Switch to desktop {i}");
+            Bind($"MoveWindowToDesktop{i}", "window.moveToDesktop", new { n = i }, $"Move window to desktop {i}");
         }
+    }
+
+    private void Bind(string key, string commandId, object? fixedParams = null, string? description = null)
+    {
+        var args = fixedParams == null ? CommandArgs.Empty : CommandRegistry.Args(commandId, Commands, fixedParams);
+        description ??= Commands.All.First(c => c.Id == commandId).Label;
+        TryRegister(key, description, () => Commands.Execute(commandId, args));
     }
 
     private void TryRegister(string key, string description, Action handler)

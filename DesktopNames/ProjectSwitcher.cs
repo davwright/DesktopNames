@@ -88,6 +88,9 @@ internal sealed class ProjectSwitcher : IDisposable
 
     private void OnSessionsChanged(Guid _) => _dialog?.RefreshState();
 
+    /// <summary>The DesktopNames window while it is open (for the control channel).</summary>
+    public ProjectsDialog? Dialog => _dialog;
+
     public static void ReportError(Exception ex)
     {
         Log.Projects($"switcher failed: {ex}");
@@ -511,6 +514,7 @@ internal sealed class ProjectsDialog : Form
     private SessionState.SessionRef? _pressSession;
     private readonly ToolTip _tip = new() { UseAnimation = false, UseFading = false };
     private string? _tipKey;
+    private string _tipText = "";
     private int _dropIndex = -1, _dropCol = -1;
 
     /// <summary>Set when the user picked an existing row.</summary>
@@ -910,6 +914,7 @@ internal sealed class ProjectsDialog : Form
         if (key == _tipKey) return;
         _tipKey = key;
         string text = hit is { } x ? SessionState.StripTipMarkers(_switcher.DescribeSession(x.session)) : "";
+        _tipText = text;
         if (text.Length == 0) { _tip.Hide(_list); return; }
         _tip.Show(text, _list, pt.X + 16, pt.Y + 20, 30_000);
     }
@@ -935,6 +940,61 @@ internal sealed class ProjectsDialog : Form
 
     /// <summary>Mouse over the column header (x in header pixels), or null when it left.
     /// Over a screen column, show the monitor arrangement with that screen highlighted.</summary>
+    // ---- Control channel hooks: the same code paths the mouse takes, without moving the mouse. ----
+
+    public IntPtr ScreenPopupHandle => _screenPopup.Visible ? _screenPopup.Handle
+        : throw new InvalidOperationException("the screen popup is not showing; hover a screen header first");
+
+    /// <summary>What each visible row shows, by column header.</summary>
+    public List<Dictionary<string, object?>> VisibleRows() =>
+        _list.Items.Cast<ListViewItem>().Select(item =>
+        {
+            var p = (ProjectSwitcher.Row)item.Tag!;
+            var row = new Dictionary<string, object?>();
+            for (int i = 0; i < _cols.Count; i++)
+            {
+                var c = _cols[i];
+                row[c.Header] = c.Kind switch
+                {
+                    Col.Claude => p.Sessions.Select(s => $"{s.State.ToString().ToLowerInvariant()} {s.Label}").ToList(),
+                    Col.Screen => p.VsCodeOpen && p.Screen?.Handle == c.Screen!.Handle ? $"VS Code · {SnapGeometry.Label(p.Snap)}" : null,
+                    _ => item.SubItems[i].Text,
+                };
+            }
+            row["selected"] = item.Selected;
+            return row;
+        }).ToList();
+
+    private int ColumnIndex(string header)
+    {
+        int i = _cols.FindIndex(c => c.Header.Equals(header, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 ? i : throw new ArgumentException($"no column '{header}'; columns: {string.Join(", ", _cols.Select(c => c.Header))}");
+    }
+
+    /// <summary>Hover the middle of a cell (a Claude cell: its first pill) and return the tooltip that shows.</summary>
+    public string HoverCell(int row, string column)
+    {
+        if (row < 0 || row >= _list.Items.Count) throw new ArgumentException($"no row {row}; there are {_list.Items.Count}");
+        int col = ColumnIndex(column);
+        var cell = _list.Items[row].SubItems[col].Bounds;
+        var p = (ProjectSwitcher.Row)_list.Items[row].Tag!;
+        var at = _cols[col].Kind == Col.Claude && p.Sessions.Count > 0
+            ? ClaudePills(cell, p.Sessions.Count)[0] : cell;
+        _tipKey = null;
+        UpdateTip(new Point(at.X + at.Width / 2, at.Y + at.Height / 2));
+        return _tipText;
+    }
+
+    /// <summary>Hover a column header; for a screen column the layout popup shows, otherwise it hides.</summary>
+    public object HoverHeader(string header)
+    {
+        int col = ColumnIndex(header);
+        int left = 0;
+        for (int i = 0; i < col; i++) left += _list.Columns[i].Width;
+        OnHeaderHover(left + _list.Columns[col].Width / 2);
+        return new { popupShowing = _screenPopup.Visible, screen = _cols[col].Screen?.Number };
+    }
+
     private void OnHeaderHover(int? x)
     {
         int col = -1;
@@ -1209,7 +1269,7 @@ internal sealed class ProjectsDialog : Form
             DoubleBuffered = true;
             BackColor = SystemColors.Window;
             Font = new Font("Segoe UI", 9f);
-            Size = new Size(480, 300);
+            Size = new Size(480, 340);
         }
 
         protected override bool ShowWithoutActivation => true;

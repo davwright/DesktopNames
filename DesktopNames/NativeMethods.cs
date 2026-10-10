@@ -85,6 +85,12 @@ internal static class NativeMethods
     public const uint TME_LEAVE = 0x2;
     public const int WM_MOUSEMOVE = 0x0200, WM_MOUSELEAVE = 0x02A3, LVM_GETHEADER = 0x101F;
 
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+    /// <summary>PrintWindow flag: render DirectComposition content too, so modern windows aren't black.</summary>
+    public const uint PW_RENDERFULLCONTENT = 0x2;
+
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", SetLastError = true)]

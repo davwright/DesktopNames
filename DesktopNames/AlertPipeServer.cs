@@ -17,6 +17,7 @@ internal sealed class AlertPipeServer : IDisposable
     public const string PipeName = "DesktopNames";
 
     private readonly HostForm _host;
+    private readonly ControlChannel _control;
     private readonly SessionState _state;
     private readonly Settings _settings;
     private readonly DesktopService _desktop;
@@ -37,6 +38,7 @@ internal sealed class AlertPipeServer : IDisposable
     public AlertPipeServer(HostForm host, SessionState state, Settings settings, DesktopService desktop)
     {
         _host = host;
+        _control = new ControlChannel(host);
         _state = state;
         _settings = settings;
         _desktop = desktop;
@@ -104,6 +106,19 @@ internal sealed class AlertPipeServer : IDisposable
         {
             Log.Pipe("rejected: empty-message");
             WriteReply(pipe, new ReplyJson { Ok = false, Error = "empty-message" });
+            return;
+        }
+
+        // Agent control requests share the pipe: {"type":"control","method":…}.
+        if (ControlChannel.IsControl(line!))
+        {
+            string controlReply = _control.Handle(line!);
+            try
+            {
+                using var writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+                writer.WriteLine(controlReply);
+            }
+            catch (IOException) { Log.Pipe("control reply not delivered: client gone"); }
             return;
         }
 
