@@ -39,6 +39,12 @@ internal sealed class Settings
     public string ProjectsRoot { get; set; } = @"C:\git\projects";
 
     /// <summary>
+    /// Projects removed from the switcher list (<see cref="FolderKey"/> → when). A project
+    /// reappears once it is used again after that, so removal only clears out the ancient ones.
+    /// </summary>
+    public Dictionary<string, DateTime> HiddenProjects { get; set; } = new();
+
+    /// <summary>
     /// A project desktop (one VS Code has lived on) is removed once it has had no VS Code window
     /// and no Claude session for this long. 0 disables recycling.
     /// </summary>

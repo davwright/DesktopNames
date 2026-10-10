@@ -989,14 +989,14 @@ internal sealed class TaskbarOverlay : Form
     }
 
     /// <summary>Pick black or white text based on the perceived brightness of the background.</summary>
-    private static Color PickContrastText(Color bg)
+    internal static Color PickContrastText(Color bg)
     {
         // ITU-R BT.601 luma: works well for our saturated-color palette.
         double luma = (0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B) / 255.0;
         return luma > 0.55 ? Color.FromArgb(20, 20, 20) : Color.White;
     }
 
-    private static void DrawCountBadge(Graphics g, Rectangle btnRect, int count)
+    internal static void DrawCountBadge(Graphics g, Rectangle btnRect, int count)
     {
         const int diameter = 14;
         var badgeRect = new Rectangle(btnRect.Right - diameter - 2, btnRect.Top + 2, diameter, diameter);
@@ -1012,7 +1012,7 @@ internal sealed class TaskbarOverlay : Form
             TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     }
 
-    private static GraphicsPath RoundedRect(Rectangle rect, int radius)
+    internal static GraphicsPath RoundedRect(Rectangle rect, int radius)
     {
         var path = new GraphicsPath();
         int d = radius * 2;
