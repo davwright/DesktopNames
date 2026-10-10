@@ -60,6 +60,21 @@ internal sealed class WorkspaceFolderIndex
         return TryWalkDown(norm);
     }
 
+    /// <summary>
+    /// rootNames of the open workspaces that have exactly <paramref name="folder"/> as one of
+    /// their root folders — no walking up or down, so a subfolder doesn't inherit its parent's
+    /// window. Rescans on a miss, within the same cooldown.
+    /// </summary>
+    public IReadOnlyCollection<string> FindRootNamesExact(string folder)
+    {
+        string norm = NormalizePath(folder);
+        if (_pathToRootNames.TryGetValue(norm, out var hits)) return hits;
+        if (DateTime.UtcNow - _lastScanUtc <= ScanCooldown) return Array.Empty<string>();
+        Rescan();
+        _lastScanUtc = DateTime.UtcNow;
+        return _pathToRootNames.TryGetValue(norm, out hits) ? hits : Array.Empty<string>();
+    }
+
     /// <summary>Collect every rootName known for any workspace whose folder is under cwd.</summary>
     private IReadOnlyCollection<string> TryWalkDown(string cwd)
     {

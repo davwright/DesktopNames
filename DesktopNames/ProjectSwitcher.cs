@@ -108,7 +108,13 @@ internal sealed class ProjectSwitcher : IDisposable
         foreach (var (folder, lastUsed) in folders)
         {
             string name = Path.GetFileName(folder);
+            // Its own window (titled with the folder name), else a multi-folder workspace that contains it.
             var window = windows.FirstOrDefault(w => w.Workspace.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (window.Hwnd == IntPtr.Zero)
+            {
+                var containing = Program.Host!.WorkspaceRootNamesFor(folder);
+                window = windows.FirstOrDefault(w => containing.Contains(w.Workspace));
+            }
             // Where its VS Code window is, when open (so renames and drags are followed); else the desktop named after it.
             var desktop = (window.Hwnd != IntPtr.Zero ? desktops.FirstOrDefault(d => d.Id == window.DesktopId) : null)
                        ?? desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -143,7 +149,7 @@ internal sealed class ProjectSwitcher : IDisposable
     /// <summary>Move a project's open VS Code window to another desktop (dragged in the switcher).</summary>
     public void MoveVsCode(Project project, DesktopInfo target)
     {
-        IntPtr hwnd = HostForm.FindVsCodeWindow(new[] { project.Name });
+        IntPtr hwnd = project.VsCodeHwnd;
         if (hwnd == IntPtr.Zero) throw new InvalidOperationException($"The '{project.Name}' VS Code window is not open.");
         if (!_desktop.MoveWindowToDesktop(hwnd, target.Id))
             throw new InvalidOperationException($"Could not move the '{project.Name}' VS Code window to desktop {target.Index + 1}.");
@@ -272,7 +278,7 @@ internal sealed class ProjectSwitcher : IDisposable
     private void Open(string folder)
     {
         var project = Describe(new() { (folder, DateTime.UtcNow) })[0];
-        IntPtr hwnd = HostForm.FindVsCodeWindow(new[] { project.Name });
+        IntPtr hwnd = project.VsCodeHwnd;
 
         bool created = project.Desktop == null;
         Guid target = project.Desktop?.Id ?? _desktop.CreateNamedDesktop(project.Name);
