@@ -543,6 +543,9 @@ internal sealed class AlertPipeServer : IDisposable
     /// <summary>Workspace folders of the VS Code window a Claude session runs in (exact, via the ide lock).</summary>
     public IReadOnlyList<string> SessionWorkspaceFolders(string sessionId) => _claudeSessions.WorkspaceFoldersFor(sessionId);
 
+    /// <summary>How a live Claude session was started (terminal or VS Code panel), its pid and cwd.</summary>
+    public ClaudeSessionRegistry.LiveSession? LiveSession(string sessionId) => _claudeSessions.Live(sessionId);
+
     public IReadOnlyCollection<string> RootNameCandidatesFor(string? cwd)
     {
         var set = new HashSet<string>(StringComparer.Ordinal);

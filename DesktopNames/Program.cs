@@ -940,6 +940,9 @@ internal sealed class HostForm : Form
         _alertServer?.FoldersForWindowTitle(rootName) ?? Array.Empty<string>();
 
     /// <summary>Workspace folders of the VS Code window a Claude session runs in.</summary>
+    /// <summary>How a live Claude session was started (terminal or VS Code panel), its pid and cwd.</summary>
+    public ClaudeSessionRegistry.LiveSession? LiveSession(string sessionId) => _alertServer?.LiveSession(sessionId);
+
     public IReadOnlyList<string> SessionWorkspaceFolders(string sessionId) =>
         _alertServer?.SessionWorkspaceFolders(sessionId) ?? Array.Empty<string>();
 

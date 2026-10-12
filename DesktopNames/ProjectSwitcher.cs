@@ -13,9 +13,11 @@ namespace DesktopNames;
 internal sealed class ProjectSwitcher : IDisposable
 {
     /// <summary>
-    /// What runs where: one row per open VS Code window, per Claude session no window claims, and
-    /// per project folder with neither. The chain is desktop → VS Code window → its Claude
-    /// sessions → its folders. <see cref="Folders"/> empty means the window or session could not
+    /// What runs where: one row per open VS Code window, per terminal window running Claude, per
+    /// Claude session no window claims, and per project folder with neither. The chain is
+    /// desktop → window (VS Code or terminal) → its Claude sessions → its folders.
+    /// <see cref="IsTerminal"/>: the row's window is a terminal; <see cref="TerminalSessionIds"/>:
+    /// sessions started from a terminal (here or in VS Code's integrated terminal). <see cref="Folders"/> empty means the window or session could not
     /// be linked to a folder; <see cref="FoldersAmbiguous"/> means two windows share a title and
     /// nothing tells which folder is which.
     /// </summary>
@@ -23,12 +25,16 @@ internal sealed class ProjectSwitcher : IDisposable
         DesktopInfo? Desktop, bool Unresolved,
         IntPtr VsCodeHwnd, string? WindowTitle, MonitorDescriptor? Screen, SnapMode Snap,
         IReadOnlyList<SessionState.SessionRef> Sessions, string? Glyph,
-        IReadOnlyList<string> Folders, bool FoldersAmbiguous, DateTime LastUsedUtc)
+        IReadOnlyList<string> Folders, bool FoldersAmbiguous, DateTime LastUsedUtc,
+        bool IsTerminal, IReadOnlySet<string> TerminalSessionIds)
     {
+        /// <summary>The row has a window (VS Code or, with <see cref="IsTerminal"/>, a terminal).</summary>
         public bool VsCodeOpen => VsCodeHwnd != IntPtr.Zero;
         /// <summary>The folder Open, Remove and pins act on.</summary>
         public string? Folder => Folders.Count > 0 ? Folders[0] : null;
-        public string Name => WindowTitle ?? (Folder != null ? Path.GetFileName(Folder) : "");
+        /// <summary>A VS Code row is named by its title; a terminal's title says nothing, so by its folder.</summary>
+        public string Name => IsTerminal ? (Folder != null ? Path.GetFileName(Folder) : WindowTitle ?? "")
+                            : WindowTitle ?? (Folder != null ? Path.GetFileName(Folder) : "");
         public int ClaudeCount => Sessions.Count;
         /// <summary>Most urgent state among this row's sessions, the taskbar's order.</summary>
         public StateKind ClaudeState =>
@@ -126,7 +132,32 @@ internal sealed class ProjectSwitcher : IDisposable
         public VsCodeTracker.OpenWindow? Window;
         public List<string> Folders = new();
         public bool Ambiguous;
+        public bool Terminal;
         public List<SessionState.SessionRef> Sessions = new();
+        public HashSet<string> TerminalIds = new();
+    }
+
+    /// <summary>Visible, titled, non-tool top-level windows by owning process — where a terminal
+    /// Claude's window is found by walking up its parents.</summary>
+    private static Dictionary<int, IntPtr> TopLevelWindowsByPid()
+    {
+        var map = new Dictionary<int, IntPtr>();
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd) || NativeMethods.GetWindowTextLength(hwnd) == 0) return true;
+            if ((NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOOLWINDOW) != 0) return true;
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+            map.TryAdd((int)pid, hwnd);
+            return true;
+        }, IntPtr.Zero);
+        return map;
+    }
+
+    private static string WindowTitle(IntPtr hwnd)
+    {
+        var sb = new System.Text.StringBuilder(NativeMethods.GetWindowTextLength(hwnd) + 1);
+        NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
+        return sb.ToString();
     }
 
     private static bool SameFolder(string a, string b) => Settings.FolderKey(a) == Settings.FolderKey(b);
@@ -141,7 +172,9 @@ internal sealed class ProjectSwitcher : IDisposable
     /// Build the rows from what is actually running. 1: every open VS Code window, with the root
     /// folders of the workspace its title names. 2: every Claude session, onto the window row on
     /// its desktop whose folders its own window has (exact, via the ide lock), else whose folder
-    /// its cwd is in; a session no window claims gets its own row on its desktop. 3: every
+    /// its cwd is in; a session no window claims gets its own row on its desktop. A Claude started
+    /// in a terminal window gets that window as its row (1b); one in VS Code's integrated terminal
+    /// joins that VS Code by its cwd. 3: every
     /// project folder nothing above has, on the desktop named after it if there is one. 4: every
     /// desktop that still has no row, as an empty desktop.
     /// </summary>
@@ -157,6 +190,12 @@ internal sealed class ProjectSwitcher : IDisposable
             foreach (var id in desktops.Select(d => d.Id).Append(SessionState.UnresolvedDesktopId))
                 foreach (var s in _sessions.GetSessions(id))
                     sessions.Add((s, id, host.SessionWorkspaceFolders(s.SessionId)));
+
+        var live = new Dictionary<string, ClaudeSessionRegistry.LiveSession?>();
+        foreach (var (s, _, _) in sessions) live[s.SessionId] = host.LiveSession(s.SessionId);
+        var terminalIds = live.Where(kv => kv.Value is { IsTerminal: true }).Select(kv => kv.Key).ToHashSet();
+        string? ProjectFolderFor(string cwd) => cwd.Length == 0 ? null
+            : folders.Select(f => f.folder).Where(f => IsUnder(cwd, f)).OrderByDescending(f => f.Length).FirstOrDefault() ?? cwd;
 
         var rows = new List<RowBuilder>();
         foreach (var w in windows)
@@ -189,14 +228,42 @@ internal sealed class ProjectSwitcher : IDisposable
             rows.Add(new RowBuilder { Desktop = desktops.FirstOrDefault(d => d.Id == w.DesktopId), Window = w, Folders = candidates, Ambiguous = ambiguous });
         }
 
+        // 1b. A Claude started in a terminal window: that window is its row, on the desktop it is on.
+        var placed = new HashSet<string>();
+        var windowsByPid = terminalIds.Count > 0 ? TopLevelWindowsByPid() : new();
+        foreach (var (s, _, _) in sessions)
+        {
+            if (live[s.SessionId] is not { IsTerminal: true } info) continue;
+            if (ClaudeSessionRegistry.FindTerminalHost(info.Pid, windowsByPid) is not { InVsCode: false } termHost) continue;
+            var row = rows.FirstOrDefault(r => r.Terminal && r.Window?.Hwnd == termHost.Window);
+            if (row == null)
+            {
+                Guid desk = _desktop.GetDesktopForWindow(termHost.Window);
+                string? folder = ProjectFolderFor(info.Cwd);
+                row = new RowBuilder
+                {
+                    Desktop = desktops.FirstOrDefault(d => d.Id == desk),
+                    Terminal = true,
+                    Window = new VsCodeTracker.OpenWindow(termHost.Window, WindowTitle(termHost.Window), desk, MonitorRef.FromHwnd(termHost.Window)),
+                    Folders = folder != null ? new List<string> { folder } : new(),
+                };
+                rows.Add(row);
+            }
+            row.Sessions.Add(s);
+            row.TerminalIds.Add(s.SessionId);
+            placed.Add(s.SessionId);
+        }
+
         foreach (var (s, id, sf) in sessions)
         {
-            var onDesktop = rows.Where(r => r.Window != null && r.Desktop?.Id == id).ToList();
+            if (placed.Contains(s.SessionId)) continue;
+            bool terminal = terminalIds.Contains(s.SessionId);
+            var onDesktop = rows.Where(r => r.Window != null && !r.Terminal && r.Desktop?.Id == id).ToList();
             var row = onDesktop.FirstOrDefault(r => r.Folders.Any(f => sf.Any(x => SameFolder(x, f))))
                    ?? onDesktop.FirstOrDefault(r => s.Cwd.Length > 0 && r.Folders.Any(f => IsUnder(s.Cwd, f)));
             if (row == null)
             {
-                string? folder = sf.Count > 0 ? sf[0] : null;
+                string? folder = sf.Count > 0 ? sf[0] : terminal ? ProjectFolderFor(live[s.SessionId]!.Cwd) : null;
                 row = rows.FirstOrDefault(r => r.Window == null && (r.Desktop?.Id ?? SessionState.UnresolvedDesktopId) == id
                                                && (folder == null ? r.Folders.Count == 0 : r.Folders.Any(f => SameFolder(f, folder))));
                 if (row == null)
@@ -205,12 +272,13 @@ internal sealed class ProjectSwitcher : IDisposable
                     {
                         Desktop = desktops.FirstOrDefault(d => d.Id == id),
                         Unresolved = id == SessionState.UnresolvedDesktopId,
-                        Folders = sf.ToList(),
+                        Folders = folder != null ? new List<string> { folder } : new(),
                     };
                     rows.Add(row);
                 }
             }
             row.Sessions.Add(s);
+            if (terminal) row.TerminalIds.Add(s.SessionId);
         }
 
         foreach (var (folder, _) in folders)
@@ -246,7 +314,7 @@ internal sealed class ProjectSwitcher : IDisposable
                                 .DefaultIfEmpty(DateTime.MinValue).Max();
             if (used == DateTime.MinValue && (r.Window != null || r.Sessions.Count > 0)) used = DateTime.UtcNow;
             return new Row(r.Desktop, r.Unresolved, r.Window?.Hwnd ?? IntPtr.Zero, r.Window?.Workspace, screen, snap,
-                r.Sessions, glyph, r.Folders, r.Ambiguous, used);
+                r.Sessions, glyph, r.Folders, r.Ambiguous, used, r.Terminal, r.TerminalIds);
         }).ToList();
     }
 
@@ -311,8 +379,11 @@ internal sealed class ProjectSwitcher : IDisposable
         loc.Snap = snap;
         loc.Pinned = true;
         _desktop.PlaceWindow(p.VsCodeHwnd, loc, Guid.Empty);
-        _settings.Workspaces[p.WindowTitle!] = loc;
-        _settings.Save();
+        if (!p.IsTerminal)
+        {
+            _settings.Workspaces[p.WindowTitle!] = loc;
+            _settings.Save();
+        }
         Log.Projects($"placed VS Code '{p.Name}' on screen {screen.Number} {snap}");
     }
 
@@ -769,7 +840,9 @@ internal sealed class ProjectsDialog : Form
         {
             case Col.Claude:
                 if (p.ClaudeCount == 0) break;
-                g.DrawIcon(_claudeIcon, new Rectangle(r.X + 4, r.Y + (r.Height - 16) / 2, 16, 16));
+                var lead = new Rectangle(r.X + 4, r.Y + (r.Height - 16) / 2, 16, 16);
+                if (p.Sessions.All(x => p.TerminalSessionIds.Contains(x.SessionId))) DrawTerminalIcon(g, lead);
+                else g.DrawIcon(_claudeIcon, lead);
                 // One pill per session, so two Claudes in one window are two things to hover and drag.
                 var pills = ClaudePills(r, p.Sessions.Count);
                 for (int i = 0; i < pills.Count; i++)
@@ -779,6 +852,8 @@ internal sealed class ProjectsDialog : Form
                     string label = pills[i].Width >= 46
                         ? word + (p.Sessions.Count == 1 && st == StateKind.Busy && p.Glyph is { } gl ? " " + gl : "")
                         : word[..1].ToUpperInvariant();
+                    // A Claude started from a terminal carries the terminal mark.
+                    if (p.TerminalSessionIds.Contains(p.Sessions[i].SessionId)) label = ">_ " + label;
                     DrawPill(g, pills[i], label, st == StateKind.None ? null : SessionFlyout.StateColor(st), fg);
                 }
                 break;
@@ -790,7 +865,9 @@ internal sealed class ProjectsDialog : Form
                 using (var path = TaskbarOverlay.RoundedRect(chip, 6))
                 using (var pen = new Pen(Color.FromArgb(140, 0, 122, 204)))
                     g.DrawPath(pen, path);
-                g.DrawIcon(_vscodeIcon, new Rectangle(chip.X + 4, chip.Y + (chip.Height - 16) / 2, 16, 16));
+                var icon = new Rectangle(chip.X + 4, chip.Y + (chip.Height - 16) / 2, 16, 16);
+                if (p.IsTerminal) DrawTerminalIcon(g, icon);
+                else g.DrawIcon(_vscodeIcon, icon);
                 TextRenderer.DrawText(g, SnapGeometry.Label(p.Snap), _list.Font,
                     new Rectangle(chip.X + 24, chip.Y, chip.Width - 26, chip.Height), fg, Text);
                 break;
@@ -992,8 +1069,8 @@ internal sealed class ProjectsDialog : Form
                 var c = _cols[i];
                 row[c.Header] = c.Kind switch
                 {
-                    Col.Claude => p.Sessions.Select(s => $"{s.State.ToString().ToLowerInvariant()} {s.Label}").ToList(),
-                    Col.Screen => p.VsCodeOpen && p.Screen?.Handle == c.Screen!.Handle ? $"VS Code · {SnapGeometry.Label(p.Snap)}" : null,
+                    Col.Claude => p.Sessions.Select(s => $"{s.State.ToString().ToLowerInvariant()} {s.Label}{(p.TerminalSessionIds.Contains(s.SessionId) ? " (terminal)" : "")}").ToList(),
+                    Col.Screen => p.VsCodeOpen && p.Screen?.Handle == c.Screen!.Handle ? $"{(p.IsTerminal ? "Terminal" : "VS Code")} · {SnapGeometry.Label(p.Snap)}" : null,
                     _ => item.SubItems[i].Text,
                 };
             }
@@ -1110,7 +1187,8 @@ internal sealed class ProjectsDialog : Form
             "Drag the # cell onto another row to reorder desktops.\n" +
             "Drag a VS Code chip onto another row to move the window to that desktop, and/or into another screen column to move it to that screen.\n" +
             "Click a VS Code chip to change its snap position (full screen, halves, quarters).\n" +
-            "Each Claude session is a pill: hover it for its recent messages, drag it onto another row to reassign that session.\n" +
+            "Each Claude session is a pill: hover it for its recent messages, drag it onto another row to reassign that session. " +
+            "A Claude started from a terminal shows >_; a terminal window running Claude is a row with a terminal chip.\n" +
             "Dropping a VS Code chip on a project with no desktop creates that desktop.\n" +
             "Hover a screen column's header to see the monitor arrangement.\n\n" +
             "F2 renames the desktop, Del removes projects from the list. Click a column header to sort.\n" +
@@ -1124,6 +1202,18 @@ internal sealed class ProjectsDialog : Form
 
         menu.Items.AddRange(new ToolStripItem[] { file, windows, help });
         return menu;
+    }
+
+    /// <summary>The terminal mark, drawn in code: a dark rounded square with a ">_" prompt.</summary>
+    private static void DrawTerminalIcon(Graphics g, Rectangle r)
+    {
+        using (var path = TaskbarOverlay.RoundedRect(r, 3))
+        using (var fill = new SolidBrush(Color.FromArgb(40, 44, 52)))
+            g.FillPath(fill, path);
+        using var pen = new Pen(Color.FromArgb(235, 235, 235), 1.6f);
+        float x = r.X + 3.5f, y = r.Y + 4.5f;
+        g.DrawLines(pen, new[] { new PointF(x, y), new PointF(x + 3.5f, y + 3.5f), new PointF(x, y + 7) });
+        g.DrawLine(pen, x + 5, y + 7.5f, x + 10, y + 7.5f);
     }
 
     private void DrawPill(Graphics g, Rectangle rect, string label, Color? fill, Color plainText)

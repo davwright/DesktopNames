@@ -79,6 +79,64 @@ internal sealed class ClaudeSessionRegistry
     /// unique hit, so a prefix collision falls through to cwd resolution instead of guessing.
     /// Returns 0 if none.
     /// </summary>
+    /// <summary>A live session as its registry file describes it. <see cref="Entrypoint"/> is
+    /// <c>cli</c> for a Claude started in a terminal, <c>claude-vscode</c> for the VS Code panel.</summary>
+    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd)
+    {
+        public bool IsTerminal => Entrypoint == "cli";
+    }
+
+    /// <summary>Where a terminal Claude is shown: a VS Code window's integrated terminal, or a
+    /// window of its own (Windows Terminal, a console), found by walking up its parent processes.</summary>
+    public sealed record TerminalHost(bool InVsCode, IntPtr Window);
+
+    /// <summary>The live registry entry for <paramref name="sessionId"/>, or null when it has none
+    /// (ended, or the prefix is ambiguous). Not cached: sessions end.</summary>
+    public LiveSession? Live(string sessionId)
+    {
+        var dir = Path.Combine(ClaudeDir, "sessions");
+        if (!Directory.Exists(dir)) return null;
+        LiveSession? found = null;
+        int hits = 0;
+        foreach (var file in Directory.GetFiles(dir, "*.json"))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
+            catch (Exception ex) when (ex is IOException or JsonException) { continue; } // half-written mid-launch
+            using (doc)
+            {
+                var r = doc.RootElement;
+                if (!r.TryGetProperty("sessionId", out var sid) || sid.GetString() is not { } full
+                    || !full.StartsWith(sessionId, StringComparison.OrdinalIgnoreCase)) continue;
+                hits++;
+                found = new LiveSession(
+                    r.TryGetProperty("pid", out var p) ? p.GetInt32() : 0,
+                    r.TryGetProperty("entrypoint", out var e) ? e.GetString() ?? "" : "",
+                    r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "");
+            }
+        }
+        return hits == 1 ? found : null;
+    }
+
+    /// <summary>
+    /// Walk up from a terminal Claude's process: an ancestor that is VS Code means its integrated
+    /// terminal; the first ancestor owning a visible titled top-level window is its own window.
+    /// <paramref name="windowsByPid"/> maps process id to such a window.
+    /// </summary>
+    public static TerminalHost? FindTerminalHost(int pid, IReadOnlyDictionary<int, IntPtr> windowsByPid)
+    {
+        for (int depth = 0; pid > 0 && depth < 10; depth++)
+        {
+            string name;
+            try { using var proc = System.Diagnostics.Process.GetProcessById(pid); name = proc.ProcessName; }
+            catch (ArgumentException) { return null; } // exited
+            if (name.Equals("Code", StringComparison.OrdinalIgnoreCase)) return new TerminalHost(true, IntPtr.Zero);
+            if (windowsByPid.TryGetValue(pid, out var hwnd)) return new TerminalHost(false, hwnd);
+            pid = GetParentPid(pid);
+        }
+        return null;
+    }
+
     private static int FindPid(string sessionId)
     {
         var dir = Path.Combine(ClaudeDir, "sessions");
