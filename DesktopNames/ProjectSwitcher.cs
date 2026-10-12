@@ -524,6 +524,12 @@ internal sealed class ProjectsDialog : Form
     private string _tipText = "";
     private int _dropIndex = -1, _dropCol = -1;
 
+    // Sorted by desktop, a desktop's rows sit together: its number and name show once, a line
+    // separates desktops and alternate desktops are tinted. Indexed by visible row.
+    private bool _grouped;
+    private readonly List<(bool start, bool odd)> _groups = new();
+    private static readonly Color GroupTint = Color.FromArgb(244, 246, 250);
+
     /// <summary>Set when the user picked an existing row.</summary>
     public ProjectSwitcher.Row? ChosenRow { get; private set; }
     /// <summary>Set when the user asked for a new project with this folder name.</summary>
@@ -679,12 +685,26 @@ internal sealed class ProjectsDialog : Form
                 Col.Folder => p.Folders.Count == 0 ? (p.VsCodeOpen || p.ClaudeCount > 0 ? "not linked" : p.Desktop != null ? "empty desktop" : "")
                             : p.FoldersAmbiguous ? string.Join(" | ", p.Folders) + "  (can't tell which)"
                             : string.Join("; ", p.Folders),
-                Col.LastUsed => SessionState.FormatAge(p.LastUsedUtc),
+                Col.LastUsed => p.LastUsedUtc == DateTime.MinValue ? "" : SessionState.FormatAge(p.LastUsedUtc),
                 _ => "",
             }).ToArray();
             _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(Key(p)) });
         }
         if (_list.SelectedItems.Count == 0 && _list.Items.Count > 0) _list.Items[0].Selected = true;
+
+        _grouped = _cols[_sortCol].Kind is Col.Number or Col.Desktop;
+        _groups.Clear();
+        Guid? previous = null;
+        bool odd = true;
+        for (int i = 0; i < _list.Items.Count; i++)
+        {
+            var desktop = ((ProjectSwitcher.Row)_list.Items[i].Tag!).Desktop?.Id;
+            bool start = i == 0 || desktop == null || desktop != previous;
+            if (start) odd = !odd;
+            _groups.Add((start, odd));
+            previous = desktop;
+        }
+
         for (int i = 0; i < _cols.Count; i++)
             _list.Columns[i].Text = _cols[i].Header + (i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
         _list.EndUpdate();
@@ -740,7 +760,8 @@ internal sealed class ProjectsDialog : Form
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         var r = e.Bounds;
         bool sel = e.Item.Selected;
-        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : _list.BackColor)) g.FillRectangle(bg, r);
+        var (groupStart, groupOdd) = _grouped ? _groups[e.ItemIndex] : (true, false);
+        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
         var fg = sel ? SystemColors.HighlightText : _list.ForeColor;
         const TextFormatFlags Text = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
 
@@ -779,12 +800,20 @@ internal sealed class ProjectsDialog : Form
                     TextRenderer.DrawText(g, e.SubItem!.Text, italic, Rectangle.Inflate(r, -4, 0), sel ? fg : SystemColors.GrayText, Text);
                 break;
 
+            case Col.Number or Col.Desktop when !groupStart:
+                // Shown once per desktop, on its first row.
+                break;
+
             default:
                 var font = c.Kind == Col.Project ? new Font(_list.Font, FontStyle.Bold) : _list.Font;
                 TextRenderer.DrawText(g, e.SubItem!.Text, font, Rectangle.Inflate(r, -4, 0), fg, Text);
                 if (font != _list.Font) font.Dispose();
                 break;
         }
+
+        if (_grouped && groupStart && e.ItemIndex > 0)
+            using (var line = new Pen(SystemColors.ControlDark, 1.5f))
+                g.DrawLine(line, r.Left, r.Top, r.Right, r.Top);
 
         if (e.ItemIndex == _dropIndex)
         {
@@ -969,6 +998,7 @@ internal sealed class ProjectsDialog : Form
                 };
             }
             row["selected"] = item.Selected;
+            row["groupStart"] = !_grouped || _groups[item.Index].start;
             return row;
         }).ToList();
 
