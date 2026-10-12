@@ -142,7 +142,8 @@ internal sealed class ProjectSwitcher : IDisposable
     /// folders of the workspace its title names. 2: every Claude session, onto the window row on
     /// its desktop whose folders its own window has (exact, via the ide lock), else whose folder
     /// its cwd is in; a session no window claims gets its own row on its desktop. 3: every
-    /// project folder nothing above has, on the desktop named after it if there is one.
+    /// project folder nothing above has, on the desktop named after it if there is one. 4: every
+    /// desktop that still has no row, as an empty desktop.
     /// </summary>
     public List<Row> Describe(List<(string folder, DateTime lastUsedUtc)> folders)
     {
@@ -218,6 +219,12 @@ internal sealed class ProjectSwitcher : IDisposable
                 string name = Path.GetFileName(folder);
                 rows.Add(new RowBuilder { Desktop = desktops.FirstOrDefault(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase)), Folders = { folder } });
             }
+
+        // Every desktop shows, even with nothing on it: a fresh Win+Ctrl+D desktop is somewhere to
+        // drop a VS Code or a Claude onto.
+        foreach (var d in desktops)
+            if (!rows.Any(r => r.Desktop?.Id == d.Id))
+                rows.Add(new RowBuilder { Desktop = d });
 
         var lastUsed = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         foreach (var (folder, t) in folders) lastUsed[Settings.FolderKey(folder)] = t;
@@ -669,7 +676,7 @@ internal sealed class ProjectsDialog : Form
                 Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : p.Unresolved ? "?" : "",
                 Col.Desktop => p.Desktop?.Name ?? (p.Unresolved ? "unresolved" : ""),
                 Col.Project => p.Name,
-                Col.Folder => p.Folders.Count == 0 ? (p.VsCodeOpen || p.ClaudeCount > 0 ? "not linked" : "")
+                Col.Folder => p.Folders.Count == 0 ? (p.VsCodeOpen || p.ClaudeCount > 0 ? "not linked" : p.Desktop != null ? "empty desktop" : "")
                             : p.FoldersAmbiguous ? string.Join(" | ", p.Folders) + "  (can't tell which)"
                             : string.Join("; ", p.Folders),
                 Col.LastUsed => SessionState.FormatAge(p.LastUsedUtc),
