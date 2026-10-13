@@ -158,6 +158,12 @@ internal static class NativeMethods
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int WS_EX_APPWINDOW = 0x00040000;
+    public const int WS_EX_TRANSPARENT = 0x00000020;
+    public const uint EVENT_OBJECT_DESTROY = 0x8001, EVENT_OBJECT_HIDE = 0x8003;
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    public const uint GA_ROOT = 2;
 
     public const uint GW_HWNDNEXT = 2;
 

@@ -13,6 +13,17 @@ internal sealed class Settings
     public bool OnlyOnMainDesktop { get; set; }
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
+    /// <summary>Screens (<see cref="MonitorDescriptor.Key"/>) whose overlay is turned off.</summary>
+    public List<string> HiddenScreens { get; set; } = new();
+
+    public bool IsScreenHidden(string screenKey) => HiddenScreens.Contains(screenKey);
+
+    public void ToggleScreenHidden(string screenKey)
+    {
+        if (!HiddenScreens.Remove(screenKey)) HiddenScreens.Add(screenKey);
+        Save();
+    }
+
     /// <summary>
     /// Desktops the user has manually marked blue (right-click → Blue highlight). A persistent
     /// user marker, distinct from the transient Claude status colors; survives restarts. A live

@@ -329,6 +329,17 @@ internal sealed class TaskbarOverlay : Form
             hideOnThis.Click += (_, _) => _settings.ToggleDesktopHidden(d.Id);
             _contextMenu.Items.Add(hideOnThis);
 
+            if (Screen is { } screen)
+            {
+                var hideOnScreen = new ToolStripMenuItem($"Hide overlay on this screen (Screen {screen.Number})")
+                {
+                    ToolTipText = "Turn it back on in the DesktopNames window: Overlay menu (Win+J)",
+                };
+                hideOnScreen.Click += (_, _) => Program.Host?.Commands.Execute("overlay.toggleScreen",
+                    System.Text.Json.JsonSerializer.SerializeToElement(new { screen = screen.Number }));
+                _contextMenu.Items.Add(hideOnScreen);
+            }
+
             _contextMenu.Items.Add(new ToolStripSeparator());
         }
 
@@ -585,13 +596,7 @@ internal sealed class TaskbarOverlay : Form
             }
         }
 
-        // Resolve current desktop for settings-based visibility checks
-        var currentDesktop = newDesktops.FirstOrDefault(d => d.IsCurrent);
-        bool hiddenByCurrentDesktop = currentDesktop != null && _settings.IsDesktopHidden(currentDesktop.Id);
-        bool hiddenByMainOnly = _settings.OnlyOnMainDesktop && currentDesktop != null && currentDesktop.Index != 0;
-        bool hiddenByFullscreen = IsFullscreenOnMonitor();
-
-        bool shouldHide = _settings.Hidden || hiddenByCurrentDesktop || hiddenByMainOnly || hiddenByFullscreen;
+        bool shouldHide = ShouldHide(newDesktops);
 
         // Keep desktop list in sync even while hidden (menu still uses it)
         bool desktopsChanged = DesktopsChanged(newDesktops);
@@ -630,6 +635,36 @@ internal sealed class TaskbarOverlay : Form
         if (dark != _isDarkMode) _isDarkMode = dark;
     }
 
+    /// <summary>Every reason the overlay is off: global hide, this desktop, main-only, this screen, a fullscreen app here.</summary>
+    private bool ShouldHide(List<DesktopInfo> desktops)
+    {
+        var currentDesktop = desktops.FirstOrDefault(d => d.IsCurrent);
+        bool hiddenByCurrentDesktop = currentDesktop != null && _settings.IsDesktopHidden(currentDesktop.Id);
+        bool hiddenByMainOnly = _settings.OnlyOnMainDesktop && currentDesktop != null && currentDesktop.Index != 0;
+        bool hiddenByScreen = ScreenKey is { } key && _settings.IsScreenHidden(key);
+        return _settings.Hidden || hiddenByCurrentDesktop || hiddenByMainOnly || hiddenByScreen || IsFullscreenOnMonitor();
+    }
+
+    private string? _screenKey;
+
+    /// <summary>This overlay's screen, as stored in <see cref="Settings.HiddenScreens"/>. Overlays are
+    /// rebuilt on a display change, so it never goes stale.</summary>
+    public string? ScreenKey => _screenKey ??= Screen?.Key;
+
+    public MonitorDescriptor? Screen => MonitorRef.EnumerateAll().FirstOrDefault(m => m.Handle == _taskbar.MonitorHandle);
+
+    /// <summary>
+    /// Cheap re-check driven by window show/hide/move events: hide at once when something covers
+    /// this screen; on the way back, run the full refresh so position and layout are current.
+    /// </summary>
+    public void RecheckVisibility()
+    {
+        if (IsDisposed) return;
+        bool hide = ShouldHide(_desktops);
+        if (hide && Visible) Visible = false;
+        else if (!hide && !Visible) RefreshDesktops();
+    }
+
     private bool IsFullscreenOnMonitor()
     {
         // Walk the global Z-order from top. The topmost candidate that sits on this
@@ -639,18 +674,38 @@ internal sealed class TaskbarOverlay : Form
         // Using GetForegroundWindow alone is wrong: on a multi-monitor setup, focus
         // can be on monitor B while monitor A has a fullscreen app — monitor A's
         // overlay must still hide. Walking Z-order makes the check per-monitor.
+        //
+        // A window covering the whole monitor counts even when it is tool-styled (a slideshow
+        // window can be); otherwise the first ordinary app window on the monitor decides. Our own
+        // windows and click-through (WS_EX_TRANSPARENT) overlays never count.
+        uint ownPid = (uint)Environment.ProcessId;
         IntPtr hwnd = NativeMethods.GetTopWindow(IntPtr.Zero);
         while (hwnd != IntPtr.Zero)
         {
-            if (hwnd != Handle && IsRelevantTopWindow(hwnd))
+            if (IsVisibleUncloakedTopLevel(hwnd))
             {
+                NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
                 var mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-                if (mon == _taskbar.MonitorHandle)
-                    return CoversMonitor(hwnd, mon);
+                if (pid != ownPid && mon == _taskbar.MonitorHandle)
+                {
+                    if (CoversMonitor(hwnd, mon)) return true;
+                    if (IsRelevantTopWindow(hwnd)) return false;
+                }
             }
             hwnd = NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDNEXT);
         }
         return false;
+    }
+
+    private static bool IsVisibleUncloakedTopLevel(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindowVisible(hwnd)) return false;
+        if ((NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE) & NativeMethods.WS_CHILD) != 0) return false;
+        if ((NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TRANSPARENT) != 0) return false;
+        if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return false;
+        var cls = new char[64];
+        var name = new string(cls, 0, NativeMethods.GetClassName(hwnd, cls, cls.Length));
+        return name is not ("Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW");
     }
 
     private static bool IsRelevantTopWindow(IntPtr hwnd)

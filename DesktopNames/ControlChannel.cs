@@ -126,6 +126,8 @@ internal sealed class ControlChannel
                 sessions = sessions?.GetSessions(d.Id).Select(s => new { s.SessionId, s.Label, state = s.State.ToString(), s.Cwd }),
             }),
             projectsWindowOpen = _host.Projects?.Dialog != null,
+            overlayHidden = _host.Settings.Hidden,
+            overlays = _host.Overlays.Select(o => new { screen = o.Screen?.Number, visible = o.Visible }),
         };
     }
 

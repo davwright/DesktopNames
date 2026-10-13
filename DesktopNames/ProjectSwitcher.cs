@@ -1177,6 +1177,9 @@ internal sealed class ProjectsDialog : Form
         windows.DropDownItems.Add(new ToolStripSeparator());
         windows.DropDownItems.Add("Close idle desktops…", null, (_, _) => closeIdle.PerformClick());
 
+        var overlay = BuildOverlayMenu();
+        var desktopMenu = BuildDesktopMenu();
+
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("Keyboard shortcuts…", null, (_, _) => Program.ShowShortcuts());
         help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
@@ -1200,8 +1203,92 @@ internal sealed class ProjectsDialog : Form
             $"DesktopNames {Program.GetBuildStamp()}\n\nNamed virtual desktops on the taskbar, Claude session status, and one desktop per project.",
             "About DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
 
-        menu.Items.AddRange(new ToolStripItem[] { file, windows, help });
+        menu.Items.AddRange(new ToolStripItem[] { file, desktopMenu, windows, overlay, help });
         return menu;
+    }
+
+    /// <summary>Run a command from a menu item; errors are shown, and the rows refresh either way.</summary>
+    private void Run(string command, object? args = null)
+    {
+        try { Program.Host!.Commands.Execute(command, args == null ? null : System.Text.Json.JsonSerializer.SerializeToElement(args)); }
+        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+        RefreshState();
+    }
+
+    /// <summary>The taskbar overlay's settings — reachable here even when every overlay is hidden.</summary>
+    private ToolStripMenuItem BuildOverlayMenu()
+    {
+        var overlay = new ToolStripMenuItem("&Overlay");
+        overlay.DropDownOpening += (_, _) =>
+        {
+            var settings = Program.Host!.Settings;
+            overlay.DropDownItems.Clear();
+            overlay.DropDownItems.Add(new ToolStripMenuItem("Show overlay", null, (_, _) => Run("overlay.toggleHide"))
+                { Checked = !settings.Hidden, ShortcutKeyDisplayString = "Win+Alt+H" });
+            overlay.DropDownItems.Add(new ToolStripMenuItem("Only on the first desktop", null, (_, _) => Run("overlay.toggleMainOnly"))
+                { Checked = settings.OnlyOnMainDesktop });
+            overlay.DropDownItems.Add(new ToolStripSeparator());
+            for (int i = 0; i < _screens.Count; i++)
+            {
+                var screen = _screens[i];
+                overlay.DropDownItems.Add(new ToolStripMenuItem($"Show on {screen.Caption(i)}", null,
+                    (_, _) => Run("overlay.toggleScreen", new { screen = screen.Number }))
+                    { Checked = !settings.IsScreenHidden(screen.Key) });
+            }
+            overlay.DropDownItems.Add(new ToolStripSeparator());
+            overlay.DropDownItems.Add(new ToolStripMenuItem("Hides itself on a screen where an app is full screen") { Enabled = false });
+        };
+        overlay.DropDownItems.Add("(loading)");
+        return overlay;
+    }
+
+    /// <summary>What the taskbar tab's right-click menu does, for the selected row's desktop.</summary>
+    private ToolStripMenuItem BuildDesktopMenu()
+    {
+        var menu = new ToolStripMenuItem("&Desktop");
+        menu.DropDownOpening += (_, _) =>
+        {
+            menu.DropDownItems.Clear();
+            var settings = Program.Host!.Settings;
+            var sel = SelectedProjects();
+            var d = sel.Count == 1 ? sel[0].Desktop : null;
+            int count = Program.Host!.DesktopService.GetDesktops().Count;
+            object At(int n) => new { desktop = n };
+
+            ToolStripMenuItem Item(string text, Action act, bool enabled = true, bool check = false, string? keys = null) =>
+                new(text, null, (_, _) => act()) { Enabled = enabled && d != null, Checked = check, ShortcutKeyDisplayString = keys };
+
+            menu.DropDownItems.Add(new ToolStripMenuItem(d != null ? $"— {d.Index + 1}. {d.Name} —" : "— select a row —") { Enabled = false });
+            menu.DropDownItems.Add(Item("Rename…", RenameDesktop, keys: "F2"));
+            menu.DropDownItems.Add(Item("Notes…", () => EditNotes(d!)));
+            menu.DropDownItems.Add(Item("Blue highlight", () => Run("desktop.toggleBlue", At(d!.Index + 1)),
+                check: d != null && settings.IsDesktopHighlighted(d.Id), keys: "Shift+click tab"));
+            menu.DropDownItems.Add(Item("Clear highlight", () => Run("desktop.clearHighlight", At(d!.Index + 1)), keys: "Ctrl+Shift+click tab"));
+            menu.DropDownItems.Add(Item("Hide overlay on this desktop", () => Run("desktop.toggleOverlay", At(d!.Index + 1)),
+                check: d != null && settings.IsDesktopHidden(d.Id)));
+            menu.DropDownItems.Add(new ToolStripSeparator());
+            menu.DropDownItems.Add(Item("Make first", () => Run("desktop.moveTo", new { desktop = d!.Index + 1, position = 1 }), enabled: d?.Index > 0));
+            menu.DropDownItems.Add(Item("Make last", () => Run("desktop.moveTo", new { desktop = d!.Index + 1, position = count }), enabled: d?.Index < count - 1));
+            menu.DropDownItems.Add(new ToolStripSeparator());
+            menu.DropDownItems.Add(new ToolStripMenuItem("New desktop", null, (_, _) => Run("desktop.create")));
+            menu.DropDownItems.Add(Item("Close this desktop…", () => CloseDesktop(d!), enabled: d?.Index > 0));
+        };
+        menu.DropDownItems.Add("(loading)");
+        return menu;
+    }
+
+    private void EditNotes(DesktopInfo d)
+    {
+        var settings = Program.Host!.Settings;
+        string? note = NotesDialog.Show("Notes", $"What are you working on at \"{d.Name}\"?", settings.GetDesktopNote(d.Id), Bounds, this);
+        if (note != null) settings.SetDesktopNote(d.Id, note);
+    }
+
+    private void CloseDesktop(DesktopInfo d)
+    {
+        if (MessageBox.Show(this, $"Close desktop {d.Index + 1} \"{d.Name}\"? Its windows move to desktop 1.", "Close desktop",
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        Run("desktop.close", new { desktop = d.Index + 1 });
     }
 
     /// <summary>The terminal mark, drawn in code: a dark rounded square with a ">_" prompt.</summary>

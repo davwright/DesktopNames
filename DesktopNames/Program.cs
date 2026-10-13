@@ -489,7 +489,8 @@ internal sealed class HostForm : Form
     private IntPtr _locationHook;
     private NativeMethods.WinEventDelegate? _foregroundDelegate;
     private NativeMethods.WinEventDelegate? _locationDelegate;
-    private IntPtr _trackedForeground;
+    private NativeMethods.WinEventDelegate? _showHideDelegate;
+    private IntPtr _showHideHook;
     private Guid _lastDesktopId;
     private readonly System.Windows.Forms.Timer _desktopPoll;
     private SessionState? _sessionState;
@@ -772,6 +773,47 @@ internal sealed class HostForm : Form
                 throw new InvalidOperationException($"could not move the focused window to desktop {d.Index + 1}");
             return null;
         }));
+
+        c.Add(new("overlay.toggleMainOnly", "Show the overlay only on the first desktop", none, "", _ =>
+        {
+            _settings.OnlyOnMainDesktop = !_settings.OnlyOnMainDesktop;
+            _settings.Save();
+            return new { mainOnly = _settings.OnlyOnMainDesktop };
+        }));
+        c.Add(new("overlay.toggleScreen", "Turn the overlay off or on for one screen", new[] { "screen" }, "screen: Windows display number", a =>
+        {
+            int number = a.RequiredInt("screen");
+            var screens = MonitorRef.EnumerateAll();
+            var screen = screens.FirstOrDefault(s => s.Number == number)
+                ?? throw new ArgumentException($"no screen {number}; screens: {string.Join(", ", screens.Select(s => s.Number))}");
+            _settings.ToggleScreenHidden(screen.Key);
+            RefreshAllOverlays();
+            return new { screen = number, hidden = _settings.IsScreenHidden(screen.Key) };
+        }));
+        c.Add(new("desktop.toggleOverlay", "Turn the overlay off or on while on one desktop", desktop, desktopDoc, a =>
+        {
+            var id = DesktopArg(a);
+            _settings.ToggleDesktopHidden(id);
+            return new { hidden = _settings.IsDesktopHidden(id) };
+        }));
+        c.Add(new("desktop.moveTo", "Move a desktop to a position", new[] { "desktop", "position" }, "desktop: 1-based number; position: 1-based target", a =>
+        {
+            var id = DesktopArg(a);
+            int count = _desktopService.GetDesktops().Count, to = a.RequiredInt("position");
+            if (to < 1 || to > count) throw new ArgumentException($"position must be 1..{count}");
+            _desktopService.MoveDesktopToIndex(id, to - 1);
+            RefreshAllOverlays();
+            return null;
+        }));
+        c.Add(new("desktop.create", "New desktop at the end", none, "", _ => { _desktopService.CreateDesktop(); RefreshAllOverlays(); return null; }));
+        c.Add(new("desktop.close", "Close a desktop; its windows move to desktop 1", desktop, desktopDoc, a =>
+        {
+            var id = DesktopArg(a);
+            var d = _desktopService.GetDesktops().First(x => x.Id == id);
+            (_projects ?? throw new InvalidOperationException("not ready")).RemoveDesktop(d, "closed by command");
+            RefreshAllOverlays();
+            return null;
+        }));
     }
 
     private void RegisterHotkeys()
@@ -831,28 +873,44 @@ internal sealed class HostForm : Form
             IntPtr.Zero, _foregroundDelegate, 0, 0,
             NativeMethods.WINEVENT_OUTOFCONTEXT);
 
-        // Location changes on the foreground window: catches the fullscreen *transition*
-        // (e.g., a video player going F11). Filtered to the tracked foreground window only.
+        // Any top-level window moving, resizing, appearing or going away can start or end a
+        // fullscreen app on some screen — including one that isn't the foreground window (a
+        // PowerPoint slideshow while the presenter view has focus). Each overlay re-checks.
         _locationDelegate = OnLocationChanged;
         _locationHook = NativeMethods.SetWinEventHook(
             NativeMethods.EVENT_OBJECT_LOCATIONCHANGE, NativeMethods.EVENT_OBJECT_LOCATIONCHANGE,
             IntPtr.Zero, _locationDelegate, 0, 0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT);
+        _showHideDelegate = OnLocationChanged;
+        _showHideHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_DESTROY, NativeMethods.EVENT_OBJECT_HIDE,
+            IntPtr.Zero, _showHideDelegate, 0, 0,
             NativeMethods.WINEVENT_OUTOFCONTEXT);
     }
 
     private void OnForegroundChanged(IntPtr hHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        _trackedForeground = hwnd;
         BeginInvoke(RefreshAllOverlays);
     }
 
     private void OnLocationChanged(IntPtr hHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        if (hwnd != _trackedForeground || idObject != 0) return; // OBJID_WINDOW = 0
-        BeginInvoke(RefreshAllOverlays);
+        // Top-level windows only (OBJID_WINDOW, not a child element or the caret).
+        if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero) return;
+        if (NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT) != hwnd) return;
+        // A drag fires this per frame; one re-check per message-loop pass is enough.
+        if (_recheckPending) return;
+        _recheckPending = true;
+        BeginInvoke(() =>
+        {
+            _recheckPending = false;
+            foreach (var o in _overlays.ToArray()) o.RecheckVisibility();
+        });
     }
+
+    private bool _recheckPending;
 
     private void RefreshAllOverlays()
     {
@@ -1066,6 +1124,7 @@ internal sealed class HostForm : Form
         _hotkeys?.Dispose();
         if (_foregroundHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_foregroundHook);
         if (_locationHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_locationHook);
+        if (_showHideHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_showHideHook);
         foreach (var o in _overlays) { try { o.Close(); o.Dispose(); } catch { } }
         _overlays.Clear();
         base.OnFormClosing(e);
