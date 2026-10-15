@@ -835,6 +835,18 @@ internal sealed class HostForm : Form
             _settings.DeleteLayout(a.RequiredStr("layout"));
             return null;
         }));
+        const string screenDoc = "screen: key from screens.list";
+        c.Add(new("screens.list", "Every monitor a screen layout remembers", none, "", _ => _settings.KnownScreens().Select(k => new
+        {
+            screen = k.Key, k.Name, k.Latest.Model, size = $"{k.Latest.Width}x{k.Latest.Height}", k.Connected, k.Layouts, k.LastUsedUtc, k.OverlayHidden,
+        })));
+        c.Add(new("screens.rename", "Name a screen", new[] { "screen", "name" }, screenDoc + "; name: empty clears it", a =>
+        {
+            _settings.RenameScreen(a.RequiredStr("screen"), a.RequiredStr("name"));
+            return null;
+        }));
+        c.Add(new("screens.delete", "Forget an unplugged screen and the layouts it is part of", new[] { "screen" }, screenDoc, a =>
+            new { layoutsDeleted = _settings.DeleteScreen(a.RequiredStr("screen")) }));
         // Deferred like projects.open: the window is modal.
         c.Add(new("layouts.open", "Open the screen layouts window", none, "", _ =>
         {

@@ -24,12 +24,12 @@ internal sealed class MonitorDescriptor
     /// <summary>Stable-ish key for one monitor: hardware id when we have it, else its resolution.</summary>
     public string Key => !string.IsNullOrEmpty(DeviceId) ? DeviceId! : $"{Width}x{Height}";
 
-    /// <summary>Column/menu caption: "Screen 3 — T27h-30 2560×1440".</summary>
-    public string Caption(int fallbackIndex)
+    /// <summary>Menu caption: "Screen 3 — Left 4K" with the user's name, else "Screen 3 — T27h-30".</summary>
+    public string Caption(int fallbackIndex, string? name)
     {
         string n = Number > 0 ? Number.ToString() : $"#{fallbackIndex + 1}";
-        string model = Model.Length > 22 ? Model[..22] + "…" : Model;
-        return model.Length > 0 ? $"Screen {n} — {model}" : $"Screen {n}";
+        string label = name ?? (Model.Length > 22 ? Model[..22] + "…" : Model);
+        return label.Length > 0 ? $"Screen {n} — {label}" : $"Screen {n}";
     }
 }
 

@@ -18,6 +18,61 @@ internal sealed class Settings
 
     public bool IsScreenHidden(string screenKey) => HiddenScreens.Contains(screenKey);
 
+    /// <summary>Why the overlay is off on this screen while on this desktop, or null when it shows
+    /// (a fullscreen app aside — that is decided live by the overlay).</summary>
+    public string? OverlayHiddenBy(DesktopInfo? desktop, string? screenKey) =>
+        Hidden ? "the overlay is hidden everywhere"
+        : desktop != null && IsDesktopHidden(desktop.Id) ? "hidden on this desktop"
+        : OnlyOnMainDesktop && desktop != null && desktop.Index != 0 ? "shown only on the first desktop"
+        : screenKey != null && IsScreenHidden(screenKey) ? "hidden on this screen"
+        : null;
+
+    /// <summary>The user's names for monitors, by <see cref="MonitorDescriptor.Key"/>.</summary>
+    public Dictionary<string, string> ScreenNames { get; set; } = new();
+
+    public string? ScreenName(string screenKey) => ScreenNames.TryGetValue(screenKey, out var n) ? n : null;
+
+    public void RenameScreen(string screenKey, string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) ScreenNames.Remove(screenKey);
+        else ScreenNames[screenKey] = name.Trim();
+        Save();
+    }
+
+    /// <summary>Every monitor any layout remembers, newest sighting first.</summary>
+    public List<KnownScreen> KnownScreens()
+    {
+        var connected = MonitorRef.EnumerateAll().Select(m => m.Key).ToHashSet();
+        return VsCodeLayouts.Values
+            .SelectMany(l => l.Screens.Select(s => (screen: s, layout: l)))
+            .GroupBy(x => x.screen.Key)
+            .Select(g =>
+            {
+                var latest = g.OrderByDescending(x => x.layout.LastUsedUtc ?? DateTime.MinValue).First();
+                return new KnownScreen(g.Key, latest.screen, ScreenName(g.Key), connected.Contains(g.Key),
+                    g.Select(x => x.layout).Distinct().Count(), latest.layout.LastUsedUtc, IsScreenHidden(g.Key));
+            })
+            .OrderByDescending(k => k.Connected).ThenByDescending(k => k.LastUsedUtc ?? DateTime.MinValue)
+            .ToList();
+    }
+
+    /// <summary>Forget a monitor: every layout it is part of, its name and its overlay setting.
+    /// A connected monitor can't be forgotten. Returns how many layouts went with it.</summary>
+    public int DeleteScreen(string screenKey)
+    {
+        if (MonitorRef.EnumerateAll().Any(m => m.Key == screenKey))
+            throw new InvalidOperationException("that screen is connected; it can only be deleted while unplugged");
+        var layouts = VsCodeLayouts.Where(kv => kv.Value.Screens.Any(s => s.Key == screenKey)).Select(kv => kv.Key).ToList();
+        if (layouts.Count == 0 && !ScreenNames.ContainsKey(screenKey) && !HiddenScreens.Contains(screenKey))
+            throw new ArgumentException($"no screen \"{screenKey}\"; screens.list shows the known ones");
+        foreach (var key in layouts) VsCodeLayouts.Remove(key);
+        ScreenNames.Remove(screenKey);
+        HiddenScreens.Remove(screenKey);
+        Log.Screens($"deleted screen {screenKey} and {layouts.Count} layout(s): {string.Join(", ", layouts)}");
+        Save();
+        return layouts.Count;
+    }
+
     public void ToggleScreenHidden(string screenKey)
     {
         if (!HiddenScreens.Remove(screenKey)) HiddenScreens.Add(screenKey);

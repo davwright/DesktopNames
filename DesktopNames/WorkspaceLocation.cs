@@ -87,6 +87,9 @@ internal sealed class ScreenLayout
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? (Describe ?? "unknown setup") : Name!;
 }
 
+/// <summary>A monitor some layout remembers, as last seen.</summary>
+internal sealed record KnownScreen(string Key, ScreenInfo Latest, string? Name, bool Connected, int Layouts, DateTime? LastUsedUtc, bool OverlayHidden);
+
 /// <summary>One monitor as it stood when an arrangement was recorded.</summary>
 internal sealed class ScreenInfo
 {
@@ -99,6 +102,19 @@ internal sealed class ScreenInfo
     public int Width { get; set; }
     public int Height { get; set; }
     public bool IsPrimary { get; set; }
+
+    /// <summary>Same key as <see cref="MonitorDescriptor.Key"/>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string Key => !string.IsNullOrEmpty(DeviceId) ? DeviceId! : $"{Width}x{Height}";
+
+    /// <summary>"office left" when named, else the model; with the size unless the model already ends in it.</summary>
+    public string Label(string? name)
+    {
+        string size = $"{Width}×{Height}";
+        if (name != null) return $"{name}\n{size}";
+        string model = string.IsNullOrEmpty(Model) ? "screen" : Model!;
+        return model.Contains($"{Width}x{Height}") ? model : $"{model}\n{size}";
+    }
 
     public static ScreenInfo From(MonitorDescriptor m) => new()
     {

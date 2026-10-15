@@ -604,6 +604,8 @@ internal sealed class ProjectsDialog : Form
     // The desktop you're on: a warm tint, and a bar in the # cell that still shows when selected.
     private static readonly Color CurrentTint = Color.FromArgb(255, 244, 214);
     private static readonly Color CurrentBar = Color.FromArgb(232, 145, 0);
+    // A screen cell whose overlay won't show while on that row's desktop.
+    private static readonly Color OverlayOffTint = Color.FromArgb(222, 222, 222);
 
     /// <summary>Set when the user picked an existing row.</summary>
     public ProjectSwitcher.Row? ChosenRow { get; private set; }
@@ -625,7 +627,8 @@ internal sealed class ProjectsDialog : Form
             new(Col.Desktop, "Desktop", 140),
         };
         for (int i = 0; i < _screens.Count; i++)
-            _cols.Add(new(Col.Screen, _screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}", 160, _screens[i]));
+            _cols.Add(new(Col.Screen, (_screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}")
+                + (Program.Host!.Settings.ScreenName(_screens[i].Key) is { } screenName ? $" · {screenName}" : ""), 160, _screens[i]));
         _cols.Add(new(Col.Claude, "Claude", 170));
         _cols.Add(new(Col.Project, "Project", 150));
         _cols.Add(new(Col.Folder, "Folder", 280));
@@ -864,7 +867,8 @@ internal sealed class ProjectsDialog : Form
         bool sel = e.Item.Selected;
         var (groupStart, groupOdd) = _grouped ? _groups[e.ItemIndex] : (true, false);
         bool current = p.Desktop?.IsCurrent == true;
-        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : current ? CurrentTint : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
+        bool overlayOff = c.Kind == Col.Screen && OverlayOffReason(p, c) != null;
+        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : overlayOff ? OverlayOffTint : current ? CurrentTint : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
         if (current && c.Kind == Col.Number)
             using (var bar = new SolidBrush(CurrentBar)) g.FillRectangle(bar, r.X, r.Y, 4, r.Height);
         var fg = sel ? SystemColors.HighlightText : _list.ForeColor;
@@ -1060,13 +1064,20 @@ internal sealed class ProjectsDialog : Form
     }
 
     /// <summary>Hovering a Claude pill shows that session's state, message, background work and recent messages.</summary>
+    private static string? OverlayOffReason(ProjectSwitcher.Row p, ColDef c) =>
+        p.Desktop == null ? null : Program.Host!.Settings.OverlayHiddenBy(p.Desktop, c.Screen!.Key);
+
     private void UpdateTip(Point pt)
     {
         var hit = PillAt(pt);
-        string? key = hit is { } h ? h.session.Source + "|" + h.session.SessionId : null;
+        int col = ColumnAt(pt);
+        var row = _list.GetItemAt(5, pt.Y)?.Tag as ProjectSwitcher.Row;
+        string? off = hit == null && row != null && KindAt(col) == Col.Screen ? OverlayOffReason(row, _cols[col]) : null;
+        string? key = hit is { } h ? h.session.Source + "|" + h.session.SessionId : off != null ? $"off|{row!.Desktop!.Id}|{col}" : null;
         if (key == _tipKey) return;
         _tipKey = key;
-        string text = hit is { } x ? SessionState.StripTipMarkers(_switcher.DescribeSession(x.session)) : "";
+        string text = hit is { } x ? SessionState.StripTipMarkers(_switcher.DescribeSession(x.session))
+            : off != null ? $"Overlay off on this screen while on desktop {row!.Desktop!.Index + 1}: {off}" : "";
         _tipText = text;
         if (text.Length == 0) { _tip.Hide(_list); return; }
         _tip.Show(text, _list, pt.X + 16, pt.Y + 20, 30_000);
@@ -1098,7 +1109,6 @@ internal sealed class ProjectsDialog : Form
     public IntPtr ScreenPopupHandle => _screenPopup.Visible ? _screenPopup.Handle
         : throw new InvalidOperationException("the screen popup is not showing; hover a screen header first");
 
-    /// <summary>What each visible row shows, by column header.</summary>
     /// <summary>For the control channel: start editing a row's desktop name, as F2 does.</summary>
     public void BeginRename(int row)
     {
@@ -1109,6 +1119,7 @@ internal sealed class ProjectsDialog : Form
 
     public string? EditingText => _editor?.Text;
 
+    /// <summary>What each visible row shows, by column header.</summary>
     public List<Dictionary<string, object?>> VisibleRows() =>
         _list.Items.Cast<ListViewItem>().Select(item =>
         {
@@ -1204,7 +1215,7 @@ internal sealed class ProjectsDialog : Form
             for (int i = 0; i < _screens.Count; i++)
             {
                 var s = _screens[i];
-                moveAll.DropDownItems.Add($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                moveAll.DropDownItems.Add($"{s.Caption(i, Program.Host!.Settings.ScreenName(s.Key))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
                     (_, _) => { Program.Host!.MoveAllVsCodeToScreen(s); RefreshState(); });
             }
             restore.Text = $"Restore VS Code layout  ({_switcher.ScreenSetupName})";
@@ -1282,7 +1293,7 @@ internal sealed class ProjectsDialog : Form
             for (int i = 0; i < _screens.Count; i++)
             {
                 var screen = _screens[i];
-                overlay.DropDownItems.Add(new ToolStripMenuItem($"Show on {screen.Caption(i)}", null,
+                overlay.DropDownItems.Add(new ToolStripMenuItem($"Show on {screen.Caption(i, settings.ScreenName(screen.Key))}", null,
                     (_, _) => Run("overlay.toggleScreen", new { screen = screen.Number }))
                     { Checked = !settings.IsScreenHidden(screen.Key) });
             }
@@ -1627,29 +1638,14 @@ internal sealed class ProjectsDialog : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             using (var border = new Pen(SystemColors.ControlDark)) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
             if (_focus == null || _screens.Count == 0) return;
 
-            // Scale the union of all monitor rects into the map area, keeping proportions.
             var map = new Rectangle(12, 12, Width - 24, 150);
-            int minX = _screens.Min(s => s.Monitor.Left), minY = _screens.Min(s => s.Monitor.Top);
-            int maxX = _screens.Max(s => s.Monitor.Right), maxY = _screens.Max(s => s.Monitor.Bottom);
-            float scale = Math.Min(map.Width / (float)(maxX - minX), map.Height / (float)(maxY - minY));
-            float ox = map.X + (map.Width - (maxX - minX) * scale) / 2, oy = map.Y + (map.Height - (maxY - minY) * scale) / 2;
-
-            foreach (var s in _screens)
-            {
-                var r = Rectangle.Round(new RectangleF(ox + (s.Monitor.Left - minX) * scale, oy + (s.Monitor.Top - minY) * scale,
-                    s.Width * scale, s.Height * scale));
-                r.Inflate(-2, -2);
-                bool focus = s.Handle == _focus.Handle;
-                using (var fill = new SolidBrush(focus ? SystemColors.Highlight : SystemColors.Control)) g.FillRectangle(fill, r);
-                using (var pen = new Pen(SystemColors.ControlDarkDark)) g.DrawRectangle(pen, r);
-                TextRenderer.DrawText(g, $"{(s.Number > 0 ? s.Number.ToString() : "?")}{(s.IsPrimary ? " ★" : "")}\n{s.Width}×{s.Height}",
-                    Font, r, focus ? SystemColors.HighlightText : SystemColors.ControlText,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
-            }
+            ScreenMap.Draw(g, map, Font, _screens.Select(s => (
+                new Rectangle(s.Monitor.Left, s.Monitor.Top, s.Width, s.Height),
+                $"{(s.Number > 0 ? s.Number.ToString() : "?")}{(s.IsPrimary ? " ★" : "")}\n{s.Width}×{s.Height}",
+                s.Handle == _focus.Handle)).ToList());
 
             var f = _focus;
             string details =

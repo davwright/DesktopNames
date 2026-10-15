@@ -373,7 +373,7 @@ internal sealed class TaskbarOverlay : Form
             for (int i = 0; i < screens.Count; i++)
             {
                 var s = screens[i];
-                moveAll.DropDownItems.Add($"{s.Caption(i)}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                moveAll.DropDownItems.Add($"{s.Caption(i, _settings.ScreenName(s.Key))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
                     (_, _) => Program.Host?.MoveAllVsCodeToScreen(s));
             }
             _contextMenu.Items.Add(moveAll);
@@ -638,11 +638,7 @@ internal sealed class TaskbarOverlay : Form
     /// <summary>Every reason the overlay is off: global hide, this desktop, main-only, this screen, a fullscreen app here.</summary>
     private bool ShouldHide(List<DesktopInfo> desktops)
     {
-        var currentDesktop = desktops.FirstOrDefault(d => d.IsCurrent);
-        bool hiddenByCurrentDesktop = currentDesktop != null && _settings.IsDesktopHidden(currentDesktop.Id);
-        bool hiddenByMainOnly = _settings.OnlyOnMainDesktop && currentDesktop != null && currentDesktop.Index != 0;
-        bool hiddenByScreen = ScreenKey is { } key && _settings.IsScreenHidden(key);
-        return _settings.Hidden || hiddenByCurrentDesktop || hiddenByMainOnly || hiddenByScreen || IsFullscreenOnMonitor();
+        return _settings.OverlayHiddenBy(desktops.FirstOrDefault(d => d.IsCurrent), ScreenKey) != null || IsFullscreenOnMonitor();
     }
 
     private string? _screenKey;
