@@ -154,7 +154,6 @@ internal sealed class Settings
         }
         layout!.Describe = ScreenSetup.DescribeOf(screens);
         layout.Screens = screens.Select(ScreenInfo.From).ToList();
-        layout.DeviceSignature = ScreenSetup.DeviceSignatureOf(screens);
         bool switched = !ReferenceEquals(_layout, layout);
         layout.LastUsedUtc = DateTime.UtcNow;
         // Layouts recorded before BuiltIn existed learn it from the panel plugged in now.
@@ -192,12 +191,7 @@ internal sealed class Settings
     private ScreenLayout LayoutByKey(string key) => VsCodeLayouts.TryGetValue(key, out var l) ? l
         : throw new ArgumentException($"no screen layout \"{key}\"; layouts: {string.Join(", ", VsCodeLayouts.Keys)}");
 
-    /// <summary>
-    /// First sight of an arrangement. Rather than starting blank, inherit from the closest
-    /// previous one: the same physical monitors at different coordinates (you rearranged them
-    /// in Windows) carry their window positions over as a starting point, which you can then
-    /// change independently.
-    /// </summary>
+    /// <summary>First sight of a set of screens: a new, empty layout.</summary>
     private ScreenLayout AdoptOrSeed(List<MonitorDescriptor> screens, string sig)
     {
         // One-time upgrade: layouts written before coordinates were part of the key have no
@@ -211,15 +205,35 @@ internal sealed class Settings
             return stale[0].Value;
         }
 
-        string family = ScreenSetup.DeviceSignatureOf(screens);
-        var source = VsCodeLayouts.Values.FirstOrDefault(l => l.DeviceSignature == family);
-        var seeded = new ScreenLayout { Name = source?.Name };
-        if (source != null)
-            foreach (var kvp in source.Workspaces) seeded.Workspaces[kvp.Key] = kvp.Value.Clone();
+        Log.Screens($"new layout {sig} [{ScreenSetup.DescribeOf(screens)}]");
+        return new ScreenLayout();
+    }
 
-        Log.Screens($"new arrangement {sig} [{ScreenSetup.DescribeOf(screens)}]" +
-                    (source != null ? $" seeded from same monitors rearranged ({seeded.Workspaces.Count} windows)" : " (nothing to seed from)"));
-        return seeded;
+    /// <summary>
+    /// Layouts used to be keyed by screen positions, resolutions and ports, so one set of
+    /// screens could have many. Re-key each by its screens alone and merge the ones that meet:
+    /// the most recently used one wins, keeping a name from any of them and VS Code positions
+    /// the winner doesn't have.
+    /// </summary>
+    private void MergeLayoutsByScreens()
+    {
+        var groups = VsCodeLayouts.Where(kv => kv.Value.Screens.Count > 0)
+            .GroupBy(kv => ScreenSetup.SignatureOf(kv.Value.Screens.Select(s => s.Identity)))
+            .Where(g => g.Count() > 1 || g.Single().Key != g.Key)
+            .ToList();
+        foreach (var g in groups)
+        {
+            var ordered = g.OrderByDescending(kv => kv.Value.LastUsedUtc ?? DateTime.MinValue)
+                           .ThenByDescending(kv => kv.Value.Workspaces.Count).ToList();
+            var keep = ordered[0].Value;
+            keep.Name ??= ordered.Select(kv => kv.Value.Name).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n));
+            foreach (var (_, other) in ordered.Skip(1))
+                foreach (var w in other.Workspaces)
+                    keep.Workspaces.TryAdd(w.Key, w.Value);
+            foreach (var (key, _) in ordered) VsCodeLayouts.Remove(key);
+            VsCodeLayouts[g.Key] = keep;
+            Log.Screens($"layouts {string.Join(", ", ordered.Select(kv => kv.Key))} are one set of screens: merged into {g.Key}");
+        }
     }
 
     /// <summary>Drop the cached layout so the next <see cref="Layout"/> re-resolves — called on
@@ -389,6 +403,7 @@ internal sealed class Settings
         // they are keyed by the physical monitor (EDID product + serial) now.
         s.HiddenScreens = s.HiddenScreens.Select(k => ScreenNaming.Identity(k, k)).Distinct().ToList();
         s.ScreenNames = s.ScreenNames.GroupBy(kv => ScreenNaming.Identity(kv.Key, kv.Key)).ToDictionary(g => g.Key, g => g.First().Value);
+        s.MergeLayoutsByScreens();
 
         // Migration: the flat workspace map predates per-screen-setup layouts. Adopt it as the
         // layout for whatever arrangement is plugged in now — that's the setup it was recorded on.

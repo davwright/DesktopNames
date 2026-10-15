@@ -69,15 +69,11 @@ internal sealed class ScreenLayout
     public string? Describe { get; set; }
 
     /// <summary>
-    /// The monitors this arrangement consists of, with the coordinates they sat at — the array
-    /// the arrangement key is built from. Rewritten every time the arrangement is resolved, so
-    /// it also records what "screen 2" meant for the positions stored below.
+    /// The monitors this layout consists of (its key is built from their identities) as they
+    /// were last arranged. Rewritten every time the layout is resolved, so it also records what
+    /// "screen 2" meant for the positions stored below.
     /// </summary>
     public List<ScreenInfo> Screens { get; set; } = new();
-
-    /// <summary>Position-independent key for <see cref="Screens"/>: which monitors, ignoring
-    /// where they sit. Lets a rearranged setup start from the layout of the same monitors.</summary>
-    public string? DeviceSignature { get; set; }
 
     public Dictionary<string, WorkspaceLocation> Workspaces { get; set; } = new();
 

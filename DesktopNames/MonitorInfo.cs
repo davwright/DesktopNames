@@ -265,27 +265,24 @@ internal static class DisplayNumbering
 }
 
 /// <summary>
-/// Identity of a whole monitor arrangement ("work" = laptop + two 4K, "home" = laptop + one
-/// ultrawide, "single" = laptop alone). Window positions are remembered per arrangement so
-/// docking somewhere else doesn't overwrite the layout you use at the other place.
+/// Identity of a screen layout ("work" = laptop + two 27", "home" = laptop + one ultrawide,
+/// "single" = laptop alone). Window positions are remembered per layout so docking somewhere
+/// else doesn't overwrite the layout you use at the other place.
 /// </summary>
 internal static class ScreenSetup
 {
     /// <summary>
-    /// Order-independent key for the current arrangement: which monitors, at which coordinates.
-    /// Moving a monitor's position in Windows' display arrangement therefore yields a different
-    /// arrangement (and its own remembered window positions), which is the point — a window
-    /// "on the left screen" means something different after you swap the screens around.
+    /// Order-independent key for a set of screens: which physical monitors
+    /// (<see cref="ScreenNaming.Identity"/>) — not where they sit, their resolution, or the port
+    /// they are plugged into. Rearranging them in Windows stays the same layout.
     /// </summary>
-    public static string SignatureOf(List<MonitorDescriptor> screens)
-        => Hash(screens.Select(s => $"{s.Key}@{s.Monitor.Left},{s.Monitor.Top},{s.Width}x{s.Height}"), screens.Count);
+    public static string SignatureOf(IEnumerable<string> identities)
+    {
+        var ids = identities.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return Hash(ids, ids.Count);
+    }
 
-    /// <summary>
-    /// Order- and position-independent key: just which physical monitors are attached. Used to
-    /// find the closest previous arrangement to seed from when the coordinates changed.
-    /// </summary>
-    public static string DeviceSignatureOf(List<MonitorDescriptor> screens)
-        => Hash(screens.Select(s => s.Key), screens.Count);
+    public static string SignatureOf(List<MonitorDescriptor> screens) => SignatureOf(screens.Select(s => s.Identity));
 
     // FNV-1a — not string.GetHashCode, which is randomised per process and would not persist.
     private static string Hash(IEnumerable<string> parts, int count)
