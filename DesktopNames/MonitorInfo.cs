@@ -8,6 +8,8 @@ internal sealed class MonitorDescriptor
     public NativeMethods.RECT Monitor { get; init; }
     public NativeMethods.RECT Work { get; init; }
     public bool IsPrimary { get; init; }
+    /// <summary>The laptop's own panel (embedded DisplayPort / LVDS / internal output).</summary>
+    public bool BuiltIn { get; init; }
     public int X => Monitor.Left;
     public int Width => Monitor.Right - Monitor.Left;
     public int Height => Monitor.Bottom - Monitor.Top;
@@ -28,7 +30,8 @@ internal sealed class MonitorDescriptor
     public string Caption(int fallbackIndex, string? name)
     {
         string n = Number > 0 ? Number.ToString() : $"#{fallbackIndex + 1}";
-        string label = name ?? (Model.Length > 22 ? Model[..22] + "…" : Model);
+        string model = ScreenNaming.Describe(DeviceId, Model, BuiltIn);
+        string label = name ?? (model.Length > 30 ? model[..30] + "…" : model);
         return label.Length > 0 ? $"Screen {n} — {label}" : $"Screen {n}";
     }
 }
@@ -200,10 +203,11 @@ internal static class DisplayNumbering
 {
     private const int ModeInfoSize = 64;   // sizeof(DISPLAYCONFIG_MODE_INFO)
 
-    /// <summary>GDI device name ("\\.\DISPLAY10") → Windows display number. Empty on failure.</summary>
-    public static Dictionary<string, int> Current()
+    /// <summary>GDI device name ("\\.\DISPLAY10") → Windows display number, and whether it is the
+    /// built-in panel. Empty on failure.</summary>
+    public static Dictionary<string, (int Number, bool BuiltIn)> Current()
     {
-        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, (int Number, bool BuiltIn)>(StringComparer.OrdinalIgnoreCase);
         IntPtr modes = IntPtr.Zero;
         try
         {
@@ -217,7 +221,7 @@ internal static class DisplayNumbering
                 return result;
 
             // (adapter, targetId, gdiName) in path order, one entry per source.
-            var entries = new List<(ulong adapter, uint target, string gdi)>();
+            var entries = new List<(ulong adapter, uint target, string gdi, bool builtIn)>();
             var adapterOrder = new List<ulong>();
             for (int i = 0; i < np; i++)
             {
@@ -237,13 +241,15 @@ internal static class DisplayNumbering
 
                 ulong adapter = ((ulong)(uint)paths[i].sourceInfo.adapterId.HighPart << 32) | paths[i].sourceInfo.adapterId.LowPart;
                 if (!adapterOrder.Contains(adapter)) adapterOrder.Add(adapter);
-                entries.Add((adapter, paths[i].targetInfo.id, gdi));
+                // DISPLAYCONFIG_OUTPUT_TECHNOLOGY: LVDS 6, DISPLAYPORT_EMBEDDED 11, UDI_EMBEDDED 13, INTERNAL 0x80000000.
+                bool builtIn = paths[i].targetInfo.outputTechnology is 6 or 11 or 13 or 0x80000000;
+                entries.Add((adapter, paths[i].targetInfo.id, gdi, builtIn));
             }
 
             int n = 0;
             foreach (var adapter in adapterOrder)
                 foreach (var e in entries.Where(e => e.adapter == adapter).OrderBy(e => e.target))
-                    result[e.gdi] = ++n;
+                    result[e.gdi] = (++n, e.builtIn);
         }
         catch { result.Clear(); }
         finally { if (modes != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(modes); }
@@ -459,7 +465,8 @@ internal sealed class MonitorRef
                     DeviceId = ResolveDeviceId(mi.szDevice),
                     Device = mi.szDevice ?? "",
                     Model = ResolveModel(mi.szDevice),
-                    Number = numbers.TryGetValue(mi.szDevice ?? "", out var n) ? n : 0,
+                    Number = numbers.TryGetValue(mi.szDevice ?? "", out var n) ? n.Number : 0,
+                    BuiltIn = n.BuiltIn,
                     Monitor = mi.rcMonitor,
                     Work = mi.rcWork,
                     IsPrimary = (mi.dwFlags & 1u) != 0   // MONITORINFOF_PRIMARY
@@ -500,4 +507,65 @@ internal sealed class MonitorRef
             return string.IsNullOrEmpty(dd.DeviceID) ? null : dd.DeviceID;
         return null;
     }
+}
+
+/// <summary>
+/// What to call a monitor. Windows' own model string is often unhelpful: "Generic PnP Monitor"
+/// when no driver is installed, a panel part name for the laptop screen, never the brand. So:
+/// the maker comes from the EDID manufacturer id in the device path, a generic model is
+/// replaced by the monitor's EDID name, the built-in panel is called that, and Lenovo's
+/// ThinkVision monitors get their brand.
+/// </summary>
+internal static class ScreenNaming
+{
+    public static string Maker(string? deviceId)
+    {
+        var parts = (deviceId ?? "").Split('#');
+        return parts.Length > 1 && parts[1].Length >= 3 && Makers.TryGetValue(parts[1][..3].ToUpperInvariant(), out var m) ? m : "";
+    }
+
+    public static string Model(string? deviceId, string? model, bool builtIn)
+    {
+        if (builtIn) return "Built-in display";
+        string m = string.IsNullOrEmpty(model) || model == "Generic PnP Monitor" ? EdidName(deviceId) ?? model ?? "" : model!;
+        string maker = Maker(deviceId);
+        if (m.Equals(maker, StringComparison.OrdinalIgnoreCase)) return "";   // EDID name "SAMSUNG" says nothing more
+        // ThinkVision models are T/P/E/S/X/M + size ("T27h-30"); Lenovo's L-series are plain Lenovo.
+        if (maker == "Lenovo" && m.Length > 1 && "TPESXM".Contains(m[0]) && char.IsDigit(m[1])) return "ThinkVision " + m;
+        return m;
+    }
+
+    /// <summary>"Lenovo ThinkVision T27h-30", "Built-in display", "LG W2442".</summary>
+    public static string Describe(string? deviceId, string? model, bool builtIn) =>
+        builtIn ? "Built-in display"
+        : string.Join(" ", new[] { Maker(deviceId), Model(deviceId, model, builtIn) }.Where(t => t.Length > 0));
+
+    private static readonly Dictionary<string, string?> EdidNames = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The monitor-name descriptor (tag 0xFC) of the EDID Windows keeps under
+    /// Enum\DISPLAY\&lt;id&gt;\&lt;instance&gt;, also for monitors not plugged in now.</summary>
+    private static string? EdidName(string? deviceId)
+    {
+        var parts = (deviceId ?? "").Split('#');
+        if (parts.Length < 3) return null;
+        string key = $@"SYSTEM\CurrentControlSet\Enum\DISPLAY\{parts[1]}\{parts[2]}\Device Parameters";
+        if (EdidNames.TryGetValue(key, out var cached)) return cached;
+        string? name = null;
+        using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(key))
+            if (k?.GetValue("EDID") is byte[] edid)
+                for (int o = 54; o + 18 <= Math.Min(edid.Length, 126); o += 18)
+                    if (edid[o] == 0 && edid[o + 1] == 0 && edid[o + 3] == 0xFC)
+                        name = System.Text.Encoding.ASCII.GetString(edid, o + 5, 13).TrimEnd('\n', ' ', '\0');
+        return EdidNames[key] = name;
+    }
+
+    // EDID manufacturer ids (UEFI PNP registry) of common monitor and panel makers.
+    private static readonly Dictionary<string, string> Makers = new()
+    {
+        ["ACR"] = "Acer", ["AOC"] = "AOC", ["APP"] = "Apple", ["AUO"] = "AU Optronics", ["AUS"] = "ASUS", ["BNQ"] = "BenQ",
+        ["BOE"] = "BOE", ["CMN"] = "Innolux", ["DEL"] = "Dell", ["ENC"] = "EIZO", ["GBT"] = "Gigabyte", ["GSM"] = "LG",
+        ["HPN"] = "HP", ["HWP"] = "HP", ["IVM"] = "iiyama", ["LEN"] = "Lenovo", ["LGD"] = "LG Display", ["MSI"] = "MSI",
+        ["NEC"] = "NEC", ["PHL"] = "Philips", ["SAM"] = "Samsung", ["SDC"] = "Samsung Display", ["SHP"] = "Sharp",
+        ["SNY"] = "Sony", ["VSC"] = "ViewSonic",
+    };
 }

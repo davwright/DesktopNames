@@ -102,6 +102,7 @@ internal sealed class ScreenInfo
     public int Width { get; set; }
     public int Height { get; set; }
     public bool IsPrimary { get; set; }
+    public bool BuiltIn { get; set; }
 
     /// <summary>Same key as <see cref="MonitorDescriptor.Key"/>.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -111,6 +112,7 @@ internal sealed class ScreenInfo
     {
         DeviceId = m.DeviceId,
         Model = m.Model,
+        BuiltIn = m.BuiltIn,
         Number = m.Number,
         X = m.Monitor.Left,
         Y = m.Monitor.Top,

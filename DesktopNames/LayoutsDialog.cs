@@ -39,7 +39,8 @@ internal sealed class LayoutsDialog : Form
         _layouts.Columns.Add("VS Code windows", 130);
         _layouts.Columns.Add("Last used", 110);
         _screens.Columns.Add("Screen", 180);
-        _screens.Columns.Add("Model", 380);
+        _screens.Columns.Add("Manufacturer", 110);
+        _screens.Columns.Add("Model", 300);
         _screens.Columns.Add("Size", 110);
         _screens.Columns.Add("In layouts", 90);
         _screens.Columns.Add("Last seen", 110);
@@ -116,8 +117,8 @@ internal sealed class LayoutsDialog : Form
         }),
         screens = _screens.Items.Cast<ListViewItem>().Select(i => new
         {
-            key = ((KnownScreen)i.Tag!).Key, name = i.SubItems[0].Text, model = i.SubItems[1].Text, size = i.SubItems[2].Text,
-            layouts = i.SubItems[3].Text, lastSeen = i.SubItems[4].Text, status = i.SubItems[5].Text, selected = i.Selected,
+            key = ((KnownScreen)i.Tag!).Key, name = i.SubItems[0].Text, maker = i.SubItems[1].Text, model = i.SubItems[2].Text,
+            size = i.SubItems[3].Text, layouts = i.SubItems[4].Text, lastSeen = i.SubItems[5].Text, status = i.SubItems[6].Text, selected = i.Selected,
         }),
     };
 
@@ -146,7 +147,8 @@ internal sealed class LayoutsDialog : Form
             _screens.Items.Add(new ListViewItem(new[]
             {
                 k.Name ?? "(unnamed)",
-                ScreenMap.MakerAndModel(k.Latest.DeviceId, k.Latest.Model),
+                ScreenNaming.Maker(k.Latest.DeviceId),
+                ScreenNaming.Model(k.Latest.DeviceId, k.Latest.Model, k.Latest.BuiltIn),
                 $"{k.Latest.Width}×{k.Latest.Height}",
                 k.Layouts.ToString(),
                 k.Connected ? "now" : Age(k.LastUsedUtc),
@@ -182,7 +184,7 @@ internal sealed class LayoutsDialog : Form
         _mapKeys = layout.Screens.Select(s => s.Key).ToList();
         _mapRects = ScreenMap.Draw(g, Rectangle.Inflate(_map.ClientRectangle, -12, -12), _map.Font, layout.Screens.Select(s => new ScreenMap.Tile(
             new Rectangle(s.X, s.Y, s.Width, s.Height), s.Number, s.IsPrimary, _settings.ScreenName(s.Key),
-            ScreenMap.MakerAndModel(s.DeviceId, s.Model), focus.Contains(s.Key))).ToList());
+            ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), focus.Contains(s.Key))).ToList());
     }
 
     /// <summary>A screen clicked on the map becomes the selected row of the screens list, ready for F2.</summary>
@@ -260,13 +262,15 @@ internal sealed class LayoutsDialog : Form
 }
 
 /// <summary>Monitors drawn to scale the way Windows' display settings draw them: a big number per
-/// screen, its x range along the top edge, its y range up the left edge, name and model along the bottom.</summary>
+/// screen, its width along the top edge, its height up the left edge, name and model along the bottom.
+/// The main screen has its own color.</summary>
 internal static class ScreenMap
 {
     public sealed record Tile(Rectangle Bounds, int Number, bool Primary, string? Name, string Model, bool Focus);
 
     public static readonly Color Background = Color.FromArgb(32, 32, 32);
     private static readonly Color TileFill = Color.FromArgb(52, 52, 52);
+    private static readonly Color MainFill = Color.FromArgb(28, 84, 70);
     private static readonly Color Accent = Color.FromArgb(0, 120, 215);
     private static readonly Color EdgeText = Color.FromArgb(185, 185, 185);
 
@@ -290,7 +294,7 @@ internal static class ScreenMap
             r.Inflate(-3, -3);
             drawn.Add(r);
             using (var path = Rounded(r, 5))
-            using (var fill = new SolidBrush(s.Focus ? Accent : TileFill))
+            using (var fill = new SolidBrush(s.Focus ? Accent : s.Primary ? MainFill : TileFill))
                 g.FillPath(fill, path);
 
             using (var big = new Font(font.FontFamily, Math.Max(10f, r.Height * 0.32f), GraphicsUnit.Pixel))
@@ -300,15 +304,15 @@ internal static class ScreenMap
             // Edge labels only where they fit; the hover popup's tiles are too small for them.
             int lh = small.Height;
             if (r.Height < lh * 4 || r.Width < 90) continue;
-            TextRenderer.DrawText(g, $"x {s.Bounds.Left} … {s.Bounds.Right}{(s.Primary ? "   ★ main" : "")}", small,
-                new Rectangle(r.X + lh + 2, r.Y + 2, r.Width - lh - 6, lh), EdgeText, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, s.Bounds.Width.ToString(), small, new Rectangle(r.X, r.Y + 2, r.Width, lh), EdgeText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
             var state = g.Save();
-            g.TranslateTransform(r.X + 2, r.Bottom - lh - 4);
+            g.TranslateTransform(r.X + 2, r.Bottom);
             g.RotateTransform(-90);
-            g.DrawString($"y {s.Bounds.Top} … {s.Bounds.Bottom}", small, edge, new RectangleF(0, 0, r.Height - lh - 6, lh),
-                new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap });
+            g.DrawString(s.Bounds.Height.ToString(), small, edge, new RectangleF(0, 0, r.Height, lh),
+                new StringFormat { Alignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap });
             g.Restore(state);
-            string bottom = string.Join(" · ", new[] { s.Name, s.Model, $"{s.Bounds.Width}×{s.Bounds.Height}" }.Where(t => !string.IsNullOrEmpty(t)));
+            string bottom = string.Join(" · ", new[] { s.Name, s.Model }.Where(t => !string.IsNullOrEmpty(t)));
             TextRenderer.DrawText(g, bottom, small, new Rectangle(r.X + lh + 2, r.Bottom - lh - 3, r.Width - lh - 6, lh), Color.White,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
@@ -326,24 +330,4 @@ internal static class ScreenMap
         p.CloseFigure();
         return p;
     }
-
-    /// <summary>"Lenovo T27h-30": the maker from the PnP id in the device path (\\?\DISPLAY#LEN63A3#…)
-    /// when it is a known one, then the model Windows reports.</summary>
-    public static string MakerAndModel(string? deviceId, string? model)
-    {
-        string? maker = null;
-        var parts = (deviceId ?? "").Split('#');
-        if (parts.Length > 1 && parts[1].Length >= 3) Makers.TryGetValue(parts[1][..3].ToUpperInvariant(), out maker);
-        return string.Join(" ", new[] { maker, model }.Where(t => !string.IsNullOrEmpty(t)));
-    }
-
-    // EDID manufacturer ids (UEFI PNP registry) of common monitor and panel makers.
-    private static readonly Dictionary<string, string> Makers = new()
-    {
-        ["ACR"] = "Acer", ["AOC"] = "AOC", ["APP"] = "Apple", ["AUO"] = "AU Optronics", ["AUS"] = "ASUS", ["BNQ"] = "BenQ",
-        ["BOE"] = "BOE", ["CMN"] = "Innolux", ["DEL"] = "Dell", ["ENC"] = "EIZO", ["GBT"] = "Gigabyte", ["GSM"] = "LG",
-        ["HPN"] = "HP", ["HWP"] = "HP", ["IVM"] = "iiyama", ["LEN"] = "Lenovo", ["LGD"] = "LG Display", ["MSI"] = "MSI",
-        ["NEC"] = "NEC", ["PHL"] = "Philips", ["SAM"] = "Samsung", ["SDC"] = "Samsung Display", ["SHP"] = "Sharp",
-        ["SNY"] = "Sony", ["VSC"] = "ViewSonic",
-    };
 }

@@ -156,6 +156,11 @@ internal sealed class Settings
         layout.DeviceSignature = ScreenSetup.DeviceSignatureOf(screens);
         bool switched = !ReferenceEquals(_layout, layout);
         layout.LastUsedUtc = DateTime.UtcNow;
+        // Layouts recorded before BuiltIn existed learn it from the panel plugged in now.
+        if (switched)
+            foreach (var builtIn in layout.Screens.Where(s => s.BuiltIn))
+                foreach (var stored in VsCodeLayouts.Values.SelectMany(l => l.Screens).Where(s => s.Key == builtIn.Key))
+                    stored.BuiltIn = true;
         _layout = layout;
         _layoutStamp = DateTime.UtcNow;
         // Persist a newly-seen arrangement right away, so its key doesn't depend on some later

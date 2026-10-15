@@ -1661,11 +1661,11 @@ internal sealed class ProjectsDialog : Form
             using (var bg = new SolidBrush(ScreenMap.Background)) g.FillRectangle(bg, map);
             ScreenMap.Draw(g, map, Font, _screens.Select(s => new ScreenMap.Tile(
                 new Rectangle(s.Monitor.Left, s.Monitor.Top, s.Width, s.Height), s.Number, s.IsPrimary,
-                Program.Host!.Settings.ScreenName(s.Key), ScreenMap.MakerAndModel(s.DeviceId, s.Model), s.Handle == _focus.Handle)).ToList());
+                Program.Host!.Settings.ScreenName(s.Key), ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), s.Handle == _focus.Handle)).ToList());
 
             var f = _focus;
             string details =
-                $"Screen {(f.Number > 0 ? f.Number.ToString() : "?")}{(f.IsPrimary ? " (primary)" : "")}{(f.Model.Length > 0 ? " — " + f.Model : "")}\n" +
+                $"Screen {(f.Number > 0 ? f.Number.ToString() : "?")}{(f.IsPrimary ? " (primary)" : "")} — {ScreenNaming.Describe(f.DeviceId, f.Model, f.BuiltIn)}\n" +
                 $"{f.Width}×{f.Height} pixels at ({f.Monitor.Left}, {f.Monitor.Top}); work area {f.Work.Right - f.Work.Left}×{f.Work.Bottom - f.Work.Top}\n" +
                 $"GDI device: {f.Device}\n" +
                 $"Device id: {f.DeviceId ?? "(none)"}";

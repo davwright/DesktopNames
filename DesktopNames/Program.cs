@@ -843,7 +843,7 @@ internal sealed class HostForm : Form
         const string screenDoc = "screen: key from screens.list";
         c.Add(new("screens.list", "Every monitor a screen layout remembers", none, "", _ => _settings.KnownScreens().Select(k => new
         {
-            screen = k.Key, k.Name, k.Latest.Model, size = $"{k.Latest.Width}x{k.Latest.Height}", k.Connected, k.Layouts, k.LastUsedUtc, k.OverlayHidden,
+            screen = k.Key, k.Name, maker = ScreenNaming.Maker(k.Latest.DeviceId), model = ScreenNaming.Model(k.Latest.DeviceId, k.Latest.Model, k.Latest.BuiltIn), size = $"{k.Latest.Width}x{k.Latest.Height}", k.Connected, k.Layouts, k.LastUsedUtc, k.OverlayHidden,
         })));
         c.Add(new("screens.rename", "Name a screen", new[] { "screen", "name" }, screenDoc + "; name: empty clears it", a =>
         {
