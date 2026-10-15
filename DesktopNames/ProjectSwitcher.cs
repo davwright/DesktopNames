@@ -576,7 +576,7 @@ internal sealed class ProjectsDialog : Form
     private List<(string folder, DateTime lastUsedUtc)> _folders;
     private List<ProjectSwitcher.Row> _projects = new();
     private readonly TextBox _search = new() { Dock = DockStyle.Top, Font = new Font("Segoe UI", 12f), PlaceholderText = "Type to filter, or a new project name" };
-    private readonly ListView _list = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = true, HideSelection = false, OwnerDraw = true };
+    private readonly BufferedListView _list = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = true, HideSelection = false, OwnerDraw = true };
     // Buttons size to their text: fixed sizes clip at display scaling above 100%.
     private readonly Button _open = new() { Text = "Open (Enter)", AutoSize = true };
     private readonly Button _create = new() { Text = "New project (Ctrl+Enter)", AutoSize = true };
@@ -744,10 +744,15 @@ internal sealed class ProjectsDialog : Form
                                         || p.Folders.Any(f => Path.GetFileName(f).Contains(q, StringComparison.OrdinalIgnoreCase)));
         rows = _sortDesc ? rows.OrderByDescending(SortKey) : rows.OrderBy(SortKey);
 
+        var rowList = rows.ToList();
+        // Same row count (a state refresh, a drop, a menu action): rewrite the rows in place.
+        // Clearing and re-adding repaints the whole list and resets the scroll.
+        bool inPlace = rowList.Count == _list.Items.Count;
         _list.BeginUpdate();
-        _list.Items.Clear();
-        foreach (var p in rows)
+        if (!inPlace) _list.Items.Clear();
+        for (int r = 0; r < rowList.Count; r++)
         {
+            var p = rowList[r];
             var cells = _cols.Select(c => c.Kind switch
             {
                 Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : p.Unresolved ? "?" : "",
@@ -759,7 +764,17 @@ internal sealed class ProjectsDialog : Form
                 Col.LastUsed => p.LastUsedUtc == DateTime.MinValue ? "" : SessionState.FormatAge(p.LastUsedUtc),
                 _ => "",
             }).ToArray();
-            _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(Key(p)) });
+            if (!inPlace)
+            {
+                _list.Items.Add(new ListViewItem(cells) { Tag = p, Selected = selected.Contains(Key(p)) });
+                continue;
+            }
+            var item = _list.Items[r];
+            item.Tag = p;
+            for (int c = 0; c < cells.Length; c++)
+                if (item.SubItems[c].Text != cells[c]) item.SubItems[c].Text = cells[c];
+            bool sel = selected.Contains(Key(p));
+            if (item.Selected != sel) item.Selected = sel;
         }
         if (_list.SelectedItems.Count == 0 && _list.Items.Count > 0) _list.Items[0].Selected = true;
 
@@ -777,9 +792,14 @@ internal sealed class ProjectsDialog : Form
         }
 
         for (int i = 0; i < _cols.Count; i++)
-            _list.Columns[i].Text = _cols[i].Header + (i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
+        {
+            string header = _cols[i].Header + (i == _sortCol ? (_sortDesc ? " ▼" : " ▲") : "");
+            if (_list.Columns[i].Text != header) _list.Columns[i].Text = header;
+        }
+        // Cells are owner-drawn from Tag, so a row whose text didn't change can still need a repaint.
+        if (inPlace) _list.Invalidate();
         _list.EndUpdate();
-        if (top > 0 && _list.Items.Count > 0) _list.TopItem = _list.Items[Math.Min(top, _list.Items.Count - 1)];
+        if (!inPlace && top > 0 && _list.Items.Count > 0) _list.TopItem = _list.Items[Math.Min(top, _list.Items.Count - 1)];
 
         UpdateButtons();
     }
@@ -907,9 +927,15 @@ internal sealed class ProjectsDialog : Form
     private void SetDropTarget(int index, int col)
     {
         if (_dropIndex == index && _dropCol == col) return;
+        InvalidateRow(_dropIndex);
         _dropIndex = index;
         _dropCol = col;
-        _list.Invalidate();
+        InvalidateRow(_dropIndex);
+    }
+
+    private void InvalidateRow(int index)
+    {
+        if (index >= 0 && index < _list.Items.Count) _list.Invalidate(_list.Items[index].Bounds);
     }
 
     private int ColumnAt(Point clientPoint)
@@ -1543,5 +1569,11 @@ internal sealed class ProjectsDialog : Form
             TextRenderer.DrawText(g, details, Font, new Rectangle(12, map.Bottom + 10, Width - 24, Height - map.Bottom - 16),
                 SystemColors.WindowText, TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
         }
+    }
+
+    /// <summary>A ListView that paints off-screen (LVS_EX_DOUBLEBUFFER), so repaints don't flicker.</summary>
+    private sealed class BufferedListView : ListView
+    {
+        public BufferedListView() => DoubleBuffered = true;
     }
 }
