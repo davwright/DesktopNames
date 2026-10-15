@@ -408,7 +408,22 @@ internal sealed class SessionState
             }
         }
         if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);
+        // Two sessions in one folder look alike; when each started tells them apart.
+        string since = ProcessStartedUtc(e.SessionPid) is { } at ? $"started {FormatAge(at)} ago · " : "";
+        sb.Append('\n').Append(TipDim).Append($"{since}last active {FormatAge(e.LastSeenUtc)} ago · session {e.SessionId}");
         return sb.ToString();
+    }
+
+    /// <summary>When the session's Claude process started; null without a pid or once it has exited.</summary>
+    private static DateTime? ProcessStartedUtc(int pid)
+    {
+        if (pid <= 0) return null;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return p.StartTime.ToUniversalTime();
+        }
+        catch (ArgumentException) { return null; } // exited since the last sweep; the sweep removes it
     }
 
     /// <summary>

@@ -155,7 +155,7 @@ internal sealed class Settings
         layout.Screens = screens.Select(ScreenInfo.From).ToList();
         layout.DeviceSignature = ScreenSetup.DeviceSignatureOf(screens);
         bool switched = !ReferenceEquals(_layout, layout);
-        if (switched) layout.LastUsedUtc = DateTime.UtcNow;
+        layout.LastUsedUtc = DateTime.UtcNow;
         _layout = layout;
         _layoutStamp = DateTime.UtcNow;
         // Persist a newly-seen arrangement right away, so its key doesn't depend on some later
@@ -218,7 +218,12 @@ internal sealed class Settings
 
     /// <summary>Drop the cached layout so the next <see cref="Layout"/> re-resolves — called on
     /// WM_DISPLAYCHANGE so a dock/undock switches layouts immediately.</summary>
-    public void InvalidateLayout() => _layout = null;
+    public void InvalidateLayout()
+    {
+        // The arrangement that was plugged in until now was in use up to this moment.
+        if (_layout != null) _layout.LastUsedUtc = DateTime.UtcNow;
+        _layout = null;
+    }
 
     /// <summary>Shorthand for the current arrangement's workspace → location map.</summary>
     public Dictionary<string, WorkspaceLocation> Workspaces => Layout().Workspaces;

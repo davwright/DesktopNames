@@ -770,6 +770,11 @@ internal sealed class HostForm : Form
         }));
         c.Add(new("desktop.toggleBlue", "Toggle blue highlight", desktop, desktopDoc, a => { var id = DesktopArg(a); ToggleBlueHighlight(id); return new { blue = _settings.IsDesktopHighlighted(id) }; }));
         c.Add(new("desktop.clearHighlight", "Clear highlight", desktop, desktopDoc, a => { ClearHighlight(DesktopArg(a)); return null; }));
+        c.Add(new("claude.hide", "Hide a Claude session until it next reports", new[] { "source", "session" }, "source, session: from inspect", a =>
+        {
+            (_sessionState ?? throw new InvalidOperationException("not ready")).RemoveSession(a.RequiredStr("source"), a.RequiredStr("session"));
+            return null;
+        }));
         c.Add(new("claude.prevWaiting", "Previous waiting Claude", none, "", _ => { JumpToWaitingClaude(-1); return null; }));
         c.Add(new("claude.nextWaiting", "Next waiting Claude",     none, "", _ => { JumpToWaitingClaude(+1); return null; }));
         // Deferred: the window is modal, and its loop must not run inside the hotkey or pipe call.

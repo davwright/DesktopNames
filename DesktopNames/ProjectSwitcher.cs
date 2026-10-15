@@ -668,7 +668,11 @@ internal sealed class ProjectsDialog : Form
         _list.MouseDown += (_, e) => { _pressCol = ColumnAt(e.Location); _pressSession = PillAt(e.Location)?.session; };
         _list.MouseMove += (_, e) => UpdateTip(e.Location);
         _list.MouseLeave += (_, _) => { _tipKey = null; _tip.Hide(_list); };
-        _list.MouseClick += (_, e) => { if (KindAt(ColumnAt(e.Location)) == Col.Screen) ShowSnapPicker(e.Location); };
+        _list.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right) { if (PillAt(e.Location) is { } hit) ShowClaudeMenu(hit.session, e.Location); }
+            else if (KindAt(ColumnAt(e.Location)) == Col.Screen) ShowSnapPicker(e.Location);
+        };
         _list.ItemDrag += OnItemDrag;
         _list.DragOver += OnDragOver;
         _list.DragDrop += OnDragDrop;
@@ -1081,6 +1085,18 @@ internal sealed class ProjectsDialog : Form
         _tipText = text;
         if (text.Length == 0) { _tip.Hide(_list); return; }
         _tip.Show(text, _list, pt.X + 16, pt.Y + 20, 30_000);
+    }
+
+    /// <summary>Right-click a Claude pill: which session it is, and hide it.</summary>
+    private void ShowClaudeMenu(SessionState.SessionRef s, Point at)
+    {
+        _tip.Hide(_list);
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(new ToolStripMenuItem($"{s.Label} · {s.SessionId} · {s.Cwd}") { Enabled = false });
+        menu.Items.Add(new ToolStripMenuItem("Hide this Claude (it comes back when it next reports)", null,
+            (_, _) => Run("claude.hide", new { source = s.Source, session = s.SessionId })));
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(_list, at);
     }
 
     /// <summary>Click a VS Code chip: pick its snap position on that screen, applied at once.</summary>
@@ -1642,10 +1658,10 @@ internal sealed class ProjectsDialog : Form
             if (_focus == null || _screens.Count == 0) return;
 
             var map = new Rectangle(12, 12, Width - 24, 150);
-            ScreenMap.Draw(g, map, Font, _screens.Select(s => (
-                new Rectangle(s.Monitor.Left, s.Monitor.Top, s.Width, s.Height),
-                $"{(s.Number > 0 ? s.Number.ToString() : "?")}{(s.IsPrimary ? " ★" : "")}\n{s.Width}×{s.Height}",
-                s.Handle == _focus.Handle)).ToList());
+            using (var bg = new SolidBrush(ScreenMap.Background)) g.FillRectangle(bg, map);
+            ScreenMap.Draw(g, map, Font, _screens.Select(s => new ScreenMap.Tile(
+                new Rectangle(s.Monitor.Left, s.Monitor.Top, s.Width, s.Height), s.Number, s.IsPrimary,
+                Program.Host!.Settings.ScreenName(s.Key), ScreenMap.MakerAndModel(s.DeviceId, s.Model), s.Handle == _focus.Handle)).ToList());
 
             var f = _focus;
             string details =

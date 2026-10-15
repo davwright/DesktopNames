@@ -29,6 +29,7 @@ House practices: the `building-apps` skill (`~/.claude/skills/wiki/building-apps
 | `ui.rows` | what each visible row shows; `{"window":"layouts"}` for the screen layouts window |
 | `ui.hover` | `{"row":1,"column":"Claude"}` → tooltip text, or `{"header":"Screen 1"}` → layout popup |
 | `ui.rename` | `{"row":17}` → opens the in-place desktop-name editor, as F2 does (call after the window has shown) |
+| `ui.mapClick` | `{"screen":1}` → clicks that tile on the screen layouts map (selects the screen below) |
 | `ui.screenshot` | `{"window":"projects"\|"layouts"\|"screen-popup"\|"overlay","path":"C:/abs.png"}` — by handle, any DPI |
 
 Unknown params are errors that list the accepted ones. `ui.open` shows the window on the user's

@@ -45,6 +45,11 @@ internal sealed class ControlChannel
             w.BeginRename(a.RequiredInt("row"));
             return new { editing = w.EditingText };
         }));
+        _methods.Add(new("ui.mapClick", "Click a screen on the screen layouts map, as the mouse does", new[] { "screen" }, "screen: 0-based tile, in the layout's screen order", a =>
+        {
+            LayoutsWindow().SelectMapScreen(a.RequiredInt("screen"));
+            return null;
+        }));
         _methods.Add(new("ui.hover", "Hover a cell or a column header of the DesktopNames window",
             new[] { "row", "column", "header" }, "row: 0-based visible row + column: header text, or header: header text", a =>
             {

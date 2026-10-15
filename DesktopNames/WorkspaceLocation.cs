@@ -107,15 +107,6 @@ internal sealed class ScreenInfo
     [System.Text.Json.Serialization.JsonIgnore]
     public string Key => !string.IsNullOrEmpty(DeviceId) ? DeviceId! : $"{Width}x{Height}";
 
-    /// <summary>"office left" when named, else the model; with the size unless the model already ends in it.</summary>
-    public string Label(string? name)
-    {
-        string size = $"{Width}×{Height}";
-        if (name != null) return $"{name}\n{size}";
-        string model = string.IsNullOrEmpty(Model) ? "screen" : Model!;
-        return model.Contains($"{Width}x{Height}") ? model : $"{model}\n{size}";
-    }
-
     public static ScreenInfo From(MonitorDescriptor m) => new()
     {
         DeviceId = m.DeviceId,
