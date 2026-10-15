@@ -139,6 +139,9 @@ internal sealed class LayoutsDialog : Form
         editInWindows = _editInWindows.Enabled,
     };
 
+    /// <summary>Screens were plugged, unplugged or rearranged: show the layout in use now.</summary>
+    public void Reload() => Fill();
+
     private void Fill()
     {
         FillScreens();

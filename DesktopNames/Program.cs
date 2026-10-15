@@ -1174,8 +1174,13 @@ internal sealed class HostForm : Form
     {
         if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
         {
+            Log.Screens($"display change: {ScreenSetup.Describe()}");
             _settings.InvalidateLayout();   // different screen setup => different remembered layout
-            BeginInvoke(RebuildOverlays);
+            BeginInvoke(() =>
+            {
+                RebuildOverlays();
+                _layoutsDialog?.Reload();
+            });
         }
         else if (m.Msg == NativeMethods.WM_SETTINGCHANGE)
         {
