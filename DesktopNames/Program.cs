@@ -716,6 +716,8 @@ internal sealed class HostForm : Form
 
     public HotkeyManager? Hotkeys => _hotkeys;
     public ProjectSwitcher? Projects => _projects;
+    private LayoutsDialog? _layoutsDialog;
+    public LayoutsDialog? LayoutsWindow => _layoutsDialog;
     public int OverlayCount => _overlays.Count;
     public CommandRegistry Commands { get; } = new();
 
@@ -803,6 +805,40 @@ internal sealed class HostForm : Form
             if (to < 1 || to > count) throw new ArgumentException($"position must be 1..{count}");
             _desktopService.MoveDesktopToIndex(id, to - 1);
             RefreshAllOverlays();
+            return null;
+        }));
+        const string layoutDoc = "layout: key from layouts.list";
+        c.Add(new("layouts.list", "Remembered screen layouts", none, "", _ =>
+        {
+            string current = _settings.CurrentLayoutKey;
+            return _settings.VsCodeLayouts.Select(kv => new
+            {
+                layout = kv.Key, kv.Value.Name, kv.Value.Describe, windows = kv.Value.Workspaces.Count,
+                kv.Value.LastUsedUtc, current = kv.Key == current,
+            });
+        }));
+        c.Add(new("layouts.rename", "Name a screen layout", new[] { "layout", "name" }, layoutDoc + "; name: empty clears it", a =>
+        {
+            _settings.RenameLayout(a.RequiredStr("layout"), a.RequiredStr("name"));
+            _projects?.Dialog?.RefreshState();
+            return null;
+        }));
+        c.Add(new("layouts.delete", "Delete a screen layout that isn't in use", new[] { "layout" }, layoutDoc, a =>
+        {
+            _settings.DeleteLayout(a.RequiredStr("layout"));
+            return null;
+        }));
+        // Deferred like projects.open: the window is modal.
+        c.Add(new("layouts.open", "Open the screen layouts window", none, "", _ =>
+        {
+            if (_layoutsDialog != null) { _layoutsDialog.Activate(); return null; }
+            BeginInvoke(() =>
+            {
+                using (_layoutsDialog = new LayoutsDialog(_settings, Commands))
+                    _layoutsDialog.ShowDialog(_projects?.Dialog);
+                _layoutsDialog = null;
+                _projects?.Dialog?.RefreshState();
+            });
             return null;
         }));
         c.Add(new("desktop.create", "New desktop at the end", none, "", _ => { _desktopService.CreateDesktop(); RefreshAllOverlays(); return null; }));

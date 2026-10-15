@@ -81,6 +81,9 @@ internal sealed class ScreenLayout
 
     public Dictionary<string, WorkspaceLocation> Workspaces { get; set; } = new();
 
+    /// <summary>When this arrangement was last plugged in, so old ones can be told apart and deleted.</summary>
+    public DateTime? LastUsedUtc { get; set; }
+
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? (Describe ?? "unknown setup") : Name!;
 }
 

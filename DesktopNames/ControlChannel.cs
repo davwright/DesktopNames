@@ -29,18 +29,16 @@ internal sealed class ControlChannel
         _methods.Add(new("execute", "Run one command", new[] { "command", "params" }, "command: id; params: object",
             a => _host.Commands.Execute(a.RequiredStr("command"), a.Raw("params"))));
         _methods.Add(new("inspect", "Desktops, Claude sessions and open windows", none, "", _ => Inspect()));
-        _methods.Add(new("ui.open", "Open a window", new[] { "window" }, "window: projects", a =>
+        _methods.Add(new("ui.open", "Open a window", new[] { "window" }, "window: projects | layouts", a =>
+            _host.Commands.Execute(WindowName(a) == "projects" ? "projects.open" : "layouts.open", (JsonElement?)null)));
+        _methods.Add(new("ui.close", "Close a window", new[] { "window" }, "window: projects | layouts", a =>
         {
-            RequireWindowName(a);
-            return _host.Commands.Execute("projects.open", (JsonElement?)null);
-        }));
-        _methods.Add(new("ui.close", "Close a window", new[] { "window" }, "window: projects", a =>
-        {
-            RequireWindowName(a);
-            ProjectsWindow().Close();
+            if (WindowName(a) == "projects") ProjectsWindow().Close();
+            else LayoutsWindow().Close();
             return null;
         }));
-        _methods.Add(new("ui.rows", "The rows the DesktopNames window shows", none, "", _ => ProjectsWindow().VisibleRows()));
+        _methods.Add(new("ui.rows", "The rows a window shows", new[] { "window" }, "window: projects (default) | layouts", a =>
+            (a.Str("window") ?? "projects") == "projects" ? ProjectsWindow().VisibleRows() : LayoutsWindow().Rows()));
         _methods.Add(new("ui.hover", "Hover a cell or a column header of the DesktopNames window",
             new[] { "row", "column", "header" }, "row: 0-based visible row + column: header text, or header: header text", a =>
             {
@@ -49,16 +47,17 @@ internal sealed class ControlChannel
                 return new { tooltip = w.HoverCell(a.RequiredInt("row"), a.RequiredStr("column")) };
             }));
         _methods.Add(new("ui.screenshot", "PNG of a window, captured by its handle",
-            new[] { "window", "path" }, "window: projects | screen-popup | overlay; path: absolute .png", a =>
+            new[] { "window", "path" }, "window: projects | layouts | screen-popup | overlay; path: absolute .png", a =>
             {
                 string path = a.RequiredStr("path");
                 if (!Path.IsPathRooted(path)) throw new ArgumentException("\"path\" must be absolute");
                 IntPtr hwnd = a.RequiredStr("window") switch
                 {
                     "projects" => ProjectsWindow().Handle,
+                    "layouts" => LayoutsWindow().Handle,
                     "screen-popup" => ProjectsWindow().ScreenPopupHandle,
                     "overlay" => _host.Overlays.FirstOrDefault()?.Handle ?? throw new InvalidOperationException("no overlay"),
-                    var other => throw new ArgumentException($"unknown window \"{other}\"; expected: projects, screen-popup, overlay"),
+                    var other => throw new ArgumentException($"unknown window \"{other}\"; expected: projects, layouts, screen-popup, overlay"),
                 };
                 var size = Capture(hwnd, path);
                 return new { path, width = size.Width, height = size.Height };
@@ -100,11 +99,15 @@ internal sealed class ControlChannel
         catch (JsonException) { return false; }
     }
 
-    private static void RequireWindowName(CommandArgs a)
+    private static string WindowName(CommandArgs a)
     {
         string w = a.RequiredStr("window");
-        if (w != "projects") throw new ArgumentException($"unknown window \"{w}\"; expected: projects");
+        if (w is not ("projects" or "layouts")) throw new ArgumentException($"unknown window \"{w}\"; expected: projects, layouts");
+        return w;
     }
+
+    private LayoutsDialog LayoutsWindow() =>
+        _host.LayoutsWindow ?? throw new InvalidOperationException("the screen layouts window is not open; call ui.open first");
 
     private ProjectsDialog ProjectsWindow() =>
         _host.Projects?.Dialog ?? throw new InvalidOperationException("the DesktopNames window is not open; call ui.open first");

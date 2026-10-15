@@ -25,10 +25,10 @@ House practices: the `building-apps` skill (`~/.claude/skills/wiki/building-apps
 |---|---|
 | `commands` / `execute` | — / `{"command":"desktop.toggleBlue","params":{"desktop":3}}` |
 | `inspect` | desktops, Claude sessions, screen setup, window open? |
-| `ui.open` / `ui.close` | `{"window":"projects"}` |
-| `ui.rows` | what each visible row of the DesktopNames window shows |
+| `ui.open` / `ui.close` | `{"window":"projects"\|"layouts"}` |
+| `ui.rows` | what each visible row shows; `{"window":"layouts"}` for the screen layouts window |
 | `ui.hover` | `{"row":1,"column":"Claude"}` → tooltip text, or `{"header":"Screen 1"}` → layout popup |
-| `ui.screenshot` | `{"window":"projects"\|"screen-popup"\|"overlay","path":"C:/abs.png"}` — by handle, any DPI |
+| `ui.screenshot` | `{"window":"projects"\|"layouts"\|"screen-popup"\|"overlay","path":"C:/abs.png"}` — by handle, any DPI |
 
 Unknown params are errors that list the accepted ones. `ui.open` shows the window on the user's
 screen: say so when you use it. Commands like `desktop.switch` and `window.moveToDesktop` change

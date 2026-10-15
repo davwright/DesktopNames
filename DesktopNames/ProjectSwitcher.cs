@@ -406,12 +406,10 @@ internal sealed class ProjectSwitcher : IDisposable
 
     /// <summary>Name the current monitor arrangement ("work", "home") — its layout is remembered separately.</summary>
     public string ScreenSetupName => _settings.Layout().DisplayName;
+    public string CurrentLayoutKey => _settings.CurrentLayoutKey;
 
-    public void RenameScreenSetup(string name)
-    {
-        _settings.Layout().Name = name;
-        _settings.Save();
-    }
+    /// <summary>Window title text: the layout's name, or that it has none yet.</summary>
+    public string ScreenSetupTitle => _settings.Layout() is { Name: { Length: > 0 } name } ? name : $"unnamed layout ({_settings.Layout().Describe})";
 
     public void RenameDesktop(Guid desktopId, string name)
     {
@@ -703,7 +701,11 @@ internal sealed class ProjectsDialog : Form
     }
 
     /// <summary>The title names the screen setup DesktopNames recognises from the monitors plugged in.</summary>
-    private void UpdateTitle() => Text = $"DesktopNames — {_switcher.ScreenSetupName}";
+    private void UpdateTitle()
+    {
+        string title = $"DesktopNames — {_switcher.ScreenSetupTitle}";
+        if (Text != title) Text = title;
+    }
 
     private static Icon LoadIcon(string name)
     {
@@ -730,6 +732,7 @@ internal sealed class ProjectsDialog : Form
     public void RefreshState()
     {
         _projects = _switcher.Describe(_folders);
+        UpdateTitle();
         Fill();
     }
 
@@ -1193,13 +1196,14 @@ internal sealed class ProjectsDialog : Form
             catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
             RefreshState();
         });
-        windows.DropDownItems.Add("Rename this screen setup…", null, (_, _) =>
+        windows.DropDownItems.Add("Rename this screen layout…", null, (_, _) =>
         {
-            string? name = InputDialog.Show("Screen setup", "Name for this monitor arrangement (e.g. work, kitchen, bedroom):", _switcher.ScreenSetupName, this);
+            string? name = InputDialog.Show("Screen layout", "Name for this screen layout (e.g. office, home, laptop):", _switcher.ScreenSetupName, this);
             if (string.IsNullOrWhiteSpace(name)) return;
-            _switcher.RenameScreenSetup(name.Trim());
-            UpdateTitle();
+            try { Program.Host!.Commands.Execute("layouts.rename", CommandRegistry.Args("layouts.rename", Program.Host.Commands, new { layout = _switcher.CurrentLayoutKey, name })); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
         });
+        windows.DropDownItems.Add("Screen layouts…", null, (_, _) => Program.Host!.Commands.Execute("layouts.open", (System.Text.Json.JsonElement?)null));
         windows.DropDownItems.Add(new ToolStripSeparator());
         windows.DropDownItems.Add("Close idle desktops…", null, (_, _) => closeIdle.PerformClick());
 

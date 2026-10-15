@@ -99,13 +99,37 @@ internal sealed class Settings
         layout!.Describe = ScreenSetup.DescribeOf(screens);
         layout.Screens = screens.Select(ScreenInfo.From).ToList();
         layout.DeviceSignature = ScreenSetup.DeviceSignatureOf(screens);
+        bool switched = !ReferenceEquals(_layout, layout);
+        if (switched) layout.LastUsedUtc = DateTime.UtcNow;
         _layout = layout;
         _layoutStamp = DateTime.UtcNow;
         // Persist a newly-seen arrangement right away, so its key doesn't depend on some later
         // window move happening to dirty the file. Re-entry is safe: the cache is already warm.
-        if (created) Save();
+        if (switched) Save();
         return layout;
     }
+
+    /// <summary>Key of the arrangement plugged in right now (<see cref="VsCodeLayouts"/>).</summary>
+    public string CurrentLayoutKey => VsCodeLayouts.First(kv => ReferenceEquals(kv.Value, Layout())).Key;
+
+    public void RenameLayout(string key, string name)
+    {
+        LayoutByKey(key).Name = string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        Save();
+    }
+
+    /// <summary>Forget a remembered arrangement. The one plugged in now can't be deleted: it would be recreated at once.</summary>
+    public void DeleteLayout(string key)
+    {
+        var layout = LayoutByKey(key);
+        if (key == CurrentLayoutKey) throw new InvalidOperationException($"'{layout.DisplayName}' is the screen layout in use; it can't be deleted");
+        VsCodeLayouts.Remove(key);
+        Log.Screens($"deleted layout {key} '{layout.DisplayName}'");
+        Save();
+    }
+
+    private ScreenLayout LayoutByKey(string key) => VsCodeLayouts.TryGetValue(key, out var l) ? l
+        : throw new ArgumentException($"no screen layout \"{key}\"; layouts: {string.Join(", ", VsCodeLayouts.Keys)}");
 
     /// <summary>
     /// First sight of an arrangement. Rather than starting blank, inherit from the closest
