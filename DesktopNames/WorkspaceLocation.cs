@@ -88,7 +88,7 @@ internal sealed class ScreenLayout
 }
 
 /// <summary>A monitor some layout remembers, as last seen.</summary>
-internal sealed record KnownScreen(string Key, ScreenInfo Latest, string? Name, bool Connected, int Layouts, DateTime? LastUsedUtc, bool OverlayHidden);
+internal sealed record KnownScreen(string Key, ScreenInfo Latest, string? Name, bool Connected, int Layouts, DateTime? LastUsedUtc, bool OverlayHidden, int Ports);
 
 /// <summary>One monitor as it stood when an arrangement was recorded.</summary>
 internal sealed class ScreenInfo
@@ -103,6 +103,11 @@ internal sealed class ScreenInfo
     public int Height { get; set; }
     public bool IsPrimary { get; set; }
     public bool BuiltIn { get; set; }
+    public int Hz { get; set; }
+
+    /// <summary>Same identity as <see cref="MonitorDescriptor.Identity"/>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string Identity => ScreenNaming.Identity(DeviceId, Key);
 
     /// <summary>Same key as <see cref="MonitorDescriptor.Key"/>.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -113,6 +118,7 @@ internal sealed class ScreenInfo
         DeviceId = m.DeviceId,
         Model = m.Model,
         BuiltIn = m.BuiltIn,
+        Hz = m.Hz,
         Number = m.Number,
         X = m.Monitor.Left,
         Y = m.Monitor.Top,

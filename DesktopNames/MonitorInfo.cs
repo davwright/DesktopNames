@@ -10,6 +10,11 @@ internal sealed class MonitorDescriptor
     public bool IsPrimary { get; init; }
     /// <summary>The laptop's own panel (embedded DisplayPort / LVDS / internal output).</summary>
     public bool BuiltIn { get; init; }
+    /// <summary>Refresh rate in Hz; 0 when Windows didn't say.</summary>
+    public int Hz { get; init; }
+
+    /// <summary>The physical monitor, whichever port it is on: see <see cref="ScreenNaming.Identity"/>.</summary>
+    public string Identity => ScreenNaming.Identity(DeviceId, Key);
     public int X => Monitor.Left;
     public int Width => Monitor.Right - Monitor.Left;
     public int Height => Monitor.Bottom - Monitor.Top;
@@ -205,9 +210,9 @@ internal static class DisplayNumbering
 
     /// <summary>GDI device name ("\\.\DISPLAY10") → Windows display number, and whether it is the
     /// built-in panel. Empty on failure.</summary>
-    public static Dictionary<string, (int Number, bool BuiltIn)> Current()
+    public static Dictionary<string, (int Number, bool BuiltIn, int Hz)> Current()
     {
-        var result = new Dictionary<string, (int Number, bool BuiltIn)>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, (int Number, bool BuiltIn, int Hz)>(StringComparer.OrdinalIgnoreCase);
         IntPtr modes = IntPtr.Zero;
         try
         {
@@ -221,7 +226,7 @@ internal static class DisplayNumbering
                 return result;
 
             // (adapter, targetId, gdiName) in path order, one entry per source.
-            var entries = new List<(ulong adapter, uint target, string gdi, bool builtIn)>();
+            var entries = new List<(ulong adapter, uint target, string gdi, bool builtIn, int hz)>();
             var adapterOrder = new List<ulong>();
             for (int i = 0; i < np; i++)
             {
@@ -243,13 +248,15 @@ internal static class DisplayNumbering
                 if (!adapterOrder.Contains(adapter)) adapterOrder.Add(adapter);
                 // DISPLAYCONFIG_OUTPUT_TECHNOLOGY: LVDS 6, DISPLAYPORT_EMBEDDED 11, UDI_EMBEDDED 13, INTERNAL 0x80000000.
                 bool builtIn = paths[i].targetInfo.outputTechnology is 6 or 11 or 13 or 0x80000000;
-                entries.Add((adapter, paths[i].targetInfo.id, gdi, builtIn));
+                var t = paths[i].targetInfo;
+                int hz = t.refreshDenominator == 0 ? 0 : (int)Math.Round(t.refreshNumerator / (double)t.refreshDenominator);
+                entries.Add((adapter, t.id, gdi, builtIn, hz));
             }
 
             int n = 0;
             foreach (var adapter in adapterOrder)
                 foreach (var e in entries.Where(e => e.adapter == adapter).OrderBy(e => e.target))
-                    result[e.gdi] = (++n, e.builtIn);
+                    result[e.gdi] = (++n, e.builtIn, e.hz);
         }
         catch { result.Clear(); }
         finally { if (modes != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(modes); }
@@ -467,6 +474,7 @@ internal sealed class MonitorRef
                     Model = ResolveModel(mi.szDevice),
                     Number = numbers.TryGetValue(mi.szDevice ?? "", out var n) ? n.Number : 0,
                     BuiltIn = n.BuiltIn,
+                    Hz = n.Hz,
                     Monitor = mi.rcMonitor,
                     Work = mi.rcWork,
                     IsPrimary = (mi.dwFlags & 1u) != 0   // MONITORINFOF_PRIMARY
@@ -518,6 +526,20 @@ internal sealed class MonitorRef
 /// </summary>
 internal static class ScreenNaming
 {
+    /// <summary>
+    /// One physical monitor across ports: the EDID product id plus its serial number
+    /// ("LEN63A3#V5PZT580"), so the same monitor through a dock, a USB-C hub or HDMI is one screen.
+    /// Without a serial it falls back to the port-specific key.
+    /// </summary>
+    public static string Identity(string? deviceId, string fallbackKey)
+    {
+        var parts = (deviceId ?? "").Split('#');
+        return parts.Length > 1 && Serial(deviceId) is { Length: > 0 } serial ? $"{parts[1]}#{serial}" : fallbackKey;
+    }
+
+    /// <summary>The EDID serial number descriptor (tag 0xFF); null when the monitor doesn't report one.</summary>
+    public static string? Serial(string? deviceId) => EdidText(deviceId, 0xFF);
+
     public static string Maker(string? deviceId)
     {
         var parts = (deviceId ?? "").Split('#');
@@ -527,7 +549,7 @@ internal static class ScreenNaming
     public static string Model(string? deviceId, string? model, bool builtIn)
     {
         if (builtIn) return "Built-in display";
-        string m = string.IsNullOrEmpty(model) || model == "Generic PnP Monitor" ? EdidName(deviceId) ?? model ?? "" : model!;
+        string m = string.IsNullOrEmpty(model) || model == "Generic PnP Monitor" ? EdidText(deviceId, 0xFC) ?? model ?? "" : model!;
         string maker = Maker(deviceId);
         if (m.Equals(maker, StringComparison.OrdinalIgnoreCase)) return "";   // EDID name "SAMSUNG" says nothing more
         // ThinkVision models are T/P/E/S/X/M + size ("T27h-30"); Lenovo's L-series are plain Lenovo.
@@ -540,23 +562,23 @@ internal static class ScreenNaming
         builtIn ? "Built-in display"
         : string.Join(" ", new[] { Maker(deviceId), Model(deviceId, model, builtIn) }.Where(t => t.Length > 0));
 
-    private static readonly Dictionary<string, string?> EdidNames = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<(string, byte), string?> EdidTexts = new();
 
-    /// <summary>The monitor-name descriptor (tag 0xFC) of the EDID Windows keeps under
+    /// <summary>A text descriptor (0xFC name, 0xFF serial) of the EDID Windows keeps under
     /// Enum\DISPLAY\&lt;id&gt;\&lt;instance&gt;, also for monitors not plugged in now.</summary>
-    private static string? EdidName(string? deviceId)
+    private static string? EdidText(string? deviceId, byte tag)
     {
         var parts = (deviceId ?? "").Split('#');
         if (parts.Length < 3) return null;
         string key = $@"SYSTEM\CurrentControlSet\Enum\DISPLAY\{parts[1]}\{parts[2]}\Device Parameters";
-        if (EdidNames.TryGetValue(key, out var cached)) return cached;
-        string? name = null;
+        if (EdidTexts.TryGetValue((key, tag), out var cached)) return cached;
+        string? text = null;
         using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(key))
             if (k?.GetValue("EDID") is byte[] edid)
                 for (int o = 54; o + 18 <= Math.Min(edid.Length, 126); o += 18)
-                    if (edid[o] == 0 && edid[o + 1] == 0 && edid[o + 3] == 0xFC)
-                        name = System.Text.Encoding.ASCII.GetString(edid, o + 5, 13).TrimEnd('\n', ' ', '\0');
-        return EdidNames[key] = name;
+                    if (edid[o] == 0 && edid[o + 1] == 0 && edid[o + 3] == tag)
+                        text = System.Text.Encoding.ASCII.GetString(edid, o + 5, 13).TrimEnd('\n', ' ', '\0');
+        return EdidTexts[(key, tag)] = text;
     }
 
     // EDID manufacturer ids (UEFI PNP registry) of common monitor and panel makers.

@@ -45,9 +45,9 @@ internal sealed class ControlChannel
             w.BeginRename(a.RequiredInt("row"));
             return new { editing = w.EditingText };
         }));
-        _methods.Add(new("ui.mapClick", "Click a screen on the screen layouts map, as the mouse does", new[] { "screen" }, "screen: 0-based tile, in the layout's screen order", a =>
+        _methods.Add(new("ui.mapClick", "Click a screen on the screen layouts map, as the mouse does", new[] { "screen", "ctrl" }, "screen: 0-based tile, in the layout's screen order; ctrl: 1 to Ctrl+click", a =>
         {
-            LayoutsWindow().SelectMapScreen(a.RequiredInt("screen"));
+            LayoutsWindow().SelectMapScreen(a.RequiredInt("screen"), toggle: a.Int("ctrl") == 1);
             return null;
         }));
         _methods.Add(new("ui.hover", "Hover a cell or a column header of the DesktopNames window",

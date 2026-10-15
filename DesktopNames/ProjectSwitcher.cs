@@ -628,7 +628,7 @@ internal sealed class ProjectsDialog : Form
         };
         for (int i = 0; i < _screens.Count; i++)
             _cols.Add(new(Col.Screen, (_screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}")
-                + (Program.Host!.Settings.ScreenName(_screens[i].Key) is { } screenName ? $" · {screenName}" : ""), 160, _screens[i]));
+                + (Program.Host!.Settings.ScreenName(_screens[i].Identity) is { } screenName ? $" · {screenName}" : ""), 160, _screens[i]));
         _cols.Add(new(Col.Claude, "Claude", 170));
         _cols.Add(new(Col.Project, "Project", 150));
         _cols.Add(new(Col.Folder, "Folder", 280));
@@ -1069,7 +1069,7 @@ internal sealed class ProjectsDialog : Form
 
     /// <summary>Hovering a Claude pill shows that session's state, message, background work and recent messages.</summary>
     private static string? OverlayOffReason(ProjectSwitcher.Row p, ColDef c) =>
-        p.Desktop == null ? null : Program.Host!.Settings.OverlayHiddenBy(p.Desktop, c.Screen!.Key);
+        p.Desktop == null ? null : Program.Host!.Settings.OverlayHiddenBy(p.Desktop, c.Screen!.Identity);
 
     private void UpdateTip(Point pt)
     {
@@ -1231,7 +1231,7 @@ internal sealed class ProjectsDialog : Form
             for (int i = 0; i < _screens.Count; i++)
             {
                 var s = _screens[i];
-                moveAll.DropDownItems.Add($"{s.Caption(i, Program.Host!.Settings.ScreenName(s.Key))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                moveAll.DropDownItems.Add($"{s.Caption(i, Program.Host!.Settings.ScreenName(s.Identity))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
                     (_, _) => { Program.Host!.MoveAllVsCodeToScreen(s); RefreshState(); });
             }
             restore.Text = $"Restore VS Code layout  ({_switcher.ScreenSetupName})";
@@ -1309,9 +1309,9 @@ internal sealed class ProjectsDialog : Form
             for (int i = 0; i < _screens.Count; i++)
             {
                 var screen = _screens[i];
-                overlay.DropDownItems.Add(new ToolStripMenuItem($"Show on {screen.Caption(i, settings.ScreenName(screen.Key))}", null,
+                overlay.DropDownItems.Add(new ToolStripMenuItem($"Show on {screen.Caption(i, settings.ScreenName(screen.Identity))}", null,
                     (_, _) => Run("overlay.toggleScreen", new { screen = screen.Number }))
-                    { Checked = !settings.IsScreenHidden(screen.Key) });
+                    { Checked = !settings.IsScreenHidden(screen.Identity) });
             }
             overlay.DropDownItems.Add(new ToolStripSeparator());
             overlay.DropDownItems.Add(new ToolStripMenuItem("Hides itself on a screen where an app is full screen") { Enabled = false });
@@ -1661,7 +1661,7 @@ internal sealed class ProjectsDialog : Form
             using (var bg = new SolidBrush(ScreenMap.Background)) g.FillRectangle(bg, map);
             ScreenMap.Draw(g, map, Font, _screens.Select(s => new ScreenMap.Tile(
                 new Rectangle(s.Monitor.Left, s.Monitor.Top, s.Width, s.Height), s.Number, s.IsPrimary,
-                Program.Host!.Settings.ScreenName(s.Key), ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), s.Handle == _focus.Handle)).ToList());
+                Program.Host!.Settings.ScreenName(s.Identity), ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), s.Hz, s.Handle == _focus.Handle)).ToList());
 
             var f = _focus;
             string details =

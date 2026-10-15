@@ -13,7 +13,7 @@ internal sealed class Settings
     public bool OnlyOnMainDesktop { get; set; }
     public List<Guid> HiddenDesktopGuids { get; set; } = new();
 
-    /// <summary>Screens (<see cref="MonitorDescriptor.Key"/>) whose overlay is turned off.</summary>
+    /// <summary>Screens (<see cref="MonitorDescriptor.Identity"/>) whose overlay is turned off.</summary>
     public List<string> HiddenScreens { get; set; } = new();
 
     public bool IsScreenHidden(string screenKey) => HiddenScreens.Contains(screenKey);
@@ -27,7 +27,7 @@ internal sealed class Settings
         : screenKey != null && IsScreenHidden(screenKey) ? "hidden on this screen"
         : null;
 
-    /// <summary>The user's names for monitors, by <see cref="MonitorDescriptor.Key"/>.</summary>
+    /// <summary>The user's names for monitors, by <see cref="MonitorDescriptor.Identity"/>.</summary>
     public Dictionary<string, string> ScreenNames { get; set; } = new();
 
     public string? ScreenName(string screenKey) => ScreenNames.TryGetValue(screenKey, out var n) ? n : null;
@@ -42,15 +42,16 @@ internal sealed class Settings
     /// <summary>Every monitor any layout remembers, newest sighting first.</summary>
     public List<KnownScreen> KnownScreens()
     {
-        var connected = MonitorRef.EnumerateAll().Select(m => m.Key).ToHashSet();
+        var connected = MonitorRef.EnumerateAll().Select(m => m.Identity).ToHashSet();
         return VsCodeLayouts.Values
             .SelectMany(l => l.Screens.Select(s => (screen: s, layout: l)))
-            .GroupBy(x => x.screen.Key)
+            .GroupBy(x => x.screen.Identity)
             .Select(g =>
             {
                 var latest = g.OrderByDescending(x => x.layout.LastUsedUtc ?? DateTime.MinValue).First();
                 return new KnownScreen(g.Key, latest.screen, ScreenName(g.Key), connected.Contains(g.Key),
-                    g.Select(x => x.layout).Distinct().Count(), latest.layout.LastUsedUtc, IsScreenHidden(g.Key));
+                    g.Select(x => x.layout).Distinct().Count(), latest.layout.LastUsedUtc, IsScreenHidden(g.Key),
+                    g.Select(x => x.screen.Key).Distinct().Count());
             })
             .OrderByDescending(k => k.Connected).ThenByDescending(k => k.LastUsedUtc ?? DateTime.MinValue)
             .ToList();
@@ -60,9 +61,9 @@ internal sealed class Settings
     /// A connected monitor can't be forgotten. Returns how many layouts went with it.</summary>
     public int DeleteScreen(string screenKey)
     {
-        if (MonitorRef.EnumerateAll().Any(m => m.Key == screenKey))
+        if (MonitorRef.EnumerateAll().Any(m => m.Identity == screenKey))
             throw new InvalidOperationException("that screen is connected; it can only be deleted while unplugged");
-        var layouts = VsCodeLayouts.Where(kv => kv.Value.Screens.Any(s => s.Key == screenKey)).Select(kv => kv.Key).ToList();
+        var layouts = VsCodeLayouts.Where(kv => kv.Value.Screens.Any(s => s.Identity == screenKey)).Select(kv => kv.Key).ToList();
         if (layouts.Count == 0 && !ScreenNames.ContainsKey(screenKey) && !HiddenScreens.Contains(screenKey))
             throw new ArgumentException($"no screen \"{screenKey}\"; screens.list shows the known ones");
         foreach (var key in layouts) VsCodeLayouts.Remove(key);
@@ -383,6 +384,11 @@ internal sealed class Settings
         foreach (var (key, suffix) in new[] { ("MoveDesktopLeft", "Left"), ("MoveDesktopRight", "Right"), ("MoveDesktopFirst", "Home"), ("MoveDesktopLast", "End") })
             if (s.Hotkeys.TryGetValue(key, out var old) && old == $"Win+Alt+{suffix}")
                 s.Hotkeys[key] = $"Win+Ctrl+Alt+{suffix}";
+
+        // Migration: screen names and hidden screens were keyed by port-specific device path;
+        // they are keyed by the physical monitor (EDID product + serial) now.
+        s.HiddenScreens = s.HiddenScreens.Select(k => ScreenNaming.Identity(k, k)).Distinct().ToList();
+        s.ScreenNames = s.ScreenNames.GroupBy(kv => ScreenNaming.Identity(kv.Key, kv.Key)).ToDictionary(g => g.Key, g => g.First().Value);
 
         // Migration: the flat workspace map predates per-screen-setup layouts. Adopt it as the
         // layout for whatever arrangement is plugged in now — that's the setup it was recorded on.

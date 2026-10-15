@@ -4,8 +4,9 @@ namespace DesktopNames;
 
 /// <summary>
 /// Remembered screen layouts (one per set of screens and their arrangement) with a to-scale map
-/// of the selected one, and every monitor those layouts know about. Layouts and screens can be
-/// renamed and deleted; every change runs as a command.
+/// of the selected one, and every physical monitor those layouts know about. Selecting screens
+/// narrows the layouts to the ones that contain all of them. Layouts and screens can be renamed
+/// and deleted; every change runs as a command.
 /// </summary>
 internal sealed class LayoutsDialog : Form
 {
@@ -13,12 +14,16 @@ internal sealed class LayoutsDialog : Form
     private readonly CommandRegistry _commands;
     private readonly ListView _layouts = NewList();
     private readonly ListView _screens = NewList();
-    private readonly MapPanel _map = new() { Dock = DockStyle.Right, Width = 520 };
+    private readonly MapPanel _map = new() { Dock = DockStyle.Fill };
+    // Own colors: it sits on the dark map bar and would inherit its background.
+    private readonly Button _editInWindows = new() { Text = "Edit in Windows display settings…", AutoSize = true,
+        BackColor = SystemColors.Control, ForeColor = SystemColors.ControlText };
     private readonly Button _renameLayout = new() { Text = "Rename layout (F2)", AutoSize = true };
     private readonly Button _deleteLayout = new() { Text = "Delete layout (Del)", AutoSize = true };
     private readonly Button _renameScreen = new() { Text = "Rename screen (F2)", AutoSize = true };
     private readonly Button _deleteScreen = new() { Text = "Delete screen (Del)", AutoSize = true };
-    private List<string> _mapKeys = new();
+    private static readonly Color InUse = Color.FromArgb(255, 244, 214);
+    private List<string> _mapIds = new();
     private List<Rectangle> _mapRects = new();
 
     public LayoutsDialog(Settings settings, CommandRegistry commands)
@@ -32,41 +37,50 @@ internal sealed class LayoutsDialog : Form
         TopMost = true;
         MinimizeBox = false;
         KeyPreview = true;
-        Size = new Size(1200, 760);
+        Size = new Size(1250, 780);
 
         _layouts.Columns.Add("Layout", 220);
         _layouts.Columns.Add("Screens", 80);
         _layouts.Columns.Add("VS Code windows", 130);
         _layouts.Columns.Add("Last used", 110);
-        _screens.Columns.Add("Screen", 180);
+        _screens.Columns.Add("Screen", 160);
         _screens.Columns.Add("Manufacturer", 110);
-        _screens.Columns.Add("Model", 300);
-        _screens.Columns.Add("Size", 110);
-        _screens.Columns.Add("In layouts", 90);
-        _screens.Columns.Add("Last seen", 110);
-        _screens.Columns.Add("Status", 220);
+        _screens.Columns.Add("Model", 210);
+        _screens.Columns.Add("Serial", 100);
+        _screens.Columns.Add("Size", 100);
+        _screens.Columns.Add("Ports", 60);
+        _screens.Columns.Add("In layouts", 85);
+        _screens.Columns.Add("Last seen", 95);
+        _screens.Columns.Add("Status", 200);
         _layouts.LabelEdit = true;
         _screens.LabelEdit = true;
 
         _layouts.SelectedIndexChanged += (_, _) => { UpdateButtons(); _map.Invalidate(); };
-        _screens.SelectedIndexChanged += (_, _) => { UpdateButtons(); _map.Invalidate(); };
+        // Selected screens narrow the layouts to those containing all of them (Ctrl+click for several).
+        _screens.SelectedIndexChanged += (_, _) => { FillLayouts(); _map.Invalidate(); };
         _layouts.AfterLabelEdit += (_, e) => OnRenamed(_layouts, e);
         _screens.AfterLabelEdit += (_, e) => OnRenamed(_screens, e);
         _renameLayout.Click += (_, _) => BeginRename(_layouts);
         _deleteLayout.Click += (_, _) => DeleteLayouts();
         _renameScreen.Click += (_, _) => BeginRename(_screens);
         _deleteScreen.Click += (_, _) => DeleteScreen();
+        _editInWindows.Click += (_, _) => Run("screens.windowsSettings", new { });
         _map.Paint += (_, e) => PaintMap(e.Graphics);
         _map.MouseClick += (_, e) =>
         {
             int hit = _mapRects.FindIndex(r => r.Contains(e.Location));
-            if (hit >= 0) SelectMapScreen(hit);
+            if (hit >= 0) SelectMapScreen(hit, toggle: ModifierKeys.HasFlag(Keys.Control));
         };
 
         var close = new Button { Text = "Close (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var mapArea = new Panel { Dock = DockStyle.Right, Width = 540 };
+        var mapBar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, BackColor = ScreenMap.Background };
+        mapBar.Controls.Add(_editInWindows);
+        mapArea.Controls.Add(_map);
+        mapArea.Controls.Add(mapBar);
         var layoutArea = new Panel { Dock = DockStyle.Fill };
         layoutArea.Controls.Add(_layouts);
-        layoutArea.Controls.Add(_map);
+        layoutArea.Controls.Add(mapArea);
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(6) };
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -75,10 +89,10 @@ internal sealed class LayoutsDialog : Form
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(Heading("Layouts — one per set of screens and how they are arranged. The one in use is highlighted. Click a screen on the map to pick it below."));
+        grid.Controls.Add(Heading("Layouts — one per set of screens and how they are arranged. Click a screen on the map to pick it below; Ctrl+click for several."));
         grid.Controls.Add(layoutArea);
         grid.Controls.Add(Buttons(_renameLayout, _deleteLayout));
-        grid.Controls.Add(Heading("Screens — every monitor a layout remembers. Deleting one deletes the layouts it is part of."));
+        grid.Controls.Add(Heading("Screens — every monitor, once however it is connected. Selecting screens shows only the layouts with all of them."));
         grid.Controls.Add(_screens);
         var bottom = Buttons(_renameScreen, _deleteScreen);
         bottom.Controls.Add(close);
@@ -93,7 +107,8 @@ internal sealed class LayoutsDialog : Form
             if (e.KeyCode == Keys.F2) { BeginRename(list); e.Handled = true; }
             else if (e.KeyCode == Keys.Delete) { if (list == _screens) DeleteScreen(); else DeleteLayouts(); e.Handled = true; }
         };
-        Fill();
+        FillScreens();
+        FillLayouts();
     }
 
     private static ListView NewList() => new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = true };
@@ -118,29 +133,44 @@ internal sealed class LayoutsDialog : Form
         screens = _screens.Items.Cast<ListViewItem>().Select(i => new
         {
             key = ((KnownScreen)i.Tag!).Key, name = i.SubItems[0].Text, maker = i.SubItems[1].Text, model = i.SubItems[2].Text,
-            size = i.SubItems[3].Text, layouts = i.SubItems[4].Text, lastSeen = i.SubItems[5].Text, status = i.SubItems[6].Text, selected = i.Selected,
+            serial = i.SubItems[3].Text, size = i.SubItems[4].Text, ports = i.SubItems[5].Text, layouts = i.SubItems[6].Text,
+            lastSeen = i.SubItems[7].Text, status = i.SubItems[8].Text, selected = i.Selected,
         }),
+        editInWindows = _editInWindows.Enabled,
     };
 
     private void Fill()
     {
-        string current = _settings.CurrentLayoutKey;
-        var keepLayouts = SelectedLayoutKeys().ToHashSet();
-        var keepScreens = SelectedScreens().Select(s => s.Key).ToHashSet();
+        FillScreens();
+        FillLayouts();
+    }
 
+    private void FillLayouts()
+    {
+        string current = _settings.CurrentLayoutKey;
+        var keep = SelectedLayoutKeys().ToHashSet();
+        var wanted = SelectedScreens().Select(s => s.Key).ToList();
         _layouts.BeginUpdate();
         _layouts.Items.Clear();
-        foreach (var (key, l) in _settings.VsCodeLayouts.OrderByDescending(kv => kv.Key == current).ThenByDescending(kv => kv.Value.LastUsedUtc ?? DateTime.MinValue))
+        foreach (var (key, l) in _settings.VsCodeLayouts
+                     .Where(kv => wanted.All(id => kv.Value.Screens.Any(s => s.Identity == id)))
+                     .OrderByDescending(kv => kv.Key == current).ThenByDescending(kv => kv.Value.LastUsedUtc ?? DateTime.MinValue))
             _layouts.Items.Add(new ListViewItem(new[]
             {
                 string.IsNullOrWhiteSpace(l.Name) ? "(unnamed)" : l.Name!,
                 l.Screens.Count.ToString(),
                 l.Workspaces.Count.ToString(),
                 key == current ? "in use" : Age(l.LastUsedUtc),
-            }) { Tag = key, Selected = keepLayouts.Contains(key), BackColor = key == current ? SystemColors.Info : _layouts.BackColor });
+            }) { Tag = key, Selected = keep.Contains(key), BackColor = key == current ? InUse : _layouts.BackColor });
         if (_layouts.SelectedItems.Count == 0 && _layouts.Items.Count > 0) _layouts.Items[0].Selected = true;
         _layouts.EndUpdate();
+        UpdateButtons();
+        _map.Invalidate();
+    }
 
+    private void FillScreens()
+    {
+        var keep = SelectedScreens().Select(s => s.Key).ToHashSet();
         _screens.BeginUpdate();
         _screens.Items.Clear();
         foreach (var k in _settings.KnownScreens())
@@ -149,14 +179,14 @@ internal sealed class LayoutsDialog : Form
                 k.Name ?? "(unnamed)",
                 ScreenNaming.Maker(k.Latest.DeviceId),
                 ScreenNaming.Model(k.Latest.DeviceId, k.Latest.Model, k.Latest.BuiltIn),
+                ScreenNaming.Serial(k.Latest.DeviceId) ?? "",
                 $"{k.Latest.Width}×{k.Latest.Height}",
+                k.Ports.ToString(),
                 k.Layouts.ToString(),
                 k.Connected ? "now" : Age(k.LastUsedUtc),
                 string.Join(", ", new[] { k.Connected ? $"connected (screen {k.Latest.Number})" : "", k.OverlayHidden ? "overlay off" : "" }.Where(s => s.Length > 0)),
-            }) { Tag = k, Selected = keepScreens.Contains(k.Key) });
+            }) { Tag = k, Selected = keep.Contains(k.Key), BackColor = k.Connected ? InUse : _screens.BackColor });
         _screens.EndUpdate();
-        UpdateButtons();
-        _map.Invalidate();
     }
 
     private static string Age(DateTime? utc) => utc is { } at ? SessionState.FormatAge(at) + " ago" : "unknown";
@@ -164,6 +194,8 @@ internal sealed class LayoutsDialog : Form
     private List<string> SelectedLayoutKeys() => _layouts.SelectedItems.Cast<ListViewItem>().Select(i => (string)i.Tag!).ToList();
 
     private List<KnownScreen> SelectedScreens() => _screens.SelectedItems.Cast<ListViewItem>().Select(i => (KnownScreen)i.Tag!).ToList();
+
+    private string MapLayoutKey => SelectedLayoutKeys().FirstOrDefault() ?? _settings.CurrentLayoutKey;
 
     private void UpdateButtons()
     {
@@ -173,27 +205,33 @@ internal sealed class LayoutsDialog : Form
         _deleteLayout.Enabled = layouts.Count > 0 && !layouts.Contains(_settings.CurrentLayoutKey);
         _renameScreen.Enabled = screens.Count == 1;
         _deleteScreen.Enabled = screens.Count == 1 && !screens[0].Connected;
+        // Windows can only rearrange the screens plugged in now.
+        _editInWindows.Enabled = MapLayoutKey == _settings.CurrentLayoutKey;
     }
 
-    /// <summary>The selected layout (or the one in use) to scale; the selected screen highlighted.</summary>
+    /// <summary>The selected layout (or the one in use) to scale; selected screens outlined.</summary>
     private void PaintMap(Graphics g)
     {
-        var key = SelectedLayoutKeys().FirstOrDefault() ?? _settings.CurrentLayoutKey;
-        if (!_settings.VsCodeLayouts.TryGetValue(key, out var layout)) return;
+        if (!_settings.VsCodeLayouts.TryGetValue(MapLayoutKey, out var layout)) return;
         var focus = SelectedScreens().Select(s => s.Key).ToHashSet();
-        _mapKeys = layout.Screens.Select(s => s.Key).ToList();
+        _mapIds = layout.Screens.Select(s => s.Identity).ToList();
         _mapRects = ScreenMap.Draw(g, Rectangle.Inflate(_map.ClientRectangle, -12, -12), _map.Font, layout.Screens.Select(s => new ScreenMap.Tile(
-            new Rectangle(s.X, s.Y, s.Width, s.Height), s.Number, s.IsPrimary, _settings.ScreenName(s.Key),
-            ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), focus.Contains(s.Key))).ToList());
+            new Rectangle(s.X, s.Y, s.Width, s.Height), s.Number, s.IsPrimary, _settings.ScreenName(s.Identity),
+            ScreenNaming.Describe(s.DeviceId, s.Model, s.BuiltIn), s.Hz, focus.Contains(s.Identity))).ToList());
     }
 
-    /// <summary>A screen clicked on the map becomes the selected row of the screens list, ready for F2.</summary>
-    public void SelectMapScreen(int index)
+    /// <summary>A screen clicked on the map becomes the selected row of the screens list, ready for F2;
+    /// with Ctrl it is added to or removed from the selection.</summary>
+    public void SelectMapScreen(int index, bool toggle)
     {
-        if (index < 0 || index >= _mapKeys.Count) throw new ArgumentException($"screen must be 0..{_mapKeys.Count - 1}");
-        var item = _screens.Items.Cast<ListViewItem>().First(i => ((KnownScreen)i.Tag!).Key == _mapKeys[index]);
-        _screens.SelectedItems.Clear();
-        item.Selected = true;
+        if (index < 0 || index >= _mapIds.Count) throw new ArgumentException($"screen must be 0..{_mapIds.Count - 1}");
+        var item = _screens.Items.Cast<ListViewItem>().First(i => ((KnownScreen)i.Tag!).Key == _mapIds[index]);
+        if (toggle) item.Selected = !item.Selected;
+        else
+        {
+            _screens.SelectedItems.Clear();
+            item.Selected = true;
+        }
         item.Focused = true;
         _screens.EnsureVisible(item.Index);
         _screens.Focus();
@@ -236,8 +274,8 @@ internal sealed class LayoutsDialog : Form
         var sel = SelectedScreens();
         if (sel.Count != 1 || sel[0].Connected) return;
         var s = sel[0];
-        var layouts = _settings.VsCodeLayouts.Values.Where(l => l.Screens.Any(x => x.Key == s.Key)).Select(l => l.DisplayName).ToList();
-        if (MessageBox.Show(this, $"Forget {s.Name ?? s.Latest.Model} {s.Latest.Width}×{s.Latest.Height}?\n\n" +
+        var layouts = _settings.VsCodeLayouts.Values.Where(l => l.Screens.Any(x => x.Identity == s.Key)).Select(l => l.DisplayName).ToList();
+        if (MessageBox.Show(this, $"Forget {s.Name ?? ScreenNaming.Describe(s.Latest.DeviceId, s.Latest.Model, s.Latest.BuiltIn)}?\n\n" +
                                   $"This deletes the {layouts.Count} layout(s) it is part of:\n{string.Join("\n", layouts)}",
                 "Delete screen", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
         Run("screens.delete", new { screen = s.Key });
@@ -261,12 +299,12 @@ internal sealed class LayoutsDialog : Form
     }
 }
 
-/// <summary>Monitors drawn to scale the way Windows' display settings draw them: a big number per
-/// screen, its width along the top edge, its height up the left edge, name and model along the bottom.
-/// The main screen has its own color.</summary>
+/// <summary>Monitors drawn to scale the way Windows' display settings draw them: a big number and the
+/// refresh rate per screen, its width along the top edge, its height up the left edge, name and model
+/// along the bottom. The main screen has its own color; selected screens get an outline.</summary>
 internal static class ScreenMap
 {
-    public sealed record Tile(Rectangle Bounds, int Number, bool Primary, string? Name, string Model, bool Focus);
+    public sealed record Tile(Rectangle Bounds, int Number, bool Primary, string? Name, string Model, int Hz, bool Focus);
 
     public static readonly Color Background = Color.FromArgb(32, 32, 32);
     private static readonly Color TileFill = Color.FromArgb(52, 52, 52);
@@ -291,15 +329,23 @@ internal static class ScreenMap
         {
             var r = Rectangle.Round(new RectangleF(ox + (s.Bounds.Left - minX) * scale, oy + (s.Bounds.Top - minY) * scale,
                 s.Bounds.Width * scale, s.Bounds.Height * scale));
-            r.Inflate(-3, -3);
+            r.Inflate(-4, -4);
             drawn.Add(r);
             using (var path = Rounded(r, 5))
-            using (var fill = new SolidBrush(s.Focus ? Accent : s.Primary ? MainFill : TileFill))
-                g.FillPath(fill, path);
+            {
+                using (var fill = new SolidBrush(s.Primary ? MainFill : TileFill)) g.FillPath(fill, path);
+                if (s.Focus) using (var ring = new Pen(Accent, 3)) g.DrawPath(ring, path);
+            }
 
-            using (var big = new Font(font.FontFamily, Math.Max(10f, r.Height * 0.32f), GraphicsUnit.Pixel))
-                TextRenderer.DrawText(g, s.Number > 0 ? s.Number.ToString() : "?", big, r, Color.White,
+            // The number, with the refresh rate under it.
+            int bigPx = (int)Math.Max(10f, r.Height * 0.32f);
+            using (var big = new Font(font.FontFamily, bigPx, GraphicsUnit.Pixel))
+                TextRenderer.DrawText(g, s.Number > 0 ? s.Number.ToString() : "?", big,
+                    new Rectangle(r.X, r.Y, r.Width, r.Height - (s.Hz > 0 ? small.Height : 0)), Color.White,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            if (s.Hz > 0)
+                TextRenderer.DrawText(g, $"{s.Hz} Hz", small, new Rectangle(r.X, r.Y + r.Height / 2 + bigPx / 2 - small.Height / 2, r.Width, small.Height),
+                    EdgeText, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
             // Edge labels only where they fit; the hover popup's tiles are too small for them.
             int lh = small.Height;

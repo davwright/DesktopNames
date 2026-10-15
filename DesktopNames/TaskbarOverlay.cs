@@ -373,7 +373,7 @@ internal sealed class TaskbarOverlay : Form
             for (int i = 0; i < screens.Count; i++)
             {
                 var s = screens[i];
-                moveAll.DropDownItems.Add($"{s.Caption(i, _settings.ScreenName(s.Key))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
+                moveAll.DropDownItems.Add($"{s.Caption(i, _settings.ScreenName(s.Identity))}  ({s.Width}×{s.Height}{(s.IsPrimary ? ", primary" : "")})", null,
                     (_, _) => Program.Host?.MoveAllVsCodeToScreen(s));
             }
             _contextMenu.Items.Add(moveAll);
@@ -645,7 +645,7 @@ internal sealed class TaskbarOverlay : Form
 
     /// <summary>This overlay's screen, as stored in <see cref="Settings.HiddenScreens"/>. Overlays are
     /// rebuilt on a display change, so it never goes stale.</summary>
-    public string? ScreenKey => _screenKey ??= Screen?.Key;
+    public string? ScreenKey => _screenKey ??= Screen?.Identity;
 
     public MonitorDescriptor? Screen => MonitorRef.EnumerateAll().FirstOrDefault(m => m.Handle == _taskbar.MonitorHandle);
 

@@ -800,9 +800,9 @@ internal sealed class HostForm : Form
             var screens = MonitorRef.EnumerateAll();
             var screen = screens.FirstOrDefault(s => s.Number == number)
                 ?? throw new ArgumentException($"no screen {number}; screens: {string.Join(", ", screens.Select(s => s.Number))}");
-            _settings.ToggleScreenHidden(screen.Key);
+            _settings.ToggleScreenHidden(screen.Identity);
             RefreshAllOverlays();
-            return new { screen = number, hidden = _settings.IsScreenHidden(screen.Key) };
+            return new { screen = number, hidden = _settings.IsScreenHidden(screen.Identity) };
         }));
         c.Add(new("desktop.toggleOverlay", "Turn the overlay off or on while on one desktop", desktop, desktopDoc, a =>
         {
@@ -848,6 +848,11 @@ internal sealed class HostForm : Form
         c.Add(new("screens.rename", "Name a screen", new[] { "screen", "name" }, screenDoc + "; name: empty clears it", a =>
         {
             _settings.RenameScreen(a.RequiredStr("screen"), a.RequiredStr("name"));
+            return null;
+        }));
+        c.Add(new("screens.windowsSettings", "Open Windows' display settings to arrange the screens plugged in now", none, "", _ =>
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:display") { UseShellExecute = true });
             return null;
         }));
         c.Add(new("screens.delete", "Forget an unplugged screen and the layouts it is part of", new[] { "screen" }, screenDoc, a =>
