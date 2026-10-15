@@ -33,7 +33,7 @@ internal sealed class DesktopService : IDisposable
     public void CreateDesktop()
     {
         if (!VdaDll.IsLoaded) return;
-        try { VdaDll.CreateDesktop(); DesktopsChanged?.Invoke(); } catch { }
+        try { VdaDll.CreateDesktop(); OnDesktopsChanged(); } catch { }
     }
 
     /// <summary>Append a desktop at the end of the list, name it, and return its id. Throws on failure.</summary>
@@ -44,7 +44,7 @@ internal sealed class DesktopService : IDisposable
         if (VdaDll.SetDesktopName(idx, name) < 0)
             throw new InvalidOperationException($"SetDesktopName({idx}, \"{name}\") failed");
         var id = VdaDll.GetDesktopIdByNumber(idx);
-        DesktopsChanged?.Invoke();
+        OnDesktopsChanged();
         return id;
     }
 
@@ -55,7 +55,7 @@ internal sealed class DesktopService : IDisposable
         int idx = IndexFromGuid(desktopId);
         if (idx <= 0) throw new InvalidOperationException($"desktop {desktopId} is first or gone (index {idx})");
         VdaDll.RemoveDesktop(idx, 0);
-        DesktopsChanged?.Invoke();
+        OnDesktopsChanged();
     }
 
     public void RemoveCurrentDesktop()
@@ -68,7 +68,7 @@ internal sealed class DesktopService : IDisposable
             int currentIdx = VdaDll.GetCurrentDesktopNumber();
             int fallbackIdx = currentIdx > 0 ? currentIdx - 1 : 1;
             VdaDll.RemoveDesktop(currentIdx, fallbackIdx);
-            DesktopsChanged?.Invoke();
+            OnDesktopsChanged();
         }
         catch { }
     }
@@ -85,7 +85,7 @@ internal sealed class DesktopService : IDisposable
             int idx = IndexFromGuid(desktopId);
             if (idx < 0) return;
             VdaDll.SetDesktopName(idx, newName);
-            DesktopsChanged?.Invoke();
+            OnDesktopsChanged();
         }
         catch { }
     }
@@ -231,7 +231,13 @@ internal sealed class DesktopService : IDisposable
         catch { return Guid.Empty; }
     }
 
-    public Guid GetCurrentDesktopId()
+    /// <summary>Asks Explorer which desktop is current, and remembers the answer for
+    /// <see cref="GetDesktops"/>. The host's desktop-switch watch calls this continuously.</summary>
+    public Guid GetCurrentDesktopId() => (_current = ReadCurrentDesktopId()).Value;
+
+    private Guid? _current;
+
+    private static Guid ReadCurrentDesktopId()
     {
         if (VdaDll.IsLoaded)
         {
@@ -320,7 +326,7 @@ internal sealed class DesktopService : IDisposable
         {
             var current = _manager.GetCurrentDesktop();
             _manager.MoveDesktop(current, targetIndex);
-            DesktopsChanged?.Invoke();
+            OnDesktopsChanged();
         }
         catch { }
     }
@@ -338,7 +344,7 @@ internal sealed class DesktopService : IDisposable
             var d = _manager.FindDesktop(ref desktopId);
             if (d == null) return;
             _manager.MoveDesktop(d, targetIndex);
-            DesktopsChanged?.Invoke();
+            OnDesktopsChanged();
         }
         catch { }
     }
@@ -412,7 +418,28 @@ internal sealed class DesktopService : IDisposable
         }
     }
 
+    /// <summary>
+    /// The desktops in order, with the current one flagged. Reading them costs a cross-process
+    /// call into Explorer per desktop (15–75 ms for a dozen), and every overlay asks on every
+    /// refresh, so the list is cached until the VirtualDesktops key or one of our own changes
+    /// says it changed. Which desktop is current is read fresh each time.
+    /// </summary>
     public List<DesktopInfo> GetDesktops()
+    {
+        var cached = _desktops ??= ReadDesktops();
+        var current = _current ?? GetCurrentDesktopId();
+        return cached.Select(d => new DesktopInfo { Index = d.Index, Id = d.Id, Name = d.Name, IsCurrent = d.Id == current }).ToList();
+    }
+
+    private volatile List<DesktopInfo>? _desktops;
+
+    private void OnDesktopsChanged()
+    {
+        _desktops = null;
+        DesktopsChanged?.Invoke();
+    }
+
+    private List<DesktopInfo> ReadDesktops()
     {
         if (VdaDll.IsLoaded)
         {
@@ -550,6 +577,7 @@ internal sealed class DesktopService : IDisposable
             try
             {
                 VdaDll.GoToDesktopNumber(desktop.Index);
+                _current = desktop.Id;
                 FocusTopmostWindowOnCurrentDesktop();
                 return;
             }
@@ -639,13 +667,13 @@ internal sealed class DesktopService : IDisposable
         ThreadPool.RegisterWaitForSingleObject(_desktopsKeyChanged, (_, _) =>
         {
             ArmDesktopsKey();
-            DesktopsChanged?.Invoke();
+            OnDesktopsChanged();
         }, null, Timeout.Infinite, executeOnlyOnce: true);
     }
 
     internal void OnDesktopChanged()
     {
-        DesktopsChanged?.Invoke();
+        OnDesktopsChanged();
     }
 
     public void Dispose() { }

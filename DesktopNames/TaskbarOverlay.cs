@@ -575,7 +575,6 @@ internal sealed class TaskbarOverlay : Form
 
     public void RefreshDesktops()
     {
-        EnsurePinned();
         var newDesktops = _desktopService.GetDesktops();
 
         // Append the synthetic "?" entry at the end of the list when there are sessions
@@ -600,7 +599,11 @@ internal sealed class TaskbarOverlay : Form
 
         // Keep desktop list in sync even while hidden (menu still uses it)
         bool desktopsChanged = DesktopsChanged(newDesktops);
-        if (desktopsChanged) _desktops = newDesktops;
+        if (desktopsChanged)
+        {
+            _desktops = newDesktops;
+            EnsurePinned();   // pinning holds until Explorer restarts, which rewrites the desktop list
+        }
 
         if (shouldHide && Visible)
         {
