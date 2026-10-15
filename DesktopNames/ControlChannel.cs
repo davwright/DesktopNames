@@ -39,6 +39,12 @@ internal sealed class ControlChannel
         }));
         _methods.Add(new("ui.rows", "The rows a window shows", new[] { "window" }, "window: projects (default) | layouts", a =>
             (a.Str("window") ?? "projects") == "projects" ? ProjectsWindow().VisibleRows() : LayoutsWindow().Rows()));
+        _methods.Add(new("ui.rename", "Start editing a row's desktop name in place, as F2 does", new[] { "row" }, "row: 0-based visible row", a =>
+        {
+            var w = ProjectsWindow();
+            w.BeginRename(a.RequiredInt("row"));
+            return new { editing = w.EditingText };
+        }));
         _methods.Add(new("ui.hover", "Hover a cell or a column header of the DesktopNames window",
             new[] { "row", "column", "header" }, "row: 0-based visible row + column: header text, or header: header text", a =>
             {

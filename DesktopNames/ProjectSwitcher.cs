@@ -580,6 +580,7 @@ internal sealed class ProjectsDialog : Form
     private readonly Button _create = new() { Text = "New project (Ctrl+Enter)", AutoSize = true };
     private readonly Button _rename = new() { Text = "Rename desktop (F2)", AutoSize = true };
     private readonly Button _hide = new() { Text = "Remove from list (Del)", AutoSize = true };
+    private readonly Button _newDesktop = new() { Text = "New desktop (Ctrl+N)", AutoSize = true };
     private readonly Icon _vscodeIcon = LoadIcon("vscode.ico");
     private readonly Icon _claudeIcon = LoadIcon("claude.ico");
     private readonly ScreenLayoutPopup _screenPopup;
@@ -592,6 +593,8 @@ internal sealed class ProjectsDialog : Form
     private string? _tipKey;
     private string _tipText = "";
     private int _dropIndex = -1, _dropCol = -1;
+    private CellEditor? _editor;
+    private Guid _editDesktop;
 
     // Sorted by desktop, a desktop's rows sit together: its number and name show once, a line
     // separates desktops and alternate desktops are tinted. Indexed by visible row.
@@ -670,7 +673,7 @@ internal sealed class ProjectsDialog : Form
         closeIdle.Click += (_, _) => CloseIdleDesktops();
         var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(6) };
-        bar.Controls.AddRange(new Control[] { cancel, _open, _create, _rename, _hide, closeIdle });
+        bar.Controls.AddRange(new Control[] { cancel, _open, _create, _rename, _newDesktop, _hide, closeIdle });
         var hint = new Label { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
             Text = $"New projects are created in {projectsRoot}" };
 
@@ -689,6 +692,7 @@ internal sealed class ProjectsDialog : Form
         _create.Click += (_, _) => CreateNew();
         _rename.Click += (_, _) => RenameDesktop();
         _hide.Click += (_, _) => HideSelected();
+        _newDesktop.Click += (_, _) => NewDesktop();
         Shown += (_, _) =>
         {
             Activate();
@@ -803,6 +807,7 @@ internal sealed class ProjectsDialog : Form
         if (inPlace) _list.Invalidate();
         _list.EndUpdate();
         if (!inPlace && top > 0 && _list.Items.Count > 0) _list.TopItem = _list.Items[Math.Min(top, _list.Items.Count - 1)];
+        PlaceEditor();
 
         UpdateButtons();
     }
@@ -1088,6 +1093,16 @@ internal sealed class ProjectsDialog : Form
         : throw new InvalidOperationException("the screen popup is not showing; hover a screen header first");
 
     /// <summary>What each visible row shows, by column header.</summary>
+    /// <summary>For the control channel: start editing a row's desktop name, as F2 does.</summary>
+    public void BeginRename(int row)
+    {
+        if (row < 0 || row >= _list.Items.Count) throw new ArgumentException($"row must be 0..{_list.Items.Count - 1}");
+        var d = ((ProjectSwitcher.Row)_list.Items[row].Tag!).Desktop ?? throw new ArgumentException($"row {row} has no desktop");
+        BeginEdit(d.Id);
+    }
+
+    public string? EditingText => _editor?.Text;
+
     public List<Dictionary<string, object?>> VisibleRows() =>
         _list.Items.Cast<ListViewItem>().Select(item =>
         {
@@ -1289,7 +1304,7 @@ internal sealed class ProjectsDialog : Form
                 new(text, null, (_, _) => act()) { Enabled = enabled && d != null, Checked = check, ShortcutKeyDisplayString = keys };
 
             menu.DropDownItems.Add(new ToolStripMenuItem(d != null ? $"— {d.Index + 1}. {d.Name} —" : "— select a row —") { Enabled = false });
-            menu.DropDownItems.Add(Item("Rename…", RenameDesktop, keys: "F2"));
+            menu.DropDownItems.Add(Item("Rename", RenameDesktop, keys: "F2"));
             menu.DropDownItems.Add(Item("Notes…", () => EditNotes(d!)));
             menu.DropDownItems.Add(Item("Blue highlight", () => Run("desktop.toggleBlue", At(d!.Index + 1)),
                 check: d != null && settings.IsDesktopHighlighted(d.Id), keys: "Shift+click tab"));
@@ -1300,7 +1315,7 @@ internal sealed class ProjectsDialog : Form
             menu.DropDownItems.Add(Item("Make first", () => Run("desktop.moveTo", new { desktop = d!.Index + 1, position = 1 }), enabled: d?.Index > 0));
             menu.DropDownItems.Add(Item("Make last", () => Run("desktop.moveTo", new { desktop = d!.Index + 1, position = count }), enabled: d?.Index < count - 1));
             menu.DropDownItems.Add(new ToolStripSeparator());
-            menu.DropDownItems.Add(new ToolStripMenuItem("New desktop", null, (_, _) => Run("desktop.create")));
+            menu.DropDownItems.Add(new ToolStripMenuItem("New desktop", null, (_, _) => NewDesktop()) { ShortcutKeyDisplayString = "Ctrl+N" });
             menu.DropDownItems.Add(Item("Close this desktop…", () => CloseDesktop(d!), enabled: d?.Index > 0));
         };
         menu.DropDownItems.Add("(loading)");
@@ -1357,11 +1372,75 @@ internal sealed class ProjectsDialog : Form
     {
         var sel = SelectedProjects();
         if (sel.Count != 1 || sel[0].Desktop is not { } d) return;
-        string? name = InputDialog.Show("Rename desktop", $"New name for desktop {d.Index + 1}:", d.Name, this);
-        if (string.IsNullOrWhiteSpace(name) || name.Trim() == d.Name) return;
-        try { _switcher.RenameDesktop(d.Id, name.Trim()); }
-        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
-        RefreshState();
+        BeginEdit(d.Id);
+    }
+
+    /// <summary>Edit the Desktop cell in place: Enter or clicking away renames, Esc cancels.</summary>
+    private void BeginEdit(Guid desktopId)
+    {
+        EndEdit(commit: false);
+        _editDesktop = desktopId;
+        _editor = new CellEditor { BorderStyle = BorderStyle.FixedSingle };
+        _list.Controls.Add(_editor);
+        if (EditItem() is { } item)
+        {
+            _list.SelectedItems.Clear();
+            item.Selected = true;
+            _list.EnsureVisible(item.Index);
+        }
+        if (!PlaceEditor()) return;
+        _editor.Text = EditRow()!.Desktop!.Name;
+        _editor.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode is not (Keys.Enter or Keys.Escape)) return;
+            EndEdit(commit: e.KeyCode == Keys.Enter);
+            e.SuppressKeyPress = true;
+        };
+        _editor.Leave += (_, _) => EndEdit(commit: true);
+        _editor.Focus();
+        _editor.SelectAll();
+    }
+
+    private ListViewItem? EditItem() =>
+        _list.Items.Cast<ListViewItem>().FirstOrDefault(i => ((ProjectSwitcher.Row)i.Tag!).Desktop?.Id == _editDesktop);
+
+    private ProjectSwitcher.Row? EditRow() => (ProjectSwitcher.Row?)EditItem()?.Tag;
+
+    /// <summary>Put the editor over its desktop's cell; rows move on every refresh. False (and the edit
+    /// cancelled) when the desktop is no longer listed.</summary>
+    private bool PlaceEditor()
+    {
+        if (_editor == null) return false;
+        if (EditItem() is not { } item) { EndEdit(commit: false); return false; }
+        var b = item.SubItems[_cols.FindIndex(c => c.Kind == Col.Desktop)].Bounds;
+        _editor.Bounds = new Rectangle(b.X, b.Y + (b.Height - _editor.Height) / 2, b.Width, _editor.Height);
+        return true;
+    }
+
+    private void EndEdit(bool commit)
+    {
+        if (_editor is not { } ed) return;
+        _editor = null;
+        string name = ed.Text.Trim();
+        _list.Controls.Remove(ed);
+        ed.Dispose();
+        _list.Focus();
+        var d = EditRow()?.Desktop;
+        if (!commit || d == null || name.Length == 0 || name == d.Name) return;
+        Run("desktop.rename", new { desktop = d.Index + 1, name });
+    }
+
+    private void NewDesktop()
+    {
+        Run("desktop.create");
+        var last = _projects.Where(p => p.Desktop != null).MaxBy(p => p.Desktop!.Index);
+        if (last != null) BeginEdit(last.Desktop!.Id);
+    }
+
+    /// <summary>Takes Enter and Esc itself, so they don't press the dialog's buttons.</summary>
+    private sealed class CellEditor : TextBox
+    {
+        protected override bool IsInputKey(Keys keyData) => keyData is Keys.Enter or Keys.Escape || base.IsInputKey(keyData);
     }
 
     private void HideSelected()
@@ -1410,6 +1489,7 @@ internal sealed class ProjectsDialog : Form
         {
             case Keys.Enter: Accept(); break;
             case Keys.F2: RenameDesktop(); break;
+            case Keys.N when e.Control: NewDesktop(); break;
             case Keys.Delete: HideSelected(); break;
             default: return;
         }
@@ -1435,6 +1515,7 @@ internal sealed class ProjectsDialog : Form
             e.SuppressKeyPress = true;
         }
         else if (e.KeyCode == Keys.F2) { RenameDesktop(); e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.N && e.Control) { NewDesktop(); e.SuppressKeyPress = true; }
     }
 
     private void Accept()
@@ -1579,5 +1660,16 @@ internal sealed class ProjectsDialog : Form
     private sealed class BufferedListView : ListView
     {
         public BufferedListView() => DoubleBuffered = true;
+
+        // WS_CLIPCHILDREN: otherwise row repaints draw over the in-place name editor.
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.Style |= 0x02000000;
+                return cp;
+            }
+        }
     }
 }

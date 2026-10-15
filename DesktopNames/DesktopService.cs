@@ -18,8 +18,12 @@ internal sealed class DesktopService : IDisposable
 
     public event Action? DesktopsChanged;
 
+    private Microsoft.Win32.RegistryKey? _desktopsKey;
+    private readonly AutoResetEvent _desktopsKeyChanged = new(false);
+
     public bool Initialize()
     {
+        WatchDesktopsKey();
         // The interop COM object is still needed for the two operations VDA doesn't cover.
         // VDA itself is initialized by Program.Main before this method runs.
         try { _manager = VirtualDesktopInterop.GetManagerInternal(); } catch { }
@@ -613,6 +617,30 @@ internal sealed class DesktopService : IDisposable
         }
         catch { }
         return -1;
+    }
+
+    /// <summary>
+    /// Explorer rewrites the VirtualDesktops key on every create, close, rename, reorder and
+    /// switch — also the ones made outside DesktopNames (Win+Ctrl+D, Task View).
+    /// </summary>
+    private void WatchDesktopsKey()
+    {
+        _desktopsKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops")
+            ?? throw new InvalidOperationException(@"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops is missing");
+        ArmDesktopsKey();
+    }
+
+    private void ArmDesktopsKey()
+    {
+        int rc = NativeMethods.RegNotifyChangeKeyValue(_desktopsKey!.Handle, true,
+            NativeMethods.REG_NOTIFY_CHANGE_NAME | NativeMethods.REG_NOTIFY_CHANGE_LAST_SET | NativeMethods.REG_NOTIFY_THREAD_AGNOSTIC,
+            _desktopsKeyChanged.SafeWaitHandle, true);
+        if (rc != 0) throw new System.ComponentModel.Win32Exception(rc, "RegNotifyChangeKeyValue on VirtualDesktops");
+        ThreadPool.RegisterWaitForSingleObject(_desktopsKeyChanged, (_, _) =>
+        {
+            ArmDesktopsKey();
+            DesktopsChanged?.Invoke();
+        }, null, Timeout.Infinite, executeOnlyOnce: true);
     }
 
     internal void OnDesktopChanged()

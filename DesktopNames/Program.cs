@@ -630,11 +630,18 @@ internal sealed class HostForm : Form
         // RenameDesktop / CreateDesktop / RemoveDesktop / MoveDesktop all fire this.
         // Without it, a rename succeeds in the OS but the overlay keeps showing the
         // old label until the next 1.5s safety-net refresh.
+        // Also fires for desktops changed outside DesktopNames (registry watch). One action writes
+        // the key several times; one refresh per message-loop pass is enough.
         _desktopService.DesktopsChanged += () =>
         {
-            if (IsDisposed) return;
-            if (InvokeRequired) BeginInvoke(RefreshAllOverlays);
-            else RefreshAllOverlays();
+            if (IsDisposed || _desktopsRefreshPending) return;
+            _desktopsRefreshPending = true;
+            BeginInvoke(() =>
+            {
+                _desktopsRefreshPending = false;
+                RefreshAllOverlays();
+                _projects?.Dialog?.RefreshState();
+            });
         };
 
         // Quick poll for virtual-desktop switches (registry has no notification surface
@@ -841,6 +848,13 @@ internal sealed class HostForm : Form
             });
             return null;
         }));
+        c.Add(new("desktop.rename", "Rename a desktop", new[] { "desktop", "name" }, desktopDoc + "; name: new name", a =>
+        {
+            string name = a.RequiredStr("name").Trim();
+            if (name.Length == 0) throw new ArgumentException("\"name\" must not be empty");
+            _desktopService.RenameDesktop(DesktopArg(a), name);
+            return null;
+        }));
         c.Add(new("desktop.create", "New desktop at the end", none, "", _ => { _desktopService.CreateDesktop(); RefreshAllOverlays(); return null; }));
         c.Add(new("desktop.close", "Close a desktop; its windows move to desktop 1", desktop, desktopDoc, a =>
         {
@@ -947,6 +961,7 @@ internal sealed class HostForm : Form
     }
 
     private bool _recheckPending;
+    private volatile bool _desktopsRefreshPending;
 
     private void RefreshAllOverlays()
     {
