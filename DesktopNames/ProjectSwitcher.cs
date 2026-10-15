@@ -601,6 +601,9 @@ internal sealed class ProjectsDialog : Form
     private bool _grouped;
     private readonly List<(bool start, bool odd)> _groups = new();
     private static readonly Color GroupTint = Color.FromArgb(244, 246, 250);
+    // The desktop you're on: a warm tint, and a bar in the # cell that still shows when selected.
+    private static readonly Color CurrentTint = Color.FromArgb(255, 244, 214);
+    private static readonly Color CurrentBar = Color.FromArgb(232, 145, 0);
 
     /// <summary>Set when the user picked an existing row.</summary>
     public ProjectSwitcher.Row? ChosenRow { get; private set; }
@@ -860,7 +863,10 @@ internal sealed class ProjectsDialog : Form
         var r = e.Bounds;
         bool sel = e.Item.Selected;
         var (groupStart, groupOdd) = _grouped ? _groups[e.ItemIndex] : (true, false);
-        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
+        bool current = p.Desktop?.IsCurrent == true;
+        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : current ? CurrentTint : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
+        if (current && c.Kind == Col.Number)
+            using (var bar = new SolidBrush(CurrentBar)) g.FillRectangle(bar, r.X, r.Y, 4, r.Height);
         var fg = sel ? SystemColors.HighlightText : _list.ForeColor;
         const TextFormatFlags Text = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
 
