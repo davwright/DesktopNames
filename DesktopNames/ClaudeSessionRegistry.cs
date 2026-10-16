@@ -226,7 +226,26 @@ internal sealed class ClaudeSessionRegistry
     private static extern int GetExtendedTcpTable(
         IntPtr table, ref int size, bool order, int af, int tableClass, int reserved);
 
-    private static List<int> ListeningPorts(int pid)
+    /// <summary>
+    /// The workspace folders of every open VS Code window that runs the Claude extension: one
+    /// entry per lock file whose port is still listening (a closed window's lock stays behind).
+    /// Says what is open, not which window has it — see the class remarks.
+    /// </summary>
+    public static List<string[]> OpenWindowFolders()
+    {
+        var dir = Path.Combine(ClaudeDir, "ide");
+        if (!Directory.Exists(dir)) return new();
+        var listening = ListeningPorts(null).ToHashSet();
+        return Directory.GetFiles(dir, "*.lock")
+            .Select(f => int.TryParse(Path.GetFileNameWithoutExtension(f), out int port) ? port : 0)
+            .Where(listening.Contains)
+            .Select(ReadLockFolders)
+            .Where(f => f.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>Ports listening on IPv4, of one process or (null) of all.</summary>
+    private static List<int> ListeningPorts(int? pid)
     {
         const int AfInet = 2;
         const int TcpTableOwnerPidListener = 3;
@@ -247,7 +266,7 @@ internal sealed class ClaudeSessionRegistry
             for (int i = 0; i < count; i++)
             {
                 IntPtr row = buffer + 4 + (i * 24);
-                if (Marshal.ReadInt32(row, 20) != pid) continue;
+                if (pid != null && Marshal.ReadInt32(row, 20) != pid) continue;
                 // dwLocalPort is network byte order in the low two bytes.
                 int raw = Marshal.ReadInt32(row, 8);
                 ports.Add(((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF));

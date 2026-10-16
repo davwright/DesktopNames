@@ -231,6 +231,17 @@ internal sealed class ProjectSwitcher : IDisposable
             rows.Add(new RowBuilder { Desktop = desktops.FirstOrDefault(d => d.Id == w.DesktopId), Window = w, Folders = candidates, Ambiguous = ambiguous });
         }
 
+        // 1a. A window whose title names no folder ("Untitled (Workspace)") gets the folders of the
+        // one open window's lock file that no titled window accounts for — when exactly one of each
+        // is left over. The lock lists what each window has open but not which window it is.
+        var unlinked = rows.Where(r => r.Folders.Count == 0).ToList();
+        if (unlinked.Count == 1)
+        {
+            var unclaimed = ClaudeSessionRegistry.OpenWindowFolders()
+                .Where(lockFolders => !rows.Any(r => r.Folders.Any(f => lockFolders.Any(x => SameFolder(x, f))))).ToList();
+            if (unclaimed.Count == 1) unlinked[0].Folders = unclaimed[0].ToList();
+        }
+
         // 1b. A Claude started in a terminal window: that window is its row, on the desktop it is on.
         var placed = new HashSet<string>();
         var windowsByPid = terminalIds.Count > 0 ? TopLevelWindowsByPid() : new();
