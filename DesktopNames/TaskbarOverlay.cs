@@ -31,12 +31,6 @@ internal sealed class TaskbarOverlay : Form
     // Owner-drawn so the Claude message line renders italic and the cwd dim. _tooltipText holds
     // what's currently shown (set at every Show call) so Popup/Draw can measure and render it.
     private string _tooltipText = "";
-    private readonly Font _ttFont = (Font)(SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont).Clone();
-    private Font _ttItalic = null!;
-    private Font _ttBold = null!;
-    private static readonly TextFormatFlags TipFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
-    private const int TipIndent = 14;
 
     // Reassign-drag state. Plain press-drag on any desktop button starts a *reorder* drag
     // (moves the desktop to the drop position via DesktopService.MoveDesktopToIndex). A
@@ -96,8 +90,6 @@ internal sealed class TaskbarOverlay : Form
         _refreshTimer.Tick += (_, _) => RefreshDesktops();
         _refreshTimer.Start();
 
-        _ttItalic = new Font(_ttFont, FontStyle.Italic);
-        _ttBold = new Font(_ttFont, FontStyle.Bold);
         _stateTooltip.Popup += OnTooltipPopup;
         _stateTooltip.Draw += OnTooltipDraw;
 
@@ -136,6 +128,8 @@ internal sealed class TaskbarOverlay : Form
             _hoveredIndex = -1;
             _stateTooltip.Hide(this);
             _lastTooltipDesktop = Guid.Empty;
+            // Moving up into the card leaves the overlay; anywhere else closes it.
+            if (_card?.ContainsScreenPoint(Cursor.Position) != true) CloseCard();
             Invalidate();
         };
         MouseUp += OnMouseUp;
@@ -1180,28 +1174,55 @@ internal sealed class TaskbarOverlay : Form
         }
     }
 
-    /// <summary>Show note + state on hover. Tooltip is hidden when both are empty.</summary>
+    private HoverCard? _card;
+
+    /// <summary>Hover a desktop button: its card — note and one draggable block per Claude.</summary>
     private void UpdateStateTooltip(int hoveredIndex)
     {
         if (hoveredIndex < 0 || hoveredIndex >= _buttons.Count)
         {
-            _stateTooltip.Hide(this);
-            _lastTooltipDesktop = Guid.Empty;
+            if (_card?.ContainsScreenPoint(Cursor.Position) != true) CloseCard();
             return;
         }
         var btn = _buttons[hoveredIndex];
-        if (btn.Desktop.Id == _lastTooltipDesktop) return; // already showing for this desktop
+        if (_card != null && !_card.IsDisposed && _card.DesktopId == btn.Desktop.Id) return;
+        CloseCard();
+        var blocks = CardBlocks(btn.Desktop.Id);
+        if (blocks.Count == 0) return;
+        _stateTooltip.Hide(this);
+        _card = new HoverCard(btn.Desktop.Id, blocks, RectangleToScreen(btn.Bounds), _isDarkMode);
+        _card.FormClosed += (_, _) => _card = null;
+        _card.Show();
+    }
 
-        string text = BuildTooltipText(btn.Desktop.Id);
-        if (text.Length == 0)
-        {
-            _stateTooltip.Hide(this);
-            _lastTooltipDesktop = Guid.Empty;
-            return;
-        }
-        _lastTooltipDesktop = btn.Desktop.Id;
-        _tooltipText = text;
-        _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, 5000);
+    /// <summary>For the control channel: hover a desktop's button, as the mouse does. False when
+    /// this overlay has no button for it.</summary>
+    public bool HoverDesktop(Guid desktopId)
+    {
+        int i = _buttons.FindIndex(b => b.Desktop.Id == desktopId);
+        if (i < 0 || !Visible) return false;
+        UpdateStateTooltip(i);
+        return true;
+    }
+
+    public IntPtr? CardHandle => _card is { IsDisposed: false } c ? c.Handle : null;
+
+    private void CloseCard()
+    {
+        _card?.Close();
+        _card = null;
+    }
+
+    /// <summary>The desktop's note, then each Claude on it with what it is doing and has done.</summary>
+    private List<HoverCard.Block> CardBlocks(Guid desktopId)
+    {
+        var blocks = new List<HoverCard.Block>();
+        var note = _settings.GetDesktopNote(desktopId);
+        if (note.Length > 0) blocks.Add(new(note, null));
+        if (_sessionState != null)
+            foreach (var s in _sessionState.GetSessions(desktopId))
+                blocks.Add(new(_sessionState.DescribeSession(s.Source, s.SessionId), s));
+        return blocks;
     }
 
     /// <summary>Combine the desktop note (if any) and Claude state tooltip (if any) into one string.</summary>
@@ -1220,93 +1241,20 @@ internal sealed class TaskbarOverlay : Form
         return note + "\n\n" + stateTip;
     }
 
-    // Hover card palette — the same as the session flyout, so the two read as one design.
-    private Color TipBack   => _isDarkMode ? Color.FromArgb(40, 40, 40)    : Color.FromArgb(248, 248, 248);
-    private Color TipBorder => _isDarkMode ? Color.FromArgb(90, 90, 90)    : Color.FromArgb(190, 190, 190);
-    private Color TipFore   => _isDarkMode ? Color.White                   : Color.FromArgb(25, 25, 25);
-    private Color TipDimFg  => _isDarkMode ? Color.FromArgb(170, 170, 170) : Color.FromArgb(110, 110, 110);
-
-    /// <summary>One styled line of the hover card. <c>Right</c> is drawn right-aligned (a run time);
-    /// <c>Dot</c> paints a state-coloured dot before a session header.</summary>
-    private readonly record struct TipLine(string Text, string Right, Font Font, Color Color, int Indent, StateKind? Dot);
-
-    /// <summary>Split the current tooltip text into styled lines by their Tip* markers (see
-    /// SessionState): session header bold with a state dot, Claude message italic, background
-    /// work with run times, the cwd dim. Unmarked lines (the desktop note) are plain.</summary>
-    private IEnumerable<TipLine> TipLines()
-    {
-        foreach (var raw in _tooltipText.Split('\n'))
-        {
-            if (raw.Length == 0) { yield return new("", "", _ttFont, Color.Empty, 0, null); continue; }
-            char m = raw[0];
-            if (m == SessionState.TipHeader)
-                yield return new(raw[2..], "", _ttBold, TipFore, TipIndent, (StateKind)(raw[1] - '0'));
-            else if (m == SessionState.TipItalic)
-                yield return new(raw[1..], "", _ttItalic, TipFore, TipIndent, null);
-            else if (m == SessionState.TipBgHead)
-                yield return new(raw[1..], "", _ttFont, TipFore, TipIndent, null);
-            else if (m == SessionState.TipBg)
-            {
-                int tab = raw.LastIndexOf('\t');
-                yield return tab < 0 ? new(raw[1..], "", _ttFont, TipFore, TipIndent * 2, null)
-                                     : new(raw[1..tab], raw[(tab + 1)..], _ttFont, TipFore, TipIndent * 2, null);
-            }
-            else if (m == SessionState.TipBgSub)
-                yield return new(raw[1..], "", _ttItalic, TipDimFg, TipIndent * 3, null);
-            else if (m == SessionState.TipDim)
-                yield return new(raw[1..], "", _ttFont, TipDimFg, TipIndent, null);
-            else
-                yield return new(raw, "", _ttFont, TipFore, 0, null);
-        }
-    }
-
-    private const int TipCardPad = 10;
-    private const int TipRightGap = 18;
-
-    private static Size TipMeasure(string text, Font font) =>
-        TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TipFlags);
-
+    // The timed tooltip after a desktop switch draws like the hover card.
     private void OnTooltipPopup(object? sender, PopupEventArgs e)
     {
-        int w = 0, h = 0;
-        foreach (var l in TipLines())
-        {
-            if (l.Text.Length == 0) { h += l.Font.Height / 2; continue; }
-            var sz = TipMeasure(l.Text, l.Font);
-            int right = l.Right.Length == 0 ? 0 : TipRightGap + TipMeasure(l.Right, l.Font).Width;
-            w = Math.Max(w, l.Indent + sz.Width + right);
-            h += sz.Height + 1;
-        }
-        e.ToolTipSize = new Size(w + TipCardPad * 2, h + TipCardPad * 2);
+        var size = TipCard.Measure(_tooltipText);
+        e.ToolTipSize = new Size(size.Width + TipCard.Pad * 2, size.Height + TipCard.Pad * 2);
     }
 
     private void OnTooltipDraw(object? sender, DrawToolTipEventArgs e)
     {
         var g = e.Graphics;
-        using (var back = new SolidBrush(TipBack)) g.FillRectangle(back, e.Bounds);
-        using (var pen = new Pen(TipBorder))
+        using (var back = new SolidBrush(TipCard.Back(_isDarkMode))) g.FillRectangle(back, e.Bounds);
+        using (var pen = new Pen(TipCard.Border(_isDarkMode)))
             g.DrawRectangle(pen, e.Bounds.X, e.Bounds.Y, e.Bounds.Width - 1, e.Bounds.Height - 1);
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        int left = e.Bounds.Left + TipCardPad, rightEdge = e.Bounds.Right - TipCardPad;
-        int y = e.Bounds.Top + TipCardPad;
-        foreach (var l in TipLines())
-        {
-            if (l.Text.Length == 0) { y += l.Font.Height / 2; continue; }
-            int lineH = TipMeasure(l.Text, l.Font).Height;
-            if (l.Dot is { } state)
-            {
-                const int d = 8;
-                using var dot = new SolidBrush(SessionFlyout.StateColor(state));
-                g.FillEllipse(dot, left + (TipIndent - d) / 2 - 1, y + (lineH - d) / 2, d, d);
-            }
-            TextRenderer.DrawText(g, l.Text, l.Font, new Point(left + l.Indent, y), l.Color, TipFlags);
-            if (l.Right.Length > 0)
-            {
-                int rw = TipMeasure(l.Right, l.Font).Width;
-                TextRenderer.DrawText(g, l.Right, l.Font, new Point(rightEdge - rw, y), TipDimFg, TipFlags);
-            }
-            y += lineH + 1;
-        }
+        TipCard.Draw(g, _tooltipText, new Point(e.Bounds.Left + TipCard.Pad, e.Bounds.Top + TipCard.Pad), e.Bounds.Right - TipCard.Pad, _isDarkMode);
     }
 
     /// <summary>Show the per-desktop tooltip programmatically (e.g. after switching desktops).</summary>
@@ -1493,9 +1441,7 @@ internal sealed class TaskbarOverlay : Form
         _menuBlurTimer.Stop();
         _menuBlurTimer.Dispose();
         _stateTooltip.Dispose();
-        _ttFont.Dispose();
-        _ttItalic.Dispose();
-        _ttBold.Dispose();
+        CloseCard();
         base.OnFormClosing(e);
     }
 

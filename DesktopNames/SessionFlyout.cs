@@ -343,7 +343,7 @@ internal sealed class SessionFlyout : Form
         Invalidate();
     }
 
-    private static DesktopInfo? HitTestOverlays(Point screenPt)
+    internal static DesktopInfo? HitTestOverlays(Point screenPt)
     {
         if (Program.Host == null) return null;
         foreach (var o in Program.Host.Overlays)
@@ -444,7 +444,7 @@ internal sealed class SessionFlyout : Form
     }
 
     /// <summary>Small translucent label that follows the cursor during a session drag.</summary>
-    private sealed class DragGhost : Form
+    internal sealed class DragGhost : Form
     {
         private static readonly Font GhostFont = new("Segoe UI Variable Text", 9.5f, FontStyle.Bold);
         private readonly string _text;

@@ -31,7 +31,8 @@ House practices: the `building-apps` skill (`~/.claude/skills/wiki/building-apps
 | `ui.rename` | `{"row":17}` → opens the in-place desktop-name editor, as F2 does (call after the window has shown) |
 | `ui.mapClick` | `{"screen":1}` → clicks that tile on the screen layouts map (selects the screen below) |
 | `ui.suggest` | `{"row":2}` → selects the row and presses ?: the desktop its VS Code / Claude belongs on |
-| `ui.screenshot` | `{"window":"projects"\|"layouts"\|"screen-popup"\|"overlay","path":"C:/abs.png"}` — by handle, any DPI |
+| `ui.hoverOverlay` | `{"desktop":6}` → hovers that desktop's overlay button: its hover card shows (screenshot window "card") |
+| `ui.screenshot` | `{"window":"projects"\|"layouts"\|"screen-popup"\|"overlay"\|"card","path":"C:/abs.png"}` — by handle, any DPI |
 
 Unknown params are errors that list the accepted ones. `ui.open` shows the window on the user's
 screen: say so when you use it. Commands like `desktop.switch` and `window.moveToDesktop` change
