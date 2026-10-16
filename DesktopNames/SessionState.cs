@@ -157,6 +157,8 @@ internal sealed class SessionState
     internal const char TipBg = (char)0x1B;
     /// <summary>An agent's latest tool call, under its task line.</summary>
     internal const char TipBgSub = (char)0x1A;
+    /// <summary>An earlier message of the session, above the current one (dim italic bullet).</summary>
+    internal const char TipEarlier = (char)0x19;
 
     public static string StripTipMarkers(string s)
     {
@@ -165,7 +167,7 @@ internal sealed class SessionState
         {
             char c = s[i];
             if (c == TipHeader) { i++; continue; }              // drop the state digit too
-            if (c == TipItalic || c == TipBgHead) continue;
+            if (c == TipItalic || c == TipBgHead || c == TipEarlier) continue;
             if (c == TipDim || c == TipBg) { sb.Append("    "); continue; }
             if (c == TipBgSub) { sb.Append("        "); continue; }
             sb.Append(c == '\t' ? " · " : c.ToString());
@@ -372,7 +374,7 @@ internal sealed class SessionState
         {
             if (e.Consumed) continue;
             if (e.State == max) count++;
-            lines.Add(DescribeEntry(e));
+            lines.Add(DescribeEntry(e, Array.Empty<string>()));
         }
         return (max, count, string.Join("\n\n", lines));
     }
@@ -381,7 +383,7 @@ internal sealed class SessionState
     /// One session's tooltip block, Tip* markers included: header with state, the Claude
     /// message, background work, then the cwd.
     /// </summary>
-    private static string DescribeEntry(SessionEntry e)
+    private static string DescribeEntry(SessionEntry e, IReadOnlyList<string> earlier)
     {
         var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
         // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
@@ -394,7 +396,10 @@ internal sealed class SessionState
         var sb = new System.Text.StringBuilder();
         sb.Append(TipHeader).Append((char)('0' + (int)e.State))
           .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
-        if (!string.IsNullOrEmpty(e.Body)) sb.Append('\n').Append(TipItalic).Append(e.Body);
+        // Earlier messages first, the current one last: a bullet list in the order it happened.
+        string bullet = earlier.Count > 0 ? "• " : "";
+        foreach (var r in earlier) sb.Append('\n').Append(TipEarlier).Append(bullet).Append(r);
+        if (!string.IsNullOrEmpty(e.Body)) sb.Append('\n').Append(TipItalic).Append(bullet).Append(e.Body);
         if (e.Background.Count > 0)
         {
             var counts = e.Background.Values.GroupBy(w => w.Kind)
@@ -432,22 +437,15 @@ internal sealed class SessionState
     }
 
     /// <summary>
-    /// The tooltip block for one session (as the taskbar shows it) followed by its recent
-    /// messages, newest first. Empty when the session is no longer tracked.
+    /// The tooltip block for one session with its earlier messages as bullets above the current
+    /// one, oldest first. Empty when the session is no longer tracked.
     /// </summary>
     public string DescribeSession(string source, string sessionId)
     {
         if (!_location.TryGetValue((source, sessionId), out var desktop) || !_byDesktop.TryGetValue(desktop, out var list)) return "";
         var e = list.FirstOrDefault(x => x.Source == source && x.SessionId == sessionId);
         if (e == null) return "";
-        var sb = new System.Text.StringBuilder(DescribeEntry(e));
-        var recent = e.RecentBodies.AsEnumerable().Reverse().Where(b => b != e.Body).ToList();
-        if (recent.Count > 0)
-        {
-            sb.Append("\n\nRecent:");
-            foreach (var r in recent) sb.Append("\n  • ").Append(r);
-        }
-        return sb.ToString();
+        return DescribeEntry(e, e.RecentBodies.Where(b => b != e.Body).ToList());
     }
 
     /// <summary>Compact relative age since last activity: "10s", "5m", "4h", "3d".</summary>

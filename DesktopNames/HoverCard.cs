@@ -39,9 +39,7 @@ internal sealed class HoverCard : Form
         StartPosition = FormStartPosition.Manual;
         BackColor = TipCard.Back(dark);
 
-        // Lay the blocks out; a hint line goes first when something can be dragged.
         int y = TipCard.Pad, w = 0;
-        if (_blocks.Any(b => b.Session != null)) y += TipCard.Font.Height + 4;
         foreach (var b in _blocks)
         {
             var size = TipCard.Measure(b.Text);
@@ -140,9 +138,6 @@ internal sealed class HoverCard : Form
     {
         var g = e.Graphics;
         using (var pen = new Pen(TipCard.Border(_dark))) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
-        if (_blocks.Any(b => b.Session != null))
-            TextRenderer.DrawText(g, "Drag a Claude onto a desktop to move it there", TipCard.Font,
-                new Point(TipCard.Pad, TipCard.Pad), TipCard.Dim(_dark), TipCard.Flags);
         for (int i = 0; i < _blocks.Count; i++)
         {
             if (i == _hoverBlock)
@@ -192,6 +187,7 @@ internal static class TipCard
             char m = raw[0];
             if (m == SessionState.TipHeader) yield return new(raw[2..], "", Bold, false, Indent, (StateKind)(raw[1] - '0'));
             else if (m == SessionState.TipItalic) yield return new(raw[1..], "", Italic, false, Indent, null);
+            else if (m == SessionState.TipEarlier) yield return new(raw[1..], "", Italic, true, Indent, null);
             else if (m == SessionState.TipBgHead) yield return new(raw[1..], "", Font, false, Indent, null);
             else if (m == SessionState.TipBg)
             {
