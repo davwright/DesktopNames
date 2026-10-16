@@ -45,6 +45,8 @@ internal sealed class ControlChannel
             w.BeginRename(a.RequiredInt("row"));
             return new { editing = w.EditingText };
         }));
+        _methods.Add(new("ui.suggest", "Select a row and press ?: where its VS Code or Claude belongs", new[] { "row" }, "row: 0-based visible row", a =>
+            new { suggestion = ProjectsWindow().Suggest(a.RequiredInt("row")) }));
         _methods.Add(new("ui.mapClick", "Click a screen on the screen layouts map, as the mouse does", new[] { "screen", "ctrl" }, "screen: 0-based tile, in the layout's screen order; ctrl: 1 to Ctrl+click", a =>
         {
             LayoutsWindow().SelectMapScreen(a.RequiredInt("screen"), toggle: a.Int("ctrl") == 1);

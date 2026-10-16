@@ -387,6 +387,40 @@ internal sealed class ProjectSwitcher : IDisposable
         Log.Projects($"placed VS Code '{p.Name}' on screen {screen.Number} {snap}");
     }
 
+    /// <summary>
+    /// Where a row's VS Code window or Claude most likely belongs, best evidence first: a desktop
+    /// that already has the same folder open, the desktop pinned to that folder, then a desktop
+    /// named like the project (equal ignoring punctuation, one name inside the other, or a shared
+    /// start of four letters or more). May be the row's own desktop. Null when nothing fits.
+    /// </summary>
+    public DesktopInfo? SuggestDesktop(Row p, IReadOnlyList<Row> rows)
+    {
+        var desktops = _desktop.GetDesktops();
+        var folders = p.Folders.Select(Settings.FolderKey).ToHashSet();
+        var sameFolder = rows.Where(r => !ReferenceEquals(r, p) && r.Desktop != null && r.Folders.Any(x => folders.Contains(Settings.FolderKey(x))))
+                             .OrderByDescending(r => r.VsCodeOpen).FirstOrDefault();
+        if (sameFolder != null) return sameFolder.Desktop;
+        foreach (var folder in folders)
+            if (_settings.FolderDesktops.TryGetValue(folder, out var pinned) && desktops.FirstOrDefault(d => d.Id == pinned) is { } d) return d;
+
+        string want = Simplify(p.Name);
+        if (want.Length == 0) return null;
+        int Score(DesktopInfo d)
+        {
+            string have = Simplify(d.Name);
+            if (have.Length == 0) return 0;
+            if (have == want) return 3;
+            if (Math.Min(have.Length, want.Length) >= 3 && (have.Contains(want) || want.Contains(have))) return 2;
+            int common = 0;
+            while (common < Math.Min(have.Length, want.Length) && have[common] == want[common]) common++;
+            return common >= 4 ? 1 : 0;
+        }
+        return desktops.Select(d => (d, score: Score(d))).Where(x => x.score > 0)
+                       .OrderByDescending(x => x.score).Select(x => x.d).FirstOrDefault();
+    }
+
+    private static string Simplify(string name) => new(name.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+
     /// <summary>Move every open VS Code window onto the desktop with exactly its workspace's name, if there is one.</summary>
     public int AutoAssignByName()
     {
@@ -589,7 +623,7 @@ internal sealed class ProjectsDialog : Form
     private bool _sortDesc;
     private int _pressCol = -1;
     private SessionState.SessionRef? _pressSession;
-    private readonly ToolTip _tip = new() { UseAnimation = false, UseFading = false };
+    private readonly ToolTip _tip = new() { UseAnimation = false, UseFading = false, ShowAlways = true };
     private string? _tipKey;
     private string _tipText = "";
     private int _dropIndex = -1, _dropCol = -1;
@@ -606,6 +640,59 @@ internal sealed class ProjectsDialog : Form
     private static readonly Color CurrentBar = Color.FromArgb(232, 145, 0);
     // A screen cell whose overlay won't show while on that row's desktop.
     private static readonly Color OverlayOffTint = Color.FromArgb(222, 222, 222);
+    // The desktop the suggester picked for the row being dragged, or after "?".
+    private static readonly Color SuggestTint = Color.FromArgb(198, 239, 206);
+    private Guid? _suggest;
+
+    private static bool EndsGroup(ColDef c) => c.Kind is Col.Desktop or Col.Claude;
+
+    private static void DrawGroupBar(Graphics g, Rectangle r)
+    {
+        using var bar = new Pen(SystemColors.ControlDarkDark, 2);
+        g.DrawLine(bar, r.Right - 1, r.Top, r.Right - 1, r.Bottom);
+    }
+
+    /// <summary>"?": tint where the selected row's VS Code or Claude most likely belongs.</summary>
+    private void ShowSuggestion()
+    {
+        var sel = SelectedProjects();
+        if (sel.Count != 1) return;
+        var d = _switcher.SuggestDesktop(sel[0], _projects);
+        SetSuggestion(d?.Id);
+        string text = d == null ? $"No desktop looks like \"{sel[0].Name}\"."
+            : d.Id == sel[0].Desktop?.Id ? $"\"{sel[0].Name}\" is already on its desktop ({d.Index + 1}. {d.Name})."
+            : $"\"{sel[0].Name}\" belongs on {d.Index + 1}. {d.Name} — press + to move it there.";
+        var at = _list.SelectedItems[0].Bounds;
+        _tipKey = "suggest";
+        _tip.Show(text, _list, at.X + 40, at.Bottom + 2, 6_000);
+        if (d != null && _list.Items.Cast<ListViewItem>().FirstOrDefault(i => ((ProjectSwitcher.Row)i.Tag!).Desktop?.Id == d.Id) is { } target)
+            _list.EnsureVisible(target.Index);
+    }
+
+    /// <summary>"+": move the selected row's VS Code window (or, without one, its Claude sessions) to the suggested desktop.</summary>
+    private void MoveToSuggestion()
+    {
+        var sel = SelectedProjects();
+        if (sel.Count != 1) return;
+        var p = sel[0];
+        var d = _switcher.SuggestDesktop(p, _projects);
+        if (d == null || d.Id == p.Desktop?.Id) { ShowSuggestion(); return; }
+        try
+        {
+            if (p.VsCodeOpen) _switcher.MoveVsCode(p, d);
+            else if (p.ClaudeCount > 0) _switcher.ReassignClaude(p.Sessions.ToArray(), d);
+        }
+        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+        SetSuggestion(null);
+        RefreshState();
+    }
+
+    private void SetSuggestion(Guid? desktop)
+    {
+        if (_suggest == desktop) return;
+        _suggest = desktop;
+        _list.Invalidate();
+    }
 
     /// <summary>Set when the user picked an existing row.</summary>
     public ProjectSwitcher.Row? ChosenRow { get; private set; }
@@ -619,17 +706,17 @@ internal sealed class ProjectsDialog : Form
         // Left to right as they physically stand.
         _screens = MonitorRef.EnumerateAll().OrderBy(s => s.Monitor.Left).ThenBy(s => s.Monitor.Top).ToList();
         _screenPopup = new ScreenLayoutPopup(_screens);
-        // Left to right the way things hang together: desktop → VS Code window (per screen) →
-        // its Claude sessions → the folders that window has open.
+        // Three groups, divided by a bar: the desktop | its Claude sessions | its VS Code windows
+        // (one column per screen) with the project and folders they have open.
         _cols = new()
         {
             new(Col.Number, "#", 50),
             new(Col.Desktop, "Desktop", 140),
+            new(Col.Claude, "Claude", 170),
         };
         for (int i = 0; i < _screens.Count; i++)
             _cols.Add(new(Col.Screen, (_screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}")
                 + (Program.Host!.Settings.ScreenName(_screens[i].Identity) is { } screenName ? $" · {screenName}" : ""), 160, _screens[i]));
-        _cols.Add(new(Col.Claude, "Claude", 170));
         _cols.Add(new(Col.Project, "Project", 150));
         _cols.Add(new(Col.Folder, "Folder", 280));
         _cols.Add(new(Col.LastUsed, "Last used", 80));
@@ -653,15 +740,24 @@ internal sealed class ProjectsDialog : Form
         foreach (var c in _cols) _list.Columns.Add(c.Header, c.Width);
         // Row height comes from the small image list; 26px fits the tab-style pills.
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
-        _list.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        _list.DrawColumnHeader += (_, e) =>
+        {
+            e.DrawBackground();
+            TextRenderer.DrawText(e.Graphics, e.Header!.Text, e.Font, Rectangle.Inflate(e.Bounds, -4, 0), SystemColors.ControlText,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            if (EndsGroup(_cols[e.ColumnIndex])) DrawGroupBar(e.Graphics, e.Bounds);
+        };
         // Folder takes the remaining width, so there is never a horizontal scrollbar.
         int folderIdx = _cols.FindIndex(c => c.Kind == Col.Folder);
         _list.ClientSizeChanged += (_, _) =>
-            _list.Columns[folderIdx].Width = Math.Max(120, _list.ClientSize.Width - _cols.Where((_, i) => i != folderIdx).Sum(c => c.Width));
+            // Actual widths: on a scaled screen they differ from the design widths in _cols.
+            _list.Columns[folderIdx].Width = Math.Max(120, _list.ClientSize.Width
+                - _list.Columns.Cast<ColumnHeader>().Where(h => h.Index != folderIdx).Sum(h => h.Width));
         _list.DrawSubItem += DrawSubItem;
         _list.ColumnClick += (_, e) => SortBy(e.Column);
         _list.DoubleClick += (_, _) => { if (KindAt(_pressCol) != Col.Screen) Accept(); };
         _list.KeyDown += OnListKeyDown;
+        _list.KeyPress += OnSuggestKey;
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
         // What a drag does depends on the cell it starts on (see OnItemDrag).
         _list.AllowDrop = true;
@@ -698,6 +794,7 @@ internal sealed class ProjectsDialog : Form
 
         _search.TextChanged += (_, _) => Fill();
         _search.KeyDown += OnSearchKeyDown;
+        _search.KeyPress += OnSuggestKey;
         _open.Click += (_, _) => Accept();
         _create.Click += (_, _) => CreateNew();
         _rename.Click += (_, _) => RenameDesktop();
@@ -759,7 +856,7 @@ internal sealed class ProjectsDialog : Form
         var rows = _projects.Where(p => q.Length == 0 || p.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
                                         || (p.Desktop?.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
                                         || p.Folders.Any(f => Path.GetFileName(f).Contains(q, StringComparison.OrdinalIgnoreCase)));
-        rows = _sortDesc ? rows.OrderByDescending(SortKey) : rows.OrderBy(SortKey);
+        rows = (_sortDesc ? rows.OrderByDescending(SortKey) : rows.OrderBy(SortKey)).OrderBy(p => p.Unresolved ? 0 : 1);
 
         var rowList = rows.ToList();
         // Same row count (a state refresh, a drop, a menu action): rewrite the rows in place.
@@ -872,7 +969,10 @@ internal sealed class ProjectsDialog : Form
         var (groupStart, groupOdd) = _grouped ? _groups[e.ItemIndex] : (true, false);
         bool current = p.Desktop?.IsCurrent == true;
         bool overlayOff = c.Kind == Col.Screen && OverlayOffReason(p, c) != null;
-        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : overlayOff ? OverlayOffTint : current ? CurrentTint : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
+        bool suggested = _suggest != null && p.Desktop?.Id == _suggest;
+        using (var bg = new SolidBrush(sel ? SystemColors.Highlight : suggested ? SuggestTint : overlayOff ? OverlayOffTint
+                                       : current ? CurrentTint : groupOdd ? GroupTint : _list.BackColor)) g.FillRectangle(bg, r);
+        if (EndsGroup(c)) DrawGroupBar(g, r);
         if (current && c.Kind == Col.Number)
             using (var bar = new SolidBrush(CurrentBar)) g.FillRectangle(bar, r.X, r.Y, 4, r.Height);
         var fg = sel ? SystemColors.HighlightText : _list.ForeColor;
@@ -988,7 +1088,9 @@ internal sealed class ProjectsDialog : Form
         if (!draggable) return;
         _tipKey = null;
         _tip.Hide(_list);
+        SetSuggestion(_switcher.SuggestDesktop(p, _projects)?.Id);
         _list.DoDragDrop(new DragItem(p, kind!.Value, kind == Col.Claude ? _pressSession : null), DragDropEffects.Move);
+        SetSuggestion(null);
         SetDropTarget(-1, -1);
     }
 
@@ -1262,7 +1364,7 @@ internal sealed class ProjectsDialog : Form
         help.DropDownItems.Add("Keyboard shortcuts…", null, (_, _) => Program.ShowShortcuts());
         help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
             "One row per open VS Code window, per Claude session no window claims, and per project folder with neither. " +
-            "Columns run desktop → VS Code (one column per screen) → its Claude sessions → its folders. " +
+            "Three groups, divided by bars: the desktop | its Claude sessions | its VS Code windows (one column per screen) with the project and folders they have open. " +
             "\"not linked\" means the window or session could not be tied to a folder.\n\n" +
             "Type to filter. Enter opens the selected row on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
             "Drag the # cell onto another row to reorder desktops.\n" +
@@ -1272,7 +1374,7 @@ internal sealed class ProjectsDialog : Form
             "A Claude started from a terminal shows >_; a terminal window running Claude is a row with a terminal chip.\n" +
             "Dropping a VS Code chip on a project with no desktop creates that desktop.\n" +
             "Hover a screen column's header to see the monitor arrangement.\n\n" +
-            "F2 renames the desktop, Del removes projects from the list. Click a column header to sort.\n" +
+            "F2 renames the desktop, Del removes projects from the list, ? shows (green) where the selected row belongs and + moves it there; dragging shows it too. Unplaced Claudes (?) stay at the top. Click a column header to sort.\n" +
             "The title shows the screen setup (Windows → Rename this screen setup).\n" +
             "Closing this window keeps DesktopNames running; File → Exit quits it.",
             "DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
@@ -1514,6 +1616,26 @@ internal sealed class ProjectsDialog : Form
         }
         catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
         RefreshState();
+    }
+
+    /// <summary>"?" shows where the selected row belongs, "+" moves it there — typed characters, so
+    /// they work whatever the keyboard layout, from the list and from the search box.</summary>
+    private void OnSuggestKey(object? sender, KeyPressEventArgs e)
+    {
+        if (e.KeyChar == '?') ShowSuggestion();
+        else if (e.KeyChar == '+') MoveToSuggestion();
+        else return;
+        e.Handled = true;
+    }
+
+    /// <summary>For the control channel: select a row and press "?" — returns what the hint says.</summary>
+    public string Suggest(int row)
+    {
+        if (row < 0 || row >= _list.Items.Count) throw new ArgumentException($"row must be 0..{_list.Items.Count - 1}");
+        _list.SelectedItems.Clear();
+        _list.Items[row].Selected = true;
+        ShowSuggestion();
+        return _suggest is { } id ? $"desktop {_switcher.SuggestDesktop((ProjectSwitcher.Row)_list.Items[row].Tag!, _projects)!.Index + 1}" : "none";
     }
 
     private void OnListKeyDown(object? sender, KeyEventArgs e)
