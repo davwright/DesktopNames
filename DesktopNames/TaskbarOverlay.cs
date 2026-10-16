@@ -906,7 +906,7 @@ internal sealed class TaskbarOverlay : Form
             bool isHovered = i == _hoveredIndex;
 
             var (stateKind, _, _) = _sessionState?.GetAggregate(desktop.Id) ?? default;
-            int liveCount = _sessionState?.LiveCount(desktop.Id) ?? 0;
+            var states = _sessionState?.LiveStates(desktop.Id) ?? new List<StateKind>();
             Color? stateBg = stateKind == StateKind.None
                 ? null
                 : ApplyPulse(ResolveStateBaseColor(stateKind), desktop.Id, stateKind);
@@ -932,8 +932,21 @@ internal sealed class TaskbarOverlay : Form
                 g.FillPath(bgBrush, path);
             }
 
-            // Active desktop underline indicator — still drawn over state color so the
-            // user can see which desktop is current even when colored. Full width of the
+            // Text — when state-colored, text contrast comes from the state background
+            // (which is always saturated), so we use the bold text color regardless.
+            bool bold = desktop.IsCurrent || stateBg.HasValue || manualBg.HasValue;
+            var font = bold ? ButtonFontBold : ButtonFont;
+            var color = (stateBg ?? manualBg) is Color fill ? PickContrastText(fill)
+                       : desktop.IsCurrent ? textColor : textDimColor;
+            const TextFormatFlags labelFlags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                                               TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+            if (states.Count >= 2)
+                DrawSessionSegments(g, rect, desktop.Id, states, label, font, labelFlags);
+            else
+                TextRenderer.DrawText(g, label, font, rect, color, labelFlags);
+
+            // Active desktop underline indicator — drawn over state color (and session segments)
+            // so the user can see which desktop is current even when colored. Full width of the
             // button minus a few px of inset so it reads as "this whole cell is active".
             if (desktop.IsCurrent)
             {
@@ -944,23 +957,6 @@ internal sealed class TaskbarOverlay : Form
                 using var indicatorBrush = new SolidBrush(activeIndicatorColor);
                 using var indicatorPath = RoundedRect(new Rectangle(indicatorX, indicatorY, indicatorWidth, 3), 1);
                 g.FillPath(indicatorBrush, indicatorPath);
-            }
-
-            // Text — when state-colored, text contrast comes from the state background
-            // (which is always saturated), so we use the bold text color regardless.
-            bool bold = desktop.IsCurrent || stateBg.HasValue || manualBg.HasValue;
-            var font = bold ? ButtonFontBold : ButtonFont;
-            var color = (stateBg ?? manualBg) is Color fill ? PickContrastText(fill)
-                       : desktop.IsCurrent ? textColor : textDimColor;
-            TextRenderer.DrawText(g, label, font, rect, color,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-
-            // Count badge (top-right) — total live sessions on this desktop (matches the
-            // flyout list), shown whenever more than one shares the colored button.
-            if (stateBg.HasValue && liveCount >= 2)
-            {
-                DrawCountBadge(g, rect, liveCount);
             }
 
             // Drop-target ring while a session is being dragged over this button.
@@ -1055,20 +1051,33 @@ internal sealed class TaskbarOverlay : Form
         return luma > 0.55 ? Color.FromArgb(20, 20, 20) : Color.White;
     }
 
-    internal static void DrawCountBadge(Graphics g, Rectangle btnRect, int count)
+    /// <summary>
+    /// Several Claudes on one desktop: the button is split side by side, one segment per session in
+    /// its own state color, so each one shows instead of only the most urgent. The label runs across
+    /// all of them, each part in the text color that reads on its segment.
+    /// </summary>
+    private void DrawSessionSegments(Graphics g, Rectangle rect, Guid desktopId, List<StateKind> states,
+                                     string label, Font font, TextFormatFlags flags)
     {
-        const int diameter = 14;
-        var badgeRect = new Rectangle(btnRect.Right - diameter - 2, btnRect.Top + 2, diameter, diameter);
-        using var bg = new SolidBrush(Color.FromArgb(220, 30, 30, 30));
-        g.FillEllipse(bg, badgeRect);
-        using var ring = new Pen(Color.FromArgb(220, 255, 255, 255), 1f);
-        g.DrawEllipse(ring, badgeRect);
-
-        var text = count > 9 ? "9+" : count.ToString();
-        using var f = new Font("Segoe UI Variable Text", 7.5f, FontStyle.Bold);
-        TextRenderer.DrawText(g, text, f, badgeRect, Color.White,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        using var shape = RoundedRect(rect, ButtonRadius);
+        var oldClip = g.Clip;
+        for (int i = 0; i < states.Count; i++)
+        {
+            int left = rect.X + rect.Width * i / states.Count, right = rect.X + rect.Width * (i + 1) / states.Count;
+            var segment = new Rectangle(left, rect.Y, right - left, rect.Height);
+            var fill = ApplyPulse(ResolveStateBaseColor(states[i]), desktopId, states[i]);
+            using (var region = new Region(shape))
+            {
+                region.Intersect(segment);
+                g.Clip = region;
+                using (var brush = new SolidBrush(fill)) g.FillRectangle(brush, segment);
+                TextRenderer.DrawText(g, label, font, rect, PickContrastText(fill), flags);
+            }
+            g.Clip = oldClip;
+            if (i > 0)
+                using (var seam = new Pen(Color.FromArgb(160, 0, 0, 0), 1f))
+                    g.DrawLine(seam, left, rect.Y + 3, left, rect.Bottom - 4);
+        }
     }
 
     internal static GraphicsPath RoundedRect(Rectangle rect, int radius)

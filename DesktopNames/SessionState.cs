@@ -460,9 +460,16 @@ internal sealed class SessionState
         return $"{(int)d.TotalDays}d";
     }
 
-    /// <summary>Count of live (non-consumed) sessions on a desktop — what the overlay's
-    /// count badge shows. Differs from <see cref="GetAggregate"/>'s count, which counts only
-    /// the sessions at the dominant state; this is the total the flyout lists.</summary>
+    /// <summary>Count of live (non-consumed) sessions on a desktop. Differs from
+    /// <see cref="GetAggregate"/>'s count, which counts only the sessions at the dominant
+    /// state; this is the total the flyout lists.</summary>
+    /// <summary>The state of each live session on a desktop that shows a color, in the order the
+    /// sessions arrived — stable, so an overlay button split by session doesn't reshuffle.</summary>
+    public List<StateKind> LiveStates(Guid desktopId) =>
+        _byDesktop.TryGetValue(desktopId, out var list)
+            ? list.Where(e => !e.Consumed && e.State != StateKind.None).Select(e => e.State).ToList()
+            : new List<StateKind>();
+
     public int LiveCount(Guid desktopId)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list)) return 0;
