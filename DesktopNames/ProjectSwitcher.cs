@@ -209,7 +209,13 @@ internal sealed class ProjectSwitcher : IDisposable
             int sameTitle = windows.Count(o => o.Workspace == w.Workspace);
             List<string> candidates;
             bool ambiguous;
-            if (sameTitle == 1)
+            if (w.RootPath != null)
+            {
+                // The title says exactly what the window has open.
+                candidates = VsCodeTracker.FoldersOfRootPath(w.RootPath);
+                ambiguous = false;
+            }
+            else if (sameTitle == 1)
             {
                 // The index knows the workspace's root folders (several for a multi-folder workspace);
                 // without it, folders of that name — more than one of those is a guess.
@@ -258,7 +264,7 @@ internal sealed class ProjectSwitcher : IDisposable
                 {
                     Desktop = desktops.FirstOrDefault(d => d.Id == desk),
                     Terminal = true,
-                    Window = new VsCodeTracker.OpenWindow(termHost.Window, WindowTitle(termHost.Window), desk, MonitorRef.FromHwnd(termHost.Window)),
+                    Window = new VsCodeTracker.OpenWindow(termHost.Window, WindowTitle(termHost.Window), desk, MonitorRef.FromHwnd(termHost.Window), null),
                     Folders = folder != null ? new List<string> { folder } : new(),
                 };
                 rows.Add(row);

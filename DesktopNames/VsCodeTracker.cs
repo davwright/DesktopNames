@@ -100,8 +100,9 @@ internal sealed class VsCodeTracker : IDisposable
         return moved;
     }
 
-    /// <summary>One open VS Code workspace window and where it currently lives.</summary>
-    public readonly record struct OpenWindow(IntPtr Hwnd, string Workspace, Guid DesktopId, MonitorRef? Monitor);
+    /// <summary>One open VS Code workspace window and where it currently lives. <see cref="RootPath"/>
+    /// is the folder or workspace file the title names, when window.title includes ${rootPath}.</summary>
+    public readonly record struct OpenWindow(IntPtr Hwnd, string Workspace, Guid DesktopId, MonitorRef? Monitor, string? RootPath);
 
     /// <summary>
     /// Snapshot every currently-open VS Code workspace window with its live desktop + monitor.
@@ -116,9 +117,8 @@ internal sealed class VsCodeTracker : IDisposable
             var clsBuf = new char[64];
             int clsLen = NativeMethods.GetClassName(hwnd, clsBuf, clsBuf.Length);
             if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
-            string? workspace = ExtractWorkspace(GetWindowTitle(hwnd));
-            if (workspace == null) return true;
-            result.Add(new OpenWindow(hwnd, workspace, _desktop.GetDesktopForWindow(hwnd), MonitorRef.FromHwnd(hwnd)));
+            if (ParseTitle(GetWindowTitle(hwnd)) is not { } parsed) return true;
+            result.Add(new OpenWindow(hwnd, parsed.Workspace, _desktop.GetDesktopForWindow(hwnd), MonitorRef.FromHwnd(hwnd), parsed.RootPath));
             return true;
         }, IntPtr.Zero);
         return result;
@@ -323,7 +323,14 @@ internal sealed class VsCodeTracker : IDisposable
         catch { /* leave cache as-is on failure */ }
     }
 
-    internal static string? ExtractWorkspace(string title)
+    internal static string? ExtractWorkspace(string title) => ParseTitle(title)?.Workspace;
+
+    /// <summary>
+    /// The workspace (rootName) a VS Code title names, and the root path when the user's
+    /// window.title puts ${rootPath} after ${rootName} ("file - osis_fixes - C:\git\evolx\osis_fixes -
+    /// profile - Visual Studio Code"). The path is what tells two same-named windows apart.
+    /// </summary>
+    internal static (string Workspace, string? RootPath)? ParseTitle(string title)
     {
         if (string.IsNullOrEmpty(title)) return null;
         string? stripped = null;
@@ -345,6 +352,15 @@ internal sealed class VsCodeTracker : IDisposable
         EnsureProfileCacheFresh();
         stripped = StripTrailingProfile(stripped);
 
+        string? rootPath = null;
+        int pathDash = stripped.LastIndexOf(" - ", StringComparison.Ordinal);
+        string tail = pathDash >= 0 ? stripped[(pathDash + 3)..] : stripped;
+        if (tail.Length > 2 && (tail[1] == ':' && tail[2] == '\\' || tail.StartsWith(@"\\")))
+        {
+            rootPath = tail;
+            stripped = pathDash >= 0 ? stripped[..pathDash] : "";
+        }
+
         int lastDash = stripped.LastIndexOf(" - ", StringComparison.Ordinal);
         var workspace = lastDash >= 0 ? stripped[(lastDash + 3)..] : stripped;
 
@@ -355,6 +371,30 @@ internal sealed class VsCodeTracker : IDisposable
         if (workspace.Length == 0) return null;
         if (workspace is "Welcome" or "Get Started" or "Settings" or "Walkthrough") return null;
 
-        return workspace;
+        return (workspace, rootPath);
+    }
+
+    /// <summary>
+    /// The folders a window's root path stands for: the folder itself, or the folders listed in a
+    /// workspace file (a saved .code-workspace, or an untitled workspace's workspace.json under
+    /// %APPDATA%\Code\Workspaces). Relative paths resolve against the file's directory.
+    /// </summary>
+    internal static List<string> FoldersOfRootPath(string rootPath)
+    {
+        if (!File.Exists(rootPath)) return new List<string> { rootPath };
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(rootPath),
+            new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        var dir = Path.GetDirectoryName(rootPath)!;
+        var folders = new List<string>();
+        if (doc.RootElement.TryGetProperty("folders", out var list))
+            foreach (var f in list.EnumerateArray())
+            {
+                if (f.TryGetProperty("path", out var p) && p.GetString() is { Length: > 0 } rel)
+                    folders.Add(Path.GetFullPath(Path.Combine(dir, rel)));
+                // file:///c%3A/git/kpmg — LocalPath would keep a leading slash, so decode by hand.
+                else if (f.TryGetProperty("uri", out var u) && u.GetString() is { } uri && uri.StartsWith("file:///", StringComparison.OrdinalIgnoreCase))
+                    folders.Add(Uri.UnescapeDataString(uri["file:///".Length..]).Replace('/', '\\'));
+            }
+        return folders;
     }
 }
