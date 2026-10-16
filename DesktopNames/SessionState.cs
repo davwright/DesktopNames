@@ -414,6 +414,11 @@ internal sealed class SessionState
         return sb.ToString();
     }
 
+    /// <summary>When a tracked session's Claude process started; null when unknown.</summary>
+    public DateTime? StartedUtc(string source, string sessionId) =>
+        _location.TryGetValue((source, sessionId), out var desktop) && _byDesktop.TryGetValue(desktop, out var list)
+        && list.FirstOrDefault(x => x.Source == source && x.SessionId == sessionId) is { } e ? ProcessStartedUtc(e.SessionPid) : null;
+
     /// <summary>When the session's Claude process started; null without a pid or once it has exited.</summary>
     private static DateTime? ProcessStartedUtc(int pid)
     {

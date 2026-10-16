@@ -26,7 +26,8 @@ internal sealed class ProjectSwitcher : IDisposable
         IntPtr VsCodeHwnd, string? WindowTitle, MonitorDescriptor? Screen, SnapMode Snap,
         IReadOnlyList<SessionState.SessionRef> Sessions, string? Glyph,
         IReadOnlyList<string> Folders, bool FoldersAmbiguous, DateTime LastUsedUtc,
-        bool IsTerminal, IReadOnlySet<string> TerminalSessionIds)
+        bool IsTerminal, IReadOnlySet<string> TerminalSessionIds,
+        string? ClaudeLink, DateTime? ClaudeStartedUtc)
     {
         /// <summary>The row has a window (VS Code or, with <see cref="IsTerminal"/>, a terminal).</summary>
         public bool VsCodeOpen => VsCodeHwnd != IntPtr.Zero;
@@ -135,6 +136,8 @@ internal sealed class ProjectSwitcher : IDisposable
         public bool Terminal;
         public List<SessionState.SessionRef> Sessions = new();
         public HashSet<string> TerminalIds = new();
+        /// <summary>How each session was tied to this row: lock file, folder, terminal window, nothing.</summary>
+        public Dictionary<string, string> Links = new();
     }
 
     /// <summary>Visible, titled, non-tool top-level windows by owning process — where a terminal
@@ -251,6 +254,7 @@ internal sealed class ProjectSwitcher : IDisposable
             }
             row.Sessions.Add(s);
             row.TerminalIds.Add(s.SessionId);
+            row.Links[s.SessionId] = "its terminal window";
             placed.Add(s.SessionId);
         }
 
@@ -259,8 +263,9 @@ internal sealed class ProjectSwitcher : IDisposable
             if (placed.Contains(s.SessionId)) continue;
             bool terminal = terminalIds.Contains(s.SessionId);
             var onDesktop = rows.Where(r => r.Window != null && !r.Terminal && r.Desktop?.Id == id).ToList();
-            var row = onDesktop.FirstOrDefault(r => r.Folders.Any(f => sf.Any(x => SameFolder(x, f))))
-                   ?? onDesktop.FirstOrDefault(r => s.Cwd.Length > 0 && r.Folders.Any(f => IsUnder(s.Cwd, f)));
+            var byLock = onDesktop.FirstOrDefault(r => r.Folders.Any(f => sf.Any(x => SameFolder(x, f))));
+            var row = byLock ?? onDesktop.FirstOrDefault(r => s.Cwd.Length > 0 && r.Folders.Any(f => IsUnder(s.Cwd, f)));
+            string link = byLock != null ? "VS Code lock" : row != null ? "its folder" : id == SessionState.UnresolvedDesktopId ? "no desktop" : "no window";
             if (row == null)
             {
                 string? folder = sf.Count > 0 ? sf[0] : terminal ? ProjectFolderFor(live[s.SessionId]!.Cwd) : null;
@@ -278,6 +283,7 @@ internal sealed class ProjectSwitcher : IDisposable
                 }
             }
             row.Sessions.Add(s);
+            row.Links[s.SessionId] = link;
             if (terminal) row.TerminalIds.Add(s.SessionId);
         }
 
@@ -297,7 +303,7 @@ internal sealed class ProjectSwitcher : IDisposable
         var lastUsed = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         foreach (var (folder, t) in folders) lastUsed[Settings.FolderKey(folder)] = t;
 
-        return rows.Select(r =>
+        return rows.SelectMany(r =>
         {
             MonitorDescriptor? screen = null;
             SnapMode snap = SnapMode.Free;
@@ -313,8 +319,19 @@ internal sealed class ProjectSwitcher : IDisposable
             var used = r.Folders.Select(f => lastUsed.TryGetValue(Settings.FolderKey(f), out var t) ? t : DateTime.MinValue)
                                 .DefaultIfEmpty(DateTime.MinValue).Max();
             if (used == DateTime.MinValue && (r.Window != null || r.Sessions.Count > 0)) used = DateTime.UtcNow;
-            return new Row(r.Desktop, r.Unresolved, r.Window?.Hwnd ?? IntPtr.Zero, r.Window?.Workspace, screen, snap,
-                r.Sessions, glyph, r.Folders, r.Ambiguous, used, r.Terminal, r.TerminalIds);
+            // One Claude per row: a window with several gets a row for each further one, right under it.
+            var first = r.Sessions.Take(1).ToList();
+            var result = new List<Row>
+            {
+                new(r.Desktop, r.Unresolved, r.Window?.Hwnd ?? IntPtr.Zero, r.Window?.Workspace, screen, snap,
+                    first, glyph, r.Folders, r.Ambiguous, used, r.Terminal, r.TerminalIds,
+                    first.Count > 0 ? r.Links[first[0].SessionId] : null, first.Count > 0 ? _sessions?.StartedUtc(first[0].Source, first[0].SessionId) : null),
+            };
+            foreach (var s in r.Sessions.Skip(1))
+                result.Add(new(r.Desktop, r.Unresolved, IntPtr.Zero, null, null, SnapMode.Free,
+                    new[] { s }, null, Array.Empty<string>(), false, used, false, r.TerminalIds,
+                    r.Links[s.SessionId], _sessions?.StartedUtc(s.Source, s.SessionId)));
+            return result;
         }).ToList();
     }
 
@@ -396,7 +413,7 @@ internal sealed class ProjectSwitcher : IDisposable
     public DesktopInfo? SuggestDesktop(Row p, IReadOnlyList<Row> rows)
     {
         var desktops = _desktop.GetDesktops();
-        var folders = p.Folders.Select(Settings.FolderKey).ToHashSet();
+        var folders = p.Folders.Concat(p.Sessions.Select(s => s.Cwd).Where(c => c.Length > 0)).Select(Settings.FolderKey).ToHashSet();
         var sameFolder = rows.Where(r => !ReferenceEquals(r, p) && r.Desktop != null && r.Folders.Any(x => folders.Contains(Settings.FolderKey(x))))
                              .OrderByDescending(r => r.VsCodeOpen).FirstOrDefault();
         if (sameFolder != null) return sameFolder.Desktop;
@@ -593,7 +610,7 @@ internal sealed class ProjectSwitcher : IDisposable
 /// </summary>
 internal sealed class ProjectsDialog : Form
 {
-    private enum Col { Number, Desktop, Screen, Claude, Project, Folder, LastUsed }
+    private enum Col { Number, Desktop, Screen, Claude, ClaudeFolder, Started, Link, Project, Folder, LastUsed }
 
     /// <summary>One list column: its kind, and for a screen column the monitor it stands for.</summary>
     private sealed record ColDef(Col Kind, string Header, int Width, MonitorDescriptor? Screen = null);
@@ -644,7 +661,7 @@ internal sealed class ProjectsDialog : Form
     private static readonly Color SuggestTint = Color.FromArgb(198, 239, 206);
     private Guid? _suggest;
 
-    private static bool EndsGroup(ColDef c) => c.Kind is Col.Desktop or Col.Claude;
+    private static bool EndsGroup(ColDef c) => c.Kind is Col.Desktop or Col.Link;
 
     private static void DrawGroupBar(Graphics g, Rectangle r)
     {
@@ -710,16 +727,19 @@ internal sealed class ProjectsDialog : Form
         // (one column per screen) with the project and folders they have open.
         _cols = new()
         {
-            new(Col.Number, "#", 50),
-            new(Col.Desktop, "Desktop", 140),
-            new(Col.Claude, "Claude", 170),
+            new(Col.Number, "#", 40),
+            new(Col.Desktop, "Desktop", 120),
+            new(Col.Claude, "Claude", 130),
+            new(Col.ClaudeFolder, "Claude folder", 180),
+            new(Col.Started, "Started", 65),
+            new(Col.Link, "Linked by", 110),
         };
         for (int i = 0; i < _screens.Count; i++)
             _cols.Add(new(Col.Screen, (_screens[i].Number > 0 ? $"Screen {_screens[i].Number}" : $"Screen #{i + 1}")
-                + (Program.Host!.Settings.ScreenName(_screens[i].Identity) is { } screenName ? $" · {screenName}" : ""), 160, _screens[i]));
-        _cols.Add(new(Col.Project, "Project", 150));
-        _cols.Add(new(Col.Folder, "Folder", 280));
-        _cols.Add(new(Col.LastUsed, "Last used", 80));
+                + (Program.Host!.Settings.ScreenName(_screens[i].Identity) is { } screenName ? $" · {screenName}" : ""), 140, _screens[i]));
+        _cols.Add(new(Col.Project, "Window project", 140));
+        _cols.Add(new(Col.Folder, "Window folders", 240));
+        _cols.Add(new(Col.LastUsed, "Last used", 70));
 
         UpdateTitle();
         Icon = Program.Host!.Icon;
@@ -763,7 +783,12 @@ internal sealed class ProjectsDialog : Form
         _list.AllowDrop = true;
         _list.MouseDown += (_, e) => { _pressCol = ColumnAt(e.Location); _pressSession = PillAt(e.Location)?.session; };
         _list.MouseMove += (_, e) => UpdateTip(e.Location);
-        _list.MouseLeave += (_, _) => { _tipKey = null; _tip.Hide(_list); };
+        _list.MouseLeave += (_, _) =>
+        {
+            if (_list.ClientRectangle.Contains(_list.PointToClient(Cursor.Position))) return;
+            _tipKey = null;
+            _tip.Hide(_list);
+        };
         _list.MouseClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Right) { if (PillAt(e.Location) is { } hit) ShowClaudeMenu(hit.session, e.Location); }
@@ -871,8 +896,12 @@ internal sealed class ProjectsDialog : Form
             {
                 Col.Number => p.Desktop != null ? $"{p.Desktop.Index + 1}" : p.Unresolved ? "?" : "",
                 Col.Desktop => p.Desktop?.Name ?? (p.Unresolved ? "unresolved" : ""),
-                Col.Project => p.Name,
-                Col.Folder => p.Folders.Count == 0 ? (p.VsCodeOpen || p.ClaudeCount > 0 ? "not linked" : p.Desktop != null ? "empty desktop" : "")
+                Col.ClaudeFolder => p.Sessions.FirstOrDefault().Cwd ?? "",
+                Col.Started => p.ClaudeStartedUtc is { } started ? SessionState.FormatAge(started) : "",
+                Col.Link => p.ClaudeLink ?? "",
+                Col.Project => !p.VsCodeOpen && p.ClaudeCount > 0 ? "" : p.Name,
+                Col.Folder => !p.VsCodeOpen && p.ClaudeCount > 0 ? ""
+                            : p.Folders.Count == 0 ? (p.VsCodeOpen ? "not linked" : p.Desktop != null ? "empty desktop" : "")
                             : p.FoldersAmbiguous ? string.Join(" | ", p.Folders) + "  (can't tell which)"
                             : string.Join("; ", p.Folders),
                 Col.LastUsed => p.LastUsedUtc == DateTime.MinValue ? "" : SessionState.FormatAge(p.LastUsedUtc),
@@ -947,6 +976,9 @@ internal sealed class ProjectsDialog : Form
             // Windows on this screen first.
             Col.Screen   => p.Screen?.Handle == c.Screen!.Handle ? 0 : 1,
             Col.LastUsed => p.LastUsedUtc,
+            Col.ClaudeFolder => (p.Sessions.FirstOrDefault().Cwd ?? "").ToLowerInvariant(),
+            Col.Started  => p.ClaudeStartedUtc ?? DateTime.MaxValue,
+            Col.Link     => p.ClaudeLink ?? "",
             _            => (p.Folder ?? "").ToLowerInvariant(),
         };
     }
@@ -1024,8 +1056,9 @@ internal sealed class ProjectsDialog : Form
                 break;
 
             default:
-                var font = c.Kind == Col.Project ? new Font(_list.Font, FontStyle.Bold) : _list.Font;
-                TextRenderer.DrawText(g, e.SubItem!.Text, font, Rectangle.Inflate(r, -4, 0), fg, Text);
+                bool folderOnly = !p.VsCodeOpen && p.ClaudeCount == 0 && c.Kind is Col.Project or Col.Folder;
+                var font = c.Kind == Col.Project && p.VsCodeOpen ? new Font(_list.Font, FontStyle.Bold) : _list.Font;
+                TextRenderer.DrawText(g, e.SubItem!.Text, font, Rectangle.Inflate(r, -4, 0), folderOnly && !sel ? SystemColors.GrayText : fg, Text);
                 if (font != _list.Font) font.Dispose();
                 break;
         }
@@ -1364,7 +1397,7 @@ internal sealed class ProjectsDialog : Form
         help.DropDownItems.Add("Keyboard shortcuts…", null, (_, _) => Program.ShowShortcuts());
         help.DropDownItems.Add("How this window works…", null, (_, _) => MessageBox.Show(this,
             "One row per open VS Code window, per Claude session no window claims, and per project folder with neither. " +
-            "Three groups, divided by bars: the desktop | its Claude sessions | its VS Code windows (one column per screen) with the project and folders they have open. " +
+            "Three groups, divided by bars: the desktop | one Claude per row: its folder, when it started, how it was tied to its window (VS Code lock, its folder, its terminal window, or no window) | the window on its screen, with the project and root folders VS Code has open. A folder with neither is a project folder on disk (dim). " +
             "\"not linked\" means the window or session could not be tied to a folder.\n\n" +
             "Type to filter. Enter opens the selected row on its desktop; Ctrl+Enter creates a new project folder.\n\n" +
             "Drag the # cell onto another row to reorder desktops.\n" +
