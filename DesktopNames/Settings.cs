@@ -170,6 +170,7 @@ internal sealed class Settings
     }
 
     /// <summary>Key of the arrangement plugged in right now (<see cref="VsCodeLayouts"/>).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string CurrentLayoutKey => VsCodeLayouts.First(kv => ReferenceEquals(kv.Value, Layout())).Key;
 
     public void RenameLayout(string key, string name)
@@ -246,6 +247,9 @@ internal sealed class Settings
     }
 
     /// <summary>Shorthand for the current arrangement's workspace → location map.</summary>
+    // Not serialized: reading it calls Layout(), which adds to VsCodeLayouts on a new screen
+    // setup — mid-serialization that threw "Collection was modified".
+    [System.Text.Json.Serialization.JsonIgnore]
     public Dictionary<string, WorkspaceLocation> Workspaces => Layout().Workspaces;
 
     /// <summary>
@@ -457,8 +461,14 @@ internal sealed class Settings
             var json = JsonSerializer.Serialize(this, JsonOptions());
             // Write-then-rename: the process gets force-killed on every publish, and a kill in
             // the middle of a plain overwrite leaves a truncated settings.json behind.
+            // Flush to disk before the rename: NTFS commits the rename's metadata ahead of the
+            // cached data, so a power loss right after left a settings.json of all NUL bytes.
             var tmp = FilePath + ".tmp";
-            File.WriteAllText(tmp, json);
+            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+            {
+                fs.Write(System.Text.Encoding.UTF8.GetBytes(json));
+                fs.Flush(flushToDisk: true);
+            }
             File.Move(tmp, FilePath, overwrite: true);
         }
         catch (Exception ex) { Log.Startup($"settings save failed: {ex.Message}"); }
