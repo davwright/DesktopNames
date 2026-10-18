@@ -877,6 +877,12 @@ internal sealed class HostForm : Form
             _desktopService.RenameDesktop(DesktopArg(a), name);
             return null;
         }));
+        c.Add(new("vscode.launch", "Open VS Code on a folder on a desktop, without switching to it", new[] { "desktop", "folder" },
+            desktopDoc + "; folder: absolute path", a =>
+        {
+            (_projects ?? throw new InvalidOperationException("not ready")).LaunchVsCode(a.RequiredStr("folder"), DesktopArg(a));
+            return null;
+        }));
         c.Add(new("desktop.create", "New desktop at the end", none, "", _ => { _desktopService.CreateDesktop(); RefreshAllOverlays(); return null; }));
         c.Add(new("desktop.close", "Close a desktop; its windows move to desktop 1", desktop, desktopDoc, a =>
         {
