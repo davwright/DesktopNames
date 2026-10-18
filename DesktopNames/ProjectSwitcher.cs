@@ -568,16 +568,21 @@ internal sealed class ProjectSwitcher : IDisposable
     private NativeMethods.WinEventDelegate? _launchDelegate;
 
     /// <summary>
-    /// Start VS Code on <paramref name="folder"/> without leaving the current desktop. The window
-    /// opens here; when it shows with the folder in its title it goes onto <paramref name="desktopId"/>,
-    /// on the screen and in the snap position this screen setup remembers for the folder.
+    /// Start VS Code on <paramref name="folder"/> for <paramref name="desktopId"/>, or for a new
+    /// desktop named after the folder when null, and pin the folder to that desktop. The window
+    /// opens on the current desktop; when it shows with the folder in its title it goes onto the
+    /// desktop, on the screen and in the snap position this screen setup remembers for the
+    /// folder, and the desktop is switched to.
     /// </summary>
-    public void LaunchVsCode(string folder, Guid desktopId)
+    public void LaunchVsCode(string folder, Guid? desktopId)
     {
         if (!Directory.Exists(folder)) throw new ArgumentException($"\"{folder}\" is not a folder");
         if (_tracker.EnumerateOpenWorkspaceWindows().Any(w => TitleNames(w.Workspace, w.RootPath, folder)))
             throw new InvalidOperationException($"VS Code already has \"{folder}\" open.");
-        _launching[folder] = desktopId;
+        var target = desktopId ?? CreateProjectDesktop(Path.GetFileName(folder.TrimEnd('\\', '/')));
+        _settings.FolderDesktops[Settings.FolderKey(folder)] = target;
+        _settings.Save();
+        _launching[folder] = target;
         if (_launchHook == IntPtr.Zero)
         {
             // Out of context: the callback runs on this (the UI) thread.
@@ -587,7 +592,8 @@ internal sealed class ProjectSwitcher : IDisposable
             if (_launchHook == IntPtr.Zero) throw new InvalidOperationException("Could not watch for the new VS Code window (SetWinEventHook failed).");
         }
         StartVsCode(folder);
-        Log.Projects($"launch VS Code {folder} -> desktop {desktopId}");
+        _idleSince.Remove(target);
+        Log.Projects($"launch VS Code {folder} -> desktop {target}{(desktopId == null ? " (created)" : "")}, folder pinned");
     }
 
     /// <summary>A VS Code title is for <paramref name="folder"/>: its root path when the title shows one, else its root name.</summary>
@@ -619,8 +625,11 @@ internal sealed class ProjectSwitcher : IDisposable
         bool placed = remembered ? _desktop.PlaceWindow(hwnd, loc!, desktopId) : _desktop.MoveWindowToDesktop(hwnd, desktopId);
         Log.Projects($"launched VS Code '{t.Workspace}' showed: -> desktop {desktopId} {(remembered ? $"screen {loc!.MonitorDeviceId} {loc.Snap}" : "(no remembered screen: left where it opened)")} {(placed ? "ok" : "FAILED")}");
         if (_desktop.GetDesktopForWindow(hwnd) != desktopId)
+        {
             ReportError(new InvalidOperationException($"VS Code opened \"{folder}\" but could not be moved to its desktop."));
-        _dialog?.RefreshState();
+            return;
+        }
+        _desktop.SwitchToDesktop(_desktop.GetDesktops().First(d => d.Id == desktopId));
     }
 
     /// <summary>
@@ -1488,7 +1497,7 @@ internal sealed class ProjectsDialog : Form
             "A Claude started from a terminal shows >_; a terminal window running Claude is a row with a terminal chip.\n" +
             "Dropping a VS Code chip on a project with no desktop creates that desktop.\n" +
             "Hover a screen column's header to see the monitor arrangement.\n\n" +
-            "L opens VS Code on the row's folder, on its desktop and remembered screen, without switching there.\n" +
+            "L opens VS Code on the row's folder: on its desktop (a new one named after the folder when it has none, with the folder pinned to it), on its remembered screen, then switches there.\n" +
             "F2 renames the desktop, Del removes projects from the list, ? shows (green) where the selected row belongs and + moves it there; dragging shows it too. Unplaced Claudes (?) stay at the top. Click a column header to sort.\n" +
             "The title shows the screen setup (Windows → Rename this screen setup).\n" +
             "Closing this window keeps DesktopNames running; File → Exit quits it.",
@@ -1556,8 +1565,8 @@ internal sealed class ProjectsDialog : Form
             menu.DropDownItems.Add(new ToolStripMenuItem(d != null ? $"— {d.Index + 1}. {d.Name} —" : "— select a row —") { Enabled = false });
             menu.DropDownItems.Add(Item("Rename", RenameDesktop, keys: "F2"));
             menu.DropDownItems.Add(Item("Notes…", () => EditNotes(d!)));
-            menu.DropDownItems.Add(Item("Open VS Code here", LaunchVsCodeForSelected,
-                enabled: sel.Count == 1 && sel[0].Folder != null && !sel[0].VsCodeOpen, keys: "L"));
+            menu.DropDownItems.Add(new ToolStripMenuItem("Open VS Code on its desktop", null, (_, _) => LaunchVsCodeForSelected())
+                { Enabled = sel.Count == 1 && sel[0].Folder != null && !sel[0].VsCodeOpen, ShortcutKeyDisplayString = "L" });
             menu.DropDownItems.Add(Item("Blue highlight", () => Run("desktop.toggleBlue", At(d!.Index + 1)),
                 check: d != null && settings.IsDesktopHighlighted(d.Id), keys: "Shift+click tab"));
             menu.DropDownItems.Add(Item("Clear highlight", () => Run("desktop.clearHighlight", At(d!.Index + 1)), keys: "Ctrl+Shift+click tab"));
@@ -1791,17 +1800,19 @@ internal sealed class ProjectsDialog : Form
         else if (e.KeyCode == Keys.N && e.Control) { NewDesktop(); e.SuppressKeyPress = true; }
     }
 
-    /// <summary>L: a row with a desktop and a folder but no VS Code gets one there, on its screen.</summary>
+    /// <summary>L: a row with a folder and no VS Code gets one on its desktop (a new one when it has
+    /// none), on its screen. This window closes: the desktop is switched to once VS Code shows.</summary>
     private void LaunchVsCodeForSelected()
     {
         if (SelectedProjects() is not [var row]) return;
-        if (row.Desktop == null || row.Folder == null || row.VsCodeOpen)
+        if (row.Folder == null || row.VsCodeOpen)
         {
             ProjectSwitcher.ReportError(new InvalidOperationException(
-                $"'{row.Name}': L opens VS Code for a row with a desktop and a folder and no VS Code window."));
+                $"'{row.Name}': L opens VS Code for a row with a folder and no VS Code window."));
             return;
         }
-        Run("vscode.launch", new { desktop = row.Desktop.Index + 1, folder = row.Folder });
+        Run("vscode.launch", row.Desktop == null ? new { folder = row.Folder } : (object)new { desktop = row.Desktop.Index + 1, folder = row.Folder });
+        DialogResult = DialogResult.Cancel;
     }
 
     private void Accept()
