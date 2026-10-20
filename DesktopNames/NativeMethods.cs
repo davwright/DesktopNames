@@ -371,6 +371,14 @@ internal static class NativeMethods
     public const uint SW_SHOWNORMAL   = 1;
     public const uint SW_SHOWMINIMIZED = 2;
     public const uint SW_MAXIMIZE     = 3;
+    public const uint SW_MINIMIZE     = 6;
+    public const uint SW_RESTORE      = 9;
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, uint nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct INPUT

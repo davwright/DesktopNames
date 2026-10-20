@@ -224,6 +224,143 @@ internal sealed class DesktopService : IDisposable
         return NativeMethods.GetMonitorInfo(hMon, ref mi) ? mi.rcWork : default;
     }
 
+    /// <summary>One app window as window.list reports it. Desktop and Screen are 1-based / the
+    /// Windows display number; Desktop is null for a window on every desktop or none.</summary>
+    public sealed record AppWindow(string Hwnd, string Process, string Title, int? Desktop, int? Screen, string State);
+
+    /// <summary>Every visible, titled, non-tool top-level window, on every desktop.</summary>
+    public List<AppWindow> ListWindows()
+    {
+        var desktops = GetDesktops();
+        var screens = MonitorRef.EnumerateAll();
+        var names = new Dictionary<uint, string>();
+        var result = new List<AppWindow>();
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd) || NativeMethods.GetWindowTextLength(hwnd) == 0) return true;
+            if ((NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOOLWINDOW) != 0) return true;
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+            if (!names.TryGetValue(pid, out var process))
+                names[pid] = process = ProcessName(pid);
+            var sb = new System.Text.StringBuilder(NativeMethods.GetWindowTextLength(hwnd) + 1);
+            NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
+            int idx = desktops.FindIndex(d => d.Id == GetDesktopForWindow(hwnd));
+            IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            result.Add(new AppWindow($"0x{hwnd.ToInt64():X}", process, sb.ToString(), idx < 0 ? null : idx + 1,
+                screens.FirstOrDefault(s => s.Handle == mon)?.Number, StateName(hwnd)));
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    private static string ProcessName(uint pid)
+    {
+        // The process can exit between EnumWindows and this lookup; its window is about to go too.
+        try { return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; }
+        catch (ArgumentException) { return "(exited)"; }
+    }
+
+    private static string StateName(IntPtr hwnd) =>
+        NativeMethods.IsIconic(hwnd) ? "min"
+        : SnapGeometry.Detect(hwnd) is var m && m == SnapMode.Free ? "normal"
+        : char.ToLowerInvariant(m.ToString()[0]) + m.ToString()[1..];
+
+    /// <summary>
+    /// The one window <paramref name="selector"/> names: a handle (0x1A2B or decimal), else a
+    /// process name (msedge), else a piece of the title. None or several is an error that lists
+    /// the candidates, never a guess.
+    /// </summary>
+    public AppWindow FindWindow(string selector)
+    {
+        var all = ListWindows();
+        bool isHandle = selector.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? long.TryParse(selector[2..], System.Globalization.NumberStyles.HexNumber, null, out long h)
+            : long.TryParse(selector, out h);
+        var hits = isHandle ? all.Where(w => w.Hwnd == $"0x{h:X}").ToList()
+            : all.Where(w => w.Process.Equals(selector, StringComparison.OrdinalIgnoreCase)).ToList() is { Count: > 0 } byProcess ? byProcess
+            : all.Where(w => w.Title.Contains(selector, StringComparison.OrdinalIgnoreCase)).ToList();
+        return hits.Count switch
+        {
+            1 => hits[0],
+            0 => throw new ArgumentException($"no window matches \"{selector}\" (a handle, a process name or part of a title); dn run window.list shows them"),
+            _ => throw new ArgumentException($"\"{selector}\" matches {hits.Count} windows; pass one handle:\n" +
+                     string.Join("\n", hits.Select(w => $"  {w.Hwnd}  {w.Process}  \"{w.Title}\"  desktop {w.Desktop?.ToString() ?? "-"}"))),
+        };
+    }
+
+    /// <summary>
+    /// Put a window on a screen (Windows display number) and/or into a state, then onto a
+    /// desktop. A screen change keeps the window's snap position or maximized state unless a
+    /// state is given. States: max, min, restore, or a snap position (left, right, top, bottom,
+    /// topLeft, topRight, bottomLeft, bottomRight).
+    /// </summary>
+    public AppWindow PlaceAnyWindow(string selector, int? desktop, int? screen, string? state)
+    {
+        if (desktop == null && screen == null && state == null)
+            throw new ArgumentException("give at least one of \"desktop\", \"screen\", \"state\"");
+        var w = FindWindow(selector);
+        var hwnd = new IntPtr(Convert.ToInt64(w.Hwnd, 16));
+
+        SnapMode? snap = null;
+        if (state != null && state is not ("max" or "min" or "restore"))
+        {
+            if (!Enum.TryParse<SnapMode>(state, ignoreCase: true, out var parsed) || parsed is SnapMode.Free or SnapMode.Max)
+                throw new ArgumentException($"state \"{state}\" is not one of: max, min, restore, left, right, top, bottom, topLeft, topRight, bottomLeft, bottomRight");
+            snap = parsed;
+        }
+        Guid desktopId = Guid.Empty;
+        if (desktop is int n)
+        {
+            var list = GetDesktops();
+            if (n < 1 || n > list.Count) throw new ArgumentException($"no desktop {n}; there are {list.Count}");
+            desktopId = list[n - 1].Id;
+        }
+
+        if (screen is int s)
+        {
+            var screens = MonitorRef.EnumerateAll();
+            var target = screens.FirstOrDefault(x => x.Number == s)
+                ?? throw new ArgumentException($"no screen {s}; screens plugged in: {string.Join(", ", screens.Select(x => x.Number))}");
+            if (NativeMethods.IsIconic(hwnd)) NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+            var keep = SnapGeometry.Detect(hwnd);
+            var mode = snap ?? (state == "max" ? SnapMode.Max : state == "restore" ? SnapMode.Free : keep);
+            if (mode == SnapMode.Free)
+            {
+                if (keep == SnapMode.Max) NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+                if (!MoveWindowToMonitor(hwnd, new WorkspaceLocation
+                    {
+                        MonitorDeviceId = target.DeviceId, MonitorX = target.Monitor.Left, MonitorY = target.Monitor.Top,
+                        MonitorWidth = target.Width, MonitorHeight = target.Height,
+                    }))
+                    throw new InvalidOperationException($"could not move {w.Hwnd} to screen {s}");
+            }
+            else
+            {
+                // Crossing to a screen with another DPI rescales the window after it lands, which
+                // throws a half or quarter off. Once it is on the target screen, place it again.
+                if (!SnapGeometry.Apply(hwnd, target.Work, mode))
+                    throw new InvalidOperationException($"could not put {w.Hwnd} on screen {s} ({mode})");
+                if (mode != SnapMode.Max && SnapGeometry.Detect(hwnd, target.Work) != mode)
+                    SnapGeometry.Apply(hwnd, target.Work, mode);
+            }
+        }
+        else if (snap is SnapMode m)
+        {
+            if (NativeMethods.IsIconic(hwnd) || SnapGeometry.Detect(hwnd) == SnapMode.Max) NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+            IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            var mi = new NativeMethods.MONITORINFOEX { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFOEX>() };
+            if (!NativeMethods.GetMonitorInfo(mon, ref mi) || !SnapGeometry.Apply(hwnd, mi.rcWork, m))
+                throw new InvalidOperationException($"could not snap {w.Hwnd} {m}");
+        }
+        else if (state == "max") NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+        else if (state == "restore") NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+        if (state == "min") NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MINIMIZE);
+
+        if (desktopId != Guid.Empty && GetDesktopForWindow(hwnd) != desktopId && !MoveWindowToDesktop(hwnd, desktopId))
+            throw new InvalidOperationException($"could not move {w.Hwnd} to desktop {desktop}");
+        return FindWindow(w.Hwnd);
+    }
+
     public Guid GetDesktopForWindow(IntPtr hwnd)
     {
         if (!VdaDll.IsLoaded || hwnd == IntPtr.Zero) return Guid.Empty;

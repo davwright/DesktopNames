@@ -17,10 +17,13 @@ House practices: the `building-apps` skill (`~/.claude/skills/wiki/building-apps
 2. Change code.
 3. `powershell -NoProfile -ExecutionPolicy Bypass -File publish.ps1` — bumps, publishes to
    `%APPDATA%\DesktopNames`, relaunches.
-4. Drive and look: `node scripts/dn.mjs …` (below); read screenshots you took.
+4. Drive and look: `dn …` (below); read screenshots you took.
 5. Commit to main and push; say what was verified and what was not run.
 
-## Control channel (`node scripts/dn.mjs <method> [params-json]`)
+## Control channel (`dn <method> key=value …`, `dn run <command> key=value …`; JSON params also accepted)
+`dn` is the C# client in `dn/`, published next to the app and on PATH by `publish.ps1`. Window
+moves for other agents (`window.list`, `window.place`) are documented in the user-level
+`desktopnames` skill.
 | Method | Params |
 |---|---|
 | `commands` / `execute` | — / `{"command":"desktop.toggleBlue","params":{"desktop":3}}` |

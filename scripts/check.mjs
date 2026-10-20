@@ -13,7 +13,8 @@ const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace
 let failed = false;
 
 try {
-  execSync("dotnet build DesktopNames/DesktopNames.csproj -c Release --nologo -v q -warnaserror", { cwd: root, stdio: "pipe" });
+  for (const proj of ["DesktopNames/DesktopNames.csproj", "dn/dn.csproj"])
+    execSync(`dotnet build ${proj} -c Release --nologo -v q -warnaserror`, { cwd: root, stdio: "pipe" });
   console.log("ok   build (warnings as errors)");
 } catch (e) {
   failed = true;

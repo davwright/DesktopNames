@@ -788,6 +788,12 @@ internal sealed class HostForm : Form
             return null;
         }));
 
+        c.Add(new("window.list", "Every app window: handle, process, title, desktop, screen, state", none, "", _ => _desktopService.ListWindows()));
+        c.Add(new("window.place", "Move any window to a desktop and/or screen, and/or maximize, minimize, restore or snap it",
+            new[] { "window", "desktop", "screen", "state" },
+            "window: handle (0x1A2B), process name or part of the title — must match exactly one; desktop: 1-based number; " +
+            "screen: Windows display number; state: max | min | restore | left | right | top | bottom | topLeft | topRight | bottomLeft | bottomRight",
+            a => _desktopService.PlaceAnyWindow(a.RequiredStr("window"), a.Int("desktop"), a.Int("screen"), a.Str("state"))));
         c.Add(new("overlay.toggleMainOnly", "Show the overlay only on the first desktop", none, "", _ =>
         {
             _settings.OnlyOnMainDesktop = !_settings.OnlyOnMainDesktop;
