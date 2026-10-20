@@ -657,9 +657,6 @@ internal sealed class HostForm : Form
                 // It persists until the source sends `idle` (e.g. SessionEnd hook) or
                 // the liveness sweep reaps a dead sessionPid.
                 RefreshAllOverlays();
-                // "What was I doing on this desktop?" reminder: show the note for a few
-                // seconds. No-op when the desktop has no note configured.
-                FlashNoteForDesktop(id);
             }
         };
         _desktopPoll.Start();
@@ -705,19 +702,6 @@ internal sealed class HostForm : Form
         foreach (var o in _overlays.ToArray())
         {
             if (!o.IsDisposed) o.InvalidateForDesktop(desktopId);
-        }
-    }
-
-    /// <summary>
-    /// Pop the per-desktop note/state tooltip for ~4 seconds on every visible overlay.
-    /// Fired after a desktop switch so the user is reminded what they're doing here.
-    /// </summary>
-    private void FlashNoteForDesktop(Guid desktopId)
-    {
-        foreach (var o in _overlays.ToArray())
-        {
-            if (o.IsDisposed || !o.Visible) continue;
-            o.ShowDesktopTooltipFor(desktopId, 4000);
         }
     }
 

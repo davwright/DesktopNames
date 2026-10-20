@@ -26,11 +26,6 @@ internal sealed class TaskbarOverlay : Form
     // close it ourselves — otherwise it hangs around on top of whatever you clicked next.
     private readonly System.Windows.Forms.Timer _menuBlurTimer = new() { Interval = 200 };
     private IntPtr _menuOpenForeground;
-    private readonly ToolTip _stateTooltip = new() { InitialDelay = 400, ReshowDelay = 100, OwnerDraw = true };
-    private Guid _lastTooltipDesktop = Guid.Empty;
-    // Owner-drawn so the Claude message line renders italic and the cwd dim. _tooltipText holds
-    // what's currently shown (set at every Show call) so Popup/Draw can measure and render it.
-    private string _tooltipText = "";
 
     // Reassign-drag state. Plain press-drag on any desktop button starts a *reorder* drag
     // (moves the desktop to the drop position via DesktopService.MoveDesktopToIndex). A
@@ -90,8 +85,6 @@ internal sealed class TaskbarOverlay : Form
         _refreshTimer.Tick += (_, _) => RefreshDesktops();
         _refreshTimer.Start();
 
-        _stateTooltip.Popup += OnTooltipPopup;
-        _stateTooltip.Draw += OnTooltipDraw;
 
         _contextMenu = new ContextMenuStrip();
         _contextMenu.Opening += (_, _) =>
@@ -126,8 +119,6 @@ internal sealed class TaskbarOverlay : Form
         MouseLeave += (_, _) =>
         {
             _hoveredIndex = -1;
-            _stateTooltip.Hide(this);
-            _lastTooltipDesktop = Guid.Empty;
             // Moving up into the card leaves the overlay; anywhere else closes it.
             if (_card?.ContainsScreenPoint(Cursor.Position) != true) CloseCard();
             Invalidate();
@@ -1189,7 +1180,6 @@ internal sealed class TaskbarOverlay : Form
         CloseCard();
         var blocks = CardBlocks(btn.Desktop.Id);
         if (blocks.Count == 0) return;
-        _stateTooltip.Hide(this);
         _card = new HoverCard(btn.Desktop.Id, blocks, RectangleToScreen(btn.Bounds), _isDarkMode);
         _card.FormClosed += (_, _) => _card = null;
         _card.Show();
@@ -1223,53 +1213,6 @@ internal sealed class TaskbarOverlay : Form
             foreach (var s in _sessionState.GetSessions(desktopId))
                 blocks.Add(new(_sessionState.DescribeSession(s.Source, s.SessionId), s));
         return blocks;
-    }
-
-    /// <summary>Combine the desktop note (if any) and Claude state tooltip (if any) into one string.</summary>
-    private string BuildTooltipText(Guid desktopId)
-    {
-        var note = _settings.GetDesktopNote(desktopId);
-        string stateTip = "";
-        if (_sessionState != null)
-        {
-            var (state, _, tip) = _sessionState.GetAggregate(desktopId);
-            if (state != StateKind.None) stateTip = tip;
-        }
-        if (note.Length == 0 && stateTip.Length == 0) return "";
-        if (note.Length == 0) return stateTip;
-        if (stateTip.Length == 0) return note;
-        return note + "\n\n" + stateTip;
-    }
-
-    // The timed tooltip after a desktop switch draws like the hover card.
-    private void OnTooltipPopup(object? sender, PopupEventArgs e)
-    {
-        var size = TipCard.Measure(_tooltipText);
-        e.ToolTipSize = new Size(size.Width + TipCard.Pad * 2, size.Height + TipCard.Pad * 2);
-    }
-
-    private void OnTooltipDraw(object? sender, DrawToolTipEventArgs e)
-    {
-        var g = e.Graphics;
-        using (var back = new SolidBrush(TipCard.Back(_isDarkMode))) g.FillRectangle(back, e.Bounds);
-        using (var pen = new Pen(TipCard.Border(_isDarkMode)))
-            g.DrawRectangle(pen, e.Bounds.X, e.Bounds.Y, e.Bounds.Width - 1, e.Bounds.Height - 1);
-        TipCard.Draw(g, _tooltipText, new Point(e.Bounds.Left + TipCard.Pad, e.Bounds.Top + TipCard.Pad), e.Bounds.Right - TipCard.Pad, _isDarkMode);
-    }
-
-    /// <summary>Show the per-desktop tooltip programmatically (e.g. after switching desktops).</summary>
-    public void ShowDesktopTooltipFor(Guid desktopId, int durationMs)
-    {
-        foreach (var btn in _buttons)
-        {
-            if (btn.Desktop.Id != desktopId) continue;
-            string text = BuildTooltipText(desktopId);
-            if (text.Length == 0) return;
-            _lastTooltipDesktop = desktopId;
-            _tooltipText = text;
-            _stateTooltip.Show(text, this, btn.Bounds.Left, btn.Bounds.Bottom + 2, durationMs);
-            return;
-        }
     }
 
     private void OnMouseUp(object? sender, MouseEventArgs e)
@@ -1440,7 +1383,6 @@ internal sealed class TaskbarOverlay : Form
         _longPressTimer.Dispose();
         _menuBlurTimer.Stop();
         _menuBlurTimer.Dispose();
-        _stateTooltip.Dispose();
         CloseCard();
         base.OnFormClosing(e);
     }
