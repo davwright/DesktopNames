@@ -113,6 +113,9 @@ internal sealed class SessionEntry
     /// until the next message updates state.
     /// </summary>
     public bool Consumed { get; set; }
+
+    /// <summary>Claude Code's name for the session ("kpmg-44", what SendMessage addresses); empty until known.</summary>
+    public string Name { get; set; } = "";
 }
 
 /// <summary>One background task of a session: an agent or a run_in_background shell.</summary>
@@ -191,6 +194,23 @@ internal sealed class SessionState
         ChangedFor(source, sessionId);
     }
 
+    public List<(string Source, string SessionId)> TrackedSessions() => _location.Keys.ToList();
+
+    /// <summary>The session's name, or empty while unknown (or the session isn't tracked).</summary>
+    public string NameOf(string source, string sessionId) => Entry(source, sessionId)?.Name ?? "";
+
+    public void SetName(string source, string sessionId, string name)
+    {
+        if (Entry(source, sessionId) is not { } e || e.Name == name) return;
+        e.Name = name;
+        SaveToDisk();
+        ChangedFor(source, sessionId);
+    }
+
+    private SessionEntry? Entry(string source, string sessionId) =>
+        _location.TryGetValue((source, sessionId), out var desktop) && _byDesktop.TryGetValue(desktop, out var list)
+            ? list.FirstOrDefault(x => x.Source == source && x.SessionId == sessionId) : null;
+
     private string? WaitingOn(SessionEntry e) =>
         _waits.TryGetValue((e.Source, e.SessionId), out var w) ? w.PeerName : null;
 
@@ -263,6 +283,7 @@ internal sealed class SessionState
         public List<PendingAsk> Asks { get; set; } = new();
         public string Title { get; set; } = "";
         public string Body { get; set; } = "";
+        public string Name { get; set; } = "";
         public List<string> RecentBodies { get; set; } = new();
         public int SessionPid { get; set; }
         public int VsCodePid { get; set; }
@@ -285,7 +306,7 @@ internal sealed class SessionState
                     {
                         DesktopId = desktopId, Source = e.Source, SessionId = e.SessionId,
                         Activity = e.Activity, Asks = new List<PendingAsk>(e.Asks),
-                        Title = e.Title, Body = e.Body,
+                        Title = e.Title, Body = e.Body, Name = e.Name,
                         RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
@@ -322,7 +343,7 @@ internal sealed class SessionState
                 {
                     Source = p.Source, SessionId = p.SessionId,
                     Activity = p.Activity,
-                    Title = p.Title, Body = p.Body, SessionPid = p.SessionPid,
+                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
                     Cwd = p.Cwd, BackgroundActive = p.BackgroundActive, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore
@@ -431,9 +452,9 @@ internal sealed class SessionState
     private string DescribeEntry(SessionEntry e, IReadOnlyList<string> earlier)
     {
         var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
-        // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
-        // collide (two sessions in the same folder, or one whose cwd wandered there).
-        var sid = e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
+        // The session name ("kpmg-44") tells apart sessions whose cwd-basename labels collide (two
+        // sessions in one folder, or one whose cwd wandered there); before it is known, 2 chars of the id.
+        var sid = e.Name.Length > 0 ? e.Name : e.SessionId.Length >= 2 ? e.SessionId[..2] : e.SessionId;
         // Per session: a header with a state dot, the Claude message italic, the background
         // work still running (count, then one line per task with its run time, an agent's
         // latest tool call under it), then the full cwd dim (the real disambiguator when the

@@ -46,6 +46,10 @@ internal sealed class AlertPipeServer : IDisposable
 
     public void Start()
     {
+        // Sessions restored from disk may be idle for hours; name them now, not at their next hook.
+        foreach (var (source, sid) in _state.TrackedSessions())
+            if (_state.NameOf(source, sid).Length == 0 && _claudeSessions.Live(sid)?.Name is { Length: > 0 } name)
+                _state.SetName(source, sid, name);
         _thread = new Thread(Loop) { IsBackground = true, Name = "DesktopNames-AlertPipe" };
         _thread.Start();
     }
@@ -262,6 +266,7 @@ internal sealed class AlertPipeServer : IDisposable
                         reply.DesktopName = info?.Name ?? "";
                         Log.State($"applied session={msg.SessionId} state={eff} livenessPid={livenessPid} desktop={target} idx={reply.DesktopIndex} name='{reply.DesktopName}'");
                     }
+                    if (!transition.Remove) RefreshName(msg);
                     ApplyPeerLink(msg, transition.Remove);
                 }
                 catch (Exception ex)
@@ -282,6 +287,15 @@ internal sealed class AlertPipeServer : IDisposable
         }
 
         WriteReply(pipe, reply);
+    }
+
+    /// <summary>Learn the session's name from its registry file: once, and again when a turn starts
+    /// (a /rename takes effect then). Reading every session file on every tool call would be waste.</summary>
+    private void RefreshName(AlertMessage msg)
+    {
+        string source = msg.Source ?? "unknown", sid = msg.SessionId!;
+        if (msg.HookEvent is not ("SessionStart" or "UserPromptSubmit") && _state.NameOf(source, sid).Length > 0) return;
+        if (_claudeSessions.Live(sid)?.Name is { Length: > 0 } name) _state.SetName(source, sid, name);
     }
 
     /// <summary>
