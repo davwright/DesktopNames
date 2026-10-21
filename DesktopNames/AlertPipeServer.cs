@@ -262,6 +262,7 @@ internal sealed class AlertPipeServer : IDisposable
                         reply.DesktopName = info?.Name ?? "";
                         Log.State($"applied session={msg.SessionId} state={eff} livenessPid={livenessPid} desktop={target} idx={reply.DesktopIndex} name='{reply.DesktopName}'");
                     }
+                    ApplyPeerLink(msg, transition.Remove);
                 }
                 catch (Exception ex)
                 {
@@ -281,6 +282,25 @@ internal sealed class AlertPipeServer : IDisposable
         }
 
         WriteReply(pipe, reply);
+    }
+
+    /// <summary>
+    /// A message to another session (SendMessage by name) makes the sender wait on it and the
+    /// recipient work for the sender; the recipient's Stop, or either session ending, ends that.
+    /// Messages to a subagent id name no session and link nothing.
+    /// </summary>
+    private void ApplyPeerLink(AlertMessage msg, bool removed)
+    {
+        string source = msg.Source ?? "unknown", sid = msg.SessionId!;
+        if (msg.SendTo is { Length: > 0 } to)
+        {
+            if (_claudeSessions.SessionIdByName(to) is { } peer)
+                _state.LinkPeer(source, sid, _claudeSessions.Live(sid)?.Name is { Length: > 0 } me ? me : EventLabel(msg), peer[..Math.Min(8, peer.Length)], to);
+            else
+                Log.State($"message from {sid} to '{to}': no live session has that name (a subagent?) — not linked");
+        }
+        if (removed || msg.HookEvent is "Stop" or "StopFailure")
+            _state.EndPeerWork(source, sid, gone: removed);
     }
 
     /// <summary>Short, recognizable label for the tray event feed: cwd basename, else title,
@@ -673,6 +693,8 @@ internal sealed class AlertPipeServer : IDisposable
         // PreToolUse only (nullable): a more specific, pre-truncated human-readable line than
         // toolName alone — e.g. "Edit Program.cs" instead of "Edit". Null on all other events.
         public string? ToolDescription { get; set; }
+        // PreToolUse SendMessage only: the recipient — another session's name, or a subagent's id.
+        public string? SendTo { get; set; }
         public string? Message { get; set; }
         // Set when the hook fired inside a background agent (Agent tool) of this session.
         public string? AgentId { get; set; }

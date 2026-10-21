@@ -160,6 +160,51 @@ internal sealed class SessionState
     /// <summary>An earlier message of the session, above the current one (dim italic bullet).</summary>
     internal const char TipEarlier = (char)0x19;
 
+    /// <summary>
+    /// Sessions waiting on another: sender → the session it sent a message to (SendMessage by
+    /// name) and both names. Ends when the recipient's turn ends or either session goes. Not
+    /// persisted: a restart forgets who is waiting on whom.
+    /// </summary>
+    private readonly Dictionary<(string Source, string SessionId), (string PeerId, string PeerName, string SenderName)> _waits = new();
+
+    /// <summary><paramref name="senderId"/> sent a message to <paramref name="peerId"/>: it waits on
+    /// the peer, and the peer works for it until the peer's turn ends.</summary>
+    public void LinkPeer(string source, string senderId, string senderName, string peerId, string peerName)
+    {
+        _waits[(source, senderId)] = (peerId, peerName, senderName);
+        Log.State($"peer link {senderName} ({senderId}) -> {peerName} ({peerId})");
+        ChangedFor(source, senderId);
+        ChangedFor(source, peerId);
+    }
+
+    /// <summary><paramref name="sessionId"/>'s turn ended or it went away: whoever waited on it stops
+    /// waiting; when it went away, its own wait ends too.</summary>
+    public void EndPeerWork(string source, string sessionId, bool gone)
+    {
+        foreach (var (sender, link) in _waits.Where(kv => kv.Key.Source == source && kv.Value.PeerId == sessionId).ToList())
+        {
+            _waits.Remove(sender);
+            Log.State($"peer link {link.SenderName} -> {link.PeerName} ended (recipient's turn ended)");
+            ChangedFor(sender.Source, sender.SessionId);
+        }
+        if (gone && _waits.Remove((source, sessionId))) Log.State($"peer link from {sessionId} ended (sender gone)");
+        ChangedFor(source, sessionId);
+    }
+
+    private string? WaitingOn(SessionEntry e) =>
+        _waits.TryGetValue((e.Source, e.SessionId), out var w) ? w.PeerName : null;
+
+    private string? WorkingFor(SessionEntry e)
+    {
+        var senders = _waits.Where(kv => kv.Key.Source == e.Source && kv.Value.PeerId == e.SessionId).Select(kv => kv.Value.SenderName).ToList();
+        return senders.Count == 0 ? null : string.Join(", ", senders);
+    }
+
+    private void ChangedFor(string source, string sessionId)
+    {
+        if (_location.TryGetValue((source, sessionId), out var desktop)) Changed?.Invoke(desktop);
+    }
+
     public static string StripTipMarkers(string s)
     {
         var sb = new System.Text.StringBuilder(s.Length);
@@ -383,7 +428,7 @@ internal sealed class SessionState
     /// One session's tooltip block, Tip* markers included: header with state, the Claude
     /// message, background work, then the cwd.
     /// </summary>
-    private static string DescribeEntry(SessionEntry e, IReadOnlyList<string> earlier)
+    private string DescribeEntry(SessionEntry e, IReadOnlyList<string> earlier)
     {
         var label = string.IsNullOrEmpty(e.Title) ? e.SessionId : e.Title;
         // First 2 chars of the sessionId disambiguate sessions whose cwd-basename labels
@@ -396,6 +441,8 @@ internal sealed class SessionState
         var sb = new System.Text.StringBuilder();
         sb.Append(TipHeader).Append((char)('0' + (int)e.State))
           .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
+        if (WorkingFor(e) is { } forWhom) sb.Append('\n').Append(TipBgHead).Append("← working for ").Append(forWhom);
+        if (WaitingOn(e) is { } onWhom) sb.Append('\n').Append(TipBgHead).Append("→ waiting on ").Append(onWhom);
         // Earlier messages first, the current one last: a bullet list in the order it happened.
         string bullet = earlier.Count > 0 ? "• " : "";
         foreach (var r in earlier) sb.Append('\n').Append(TipEarlier).Append(bullet).Append(r);
@@ -503,7 +550,9 @@ internal sealed class SessionState
         {
             case StateKind.Asking: return "?";
             case StateKind.Error:  return "!";
-            case StateKind.Ready:  return dominant.BackgroundActive ? "⏳" : null; // open to input; ⏳ while background work runs
+            // Open to input; → while waiting on another session it messaged, ⏳ while background work runs.
+            case StateKind.Ready:  return WaitingOn(dominant) != null ? "→" : dominant.BackgroundActive ? "⏳" : null;
+            case StateKind.Busy when WorkingFor(dominant) != null: return "←";
             case StateKind.Busy:
                 // PreToolUse → acting (tool letter). UserPromptSubmit/SessionStart → thinking.
                 if (dominant.HookEvent == "PreToolUse")
@@ -689,9 +738,11 @@ internal sealed class SessionState
     /// <summary>A session located on a desktop, with enough context for the reassign flyout.
     /// <paramref name="RecentBodies"/> is oldest-first; the flyout shows them so the row carries
     /// the same message context as the taskbar hovertext.</summary>
+    /// <paramref name="PeerMark"/> is ← while it works for another session's message, → while it
+    /// waits on a session it messaged, else null.
     public readonly record struct SessionRef(
         string Source, string SessionId, string Label, string Cwd, StateKind State,
-        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies);
+        DateTime LastSeenUtc, IReadOnlyList<string> RecentBodies, string? PeerMark = null);
 
     /// <summary>
     /// Record what a background agent of a known session is doing (or that it ended). Never
@@ -732,7 +783,8 @@ internal sealed class SessionState
                          : !string.IsNullOrEmpty(e.Title) ? e.Title
                          : e.SessionId;
             result.Add(new SessionRef(e.Source, e.SessionId, label, e.Cwd, e.State, e.LastSeenUtc,
-                                      e.RecentBodies.ToArray()));
+                                      e.RecentBodies.ToArray(),
+                                      e.State == StateKind.Busy && WorkingFor(e) != null ? "←" : WaitingOn(e) != null ? "→" : null));
         }
         return result;
     }

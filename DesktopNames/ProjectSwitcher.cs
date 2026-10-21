@@ -1114,7 +1114,8 @@ internal sealed class ProjectsDialog : Form
                     var st = p.Sessions[i].State;
                     string word = st == StateKind.None ? "idle" : st.ToString().ToLowerInvariant();
                     string label = pills[i].Width >= 46
-                        ? word + (p.Sessions.Count == 1 && st == StateKind.Busy && p.Glyph is { } gl ? " " + gl : "")
+                        ? word + (p.Sessions[i].PeerMark is { } peer ? " " + peer
+                                  : p.Sessions.Count == 1 && st == StateKind.Busy && p.Glyph is { } gl ? " " + gl : "")
                         : word[..1].ToUpperInvariant();
                     // A Claude started from a terminal carries the terminal mark.
                     if (p.TerminalSessionIds.Contains(p.Sessions[i].SessionId)) label = ">_ " + label;

@@ -81,9 +81,31 @@ internal sealed class ClaudeSessionRegistry
     /// </summary>
     /// <summary>A live session as its registry file describes it. <see cref="Entrypoint"/> is
     /// <c>cli</c> for a Claude started in a terminal, <c>claude-vscode</c> for the VS Code panel.</summary>
-    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd)
+    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd, string Name)
     {
         public bool IsTerminal => Entrypoint == "cli";
+    }
+
+    /// <summary>
+    /// The full sessionId of the live session called <paramref name="name"/> ("evolxcli-67", the
+    /// name SendMessage addresses another session by), or null when no session or several have it.
+    /// </summary>
+    public string? SessionIdByName(string name)
+    {
+        var dir = Path.Combine(ClaudeDir, "sessions");
+        if (!Directory.Exists(dir)) return null;
+        var hits = new List<string>();
+        foreach (var file in Directory.GetFiles(dir, "*.json"))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
+            catch (Exception ex) when (ex is IOException or JsonException) { continue; } // half-written mid-launch
+            using (doc)
+                if (doc.RootElement.TryGetProperty("name", out var n) && n.GetString() == name
+                    && doc.RootElement.TryGetProperty("sessionId", out var sid) && sid.GetString() is { } full)
+                    hits.Add(full);
+        }
+        return hits.Count == 1 ? hits[0] : null;
     }
 
     /// <summary>Where a terminal Claude is shown: a VS Code window's integrated terminal, or a
@@ -112,7 +134,8 @@ internal sealed class ClaudeSessionRegistry
                 found = new LiveSession(
                     r.TryGetProperty("pid", out var p) ? p.GetInt32() : 0,
                     r.TryGetProperty("entrypoint", out var e) ? e.GetString() ?? "" : "",
-                    r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "");
+                    r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "",
+                    r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "");
             }
         }
         return hits == 1 ? found : null;
