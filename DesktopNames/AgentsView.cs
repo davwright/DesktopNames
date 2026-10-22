@@ -243,12 +243,13 @@ internal sealed class AgentsView : ScrollableControl
             g.FillPath(brush, path);
             g.DrawPath(border, path);
         }
-                string since = c.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
-        // A subagent reports each tool call; a shell only appears in the session's Stop list, so say how old that list is.
+        string kind = c.Kind switch { "shell" => "background shell", "agent" => "subagent", _ => c.Kind };
+        string since = c.StartedUtc is { } s ? $" · {SessionState.FormatAge(s)}" : "";
+        // A subagent reports each tool call; a shell reports nothing, but writes its output to a file.
         string second = c.Activity.Length > 0 ? c.Activity
-            : c.ListedUtc is { } listed ? $"running, says a Stop {SessionState.FormatAge(listed)} ago"
-            : "running, says a Stop from before DN restarted";
-        TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, Flags);
+            : c.LastOutputUtc is { } output ? $"last output {SessionState.FormatAge(output)} ago"
+            : "output file gone";
+        TextRenderer.DrawText(g, $"{kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, Flags);
         TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, Flags);
     }
 
@@ -309,7 +310,8 @@ internal sealed class AgentsView : ScrollableControl
                 text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
-                if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = $"{c.Kind}: {c.Description}\n{c.Activity}"; }
+                if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = $"{c.Kind}: {c.Description}\n{c.Activity}"
+                    + (c.ListedUtc is { } listed ? $"\nlisted as running when its session last ended a turn, {SessionState.FormatAge(listed)} ago" : ""); }
         }
         if (key == _tipFor) return;
         _tipFor = key;

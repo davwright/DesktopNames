@@ -204,7 +204,8 @@ internal sealed class SessionState
         Updated?.Invoke();
     }
 
-    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc);
+    /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
+    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
@@ -220,7 +221,8 @@ internal sealed class SessionState
                 e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
                 e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
-                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc)).ToList(),
+                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
+                    e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e))))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)

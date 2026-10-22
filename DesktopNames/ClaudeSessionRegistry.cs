@@ -149,6 +149,29 @@ internal sealed class ClaudeSessionRegistry
         return hits.Count == 1 ? hits[0] : null;
     }
 
+    // task id → its output file, once found (a task's file never moves).
+    private static readonly Dictionary<string, string> _taskOutputs = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// When a background task last wrote output: Claude Code streams it to
+    /// <c>%TEMP%\claude\&lt;project&gt;\&lt;sessionId&gt;\tasks\&lt;taskId&gt;.output</c>. Null when that file is
+    /// not there (the task's session ended and Claude Code cleaned up).
+    /// </summary>
+    public static DateTime? TaskLastOutputUtc(string fullSessionId, string taskId)
+    {
+        if (!_taskOutputs.TryGetValue(taskId, out var file))
+        {
+            var root = Path.Combine(Path.GetTempPath(), "claude");
+            if (!Directory.Exists(root)) return null;
+            var found = Directory.GetDirectories(root)
+                .Select(project => Path.Combine(project, fullSessionId, "tasks", taskId + ".output"))
+                .FirstOrDefault(File.Exists);
+            if (found == null) return null;
+            _taskOutputs[taskId] = file = found;
+        }
+        return File.Exists(file) ? File.GetLastWriteTimeUtc(file) : null;
+    }
+
     /// <summary>The token usage of a session's latest API call. <see cref="Context"/> is what it sent
     /// (the context window in use); <see cref="CacheRead"/> the part of it served from the prompt cache.</summary>
     public sealed record Usage(string Model, long Input, long CacheRead, long CacheWrite, long Output)
