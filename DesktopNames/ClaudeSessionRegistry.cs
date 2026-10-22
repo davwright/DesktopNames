@@ -70,6 +70,57 @@ internal sealed class ClaudeSessionRegistry
         return Array.Empty<string>();
     }
 
+    /// <summary>The transcript <c>projects\*\&lt;sessionId&gt;.jsonl</c> of a session known by its id
+    /// prefix, or null when none or several match. For sessions restored from disk, whose hooks
+    /// (which carry the path) haven't fired since.</summary>
+    public static string? FindTranscript(string sessionIdPrefix)
+    {
+        var dir = Path.Combine(ClaudeDir, "projects");
+        if (!Directory.Exists(dir)) return null;
+        var hits = Directory.GetFiles(dir, sessionIdPrefix + "*.jsonl", SearchOption.AllDirectories)
+            .Where(f => Path.GetDirectoryName(Path.GetDirectoryName(f)) == dir).ToList();
+        return hits.Count == 1 ? hits[0] : null;
+    }
+
+    // path → (bytes scanned, latest ai-title). Transcripts only grow, so each read scans what was appended.
+    private static readonly Dictionary<string, (long Length, string? Title)> _transcripts = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex AiTitle =
+        new("\"type\":\"ai-title\",\"aiTitle\":(\"(?:[^\"\\\\]|\\\\.)*\")", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// What a transcript says about its session: the latest <c>ai-title</c> Claude Code gave it
+    /// ("Osis dev privileges review") and when it was last written — the session's real last
+    /// activity, which survives a DesktopNames restart. Null when the file is gone.
+    /// </summary>
+    public static (string? Title, DateTime LastWriteUtc)? Transcript(string path)
+    {
+        var file = new FileInfo(path);
+        if (!file.Exists) return null;
+        _transcripts.TryGetValue(path, out var seen);
+        // First sight: Claude Code repeats the ai-title through the transcript, so the tail usually
+        // has one and a multi-megabyte file needn't be read whole (that made the window open in 3 s).
+        const long Tail = 512 * 1024;
+        if (seen.Length == 0 && file.Length > Tail)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(-Tail, SeekOrigin.End);
+            var matches = AiTitle.Matches(new StreamReader(stream, System.Text.Encoding.UTF8).ReadToEnd());
+            if (matches.Count > 0)
+                _transcripts[path] = seen = (stream.Position, JsonSerializer.Deserialize<string>(matches[^1].Groups[1].Value));
+        }
+        if (file.Length != seen.Length)
+        {
+            long from = file.Length > seen.Length ? seen.Length : 0;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(from, SeekOrigin.Begin);
+            string appended = new StreamReader(stream, System.Text.Encoding.UTF8).ReadToEnd();
+            var matches = AiTitle.Matches(appended);
+            string? title = matches.Count > 0 ? JsonSerializer.Deserialize<string>(matches[^1].Groups[1].Value) : seen.Title;
+            _transcripts[path] = seen = (stream.Position, title);
+        }
+        return (seen.Title, file.LastWriteTimeUtc);
+    }
+
     private static string ClaudeDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
 

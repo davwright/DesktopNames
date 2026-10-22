@@ -11,7 +11,7 @@ internal sealed class AgentsView : ScrollableControl
 {
     // Heights follow the font, which scales with the screen: fixed pixels clipped the last line at 125%.
     private int Line => Font.Height + 1;
-    private int BoxH => 10 + 4 * Line;
+    private int BoxH => 10 + 5 * Line;
     private int ChildH => 6 + 2 * Line;
     private const int BoxW = 220, ChildW = 196, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
 
@@ -62,7 +62,8 @@ internal sealed class AgentsView : ScrollableControl
         nodes = _placed.Select(p => new
         {
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
-            state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing,
+            state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing, topic = p.Node.Topic,
+            lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive,
             children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity }),
         }),
         edges = _graph.Edges.Select(e => new
@@ -169,10 +170,16 @@ internal sealed class AgentsView : ScrollableControl
         foreach (var edge in _graph.Edges) DrawEdge(g, edge);
     }
 
+    /// <summary>Idle this long, a session is a leftover rather than live work: drawn faded.</summary>
+    private static readonly TimeSpan Stale = TimeSpan.FromHours(1);
+
     private void DrawSession(Graphics g, Placed p)
     {
         var n = p.Node;
+        bool stale = DateTime.UtcNow - n.LastActiveUtc > Stale;
         Color fill = n.State == StateKind.None ? SystemColors.Control : SessionFlyout.StateColor(n.State);
+        if (stale) fill = Blend(fill, SystemColors.Control, 0.65f);
+        Color ink = stale ? SystemColors.GrayText : Color.Black, dim = stale ? SystemColors.GrayText : Color.FromArgb(60, 60, 60);
         using (var path = TaskbarOverlay.RoundedRect(p.Box, 6))
         using (var brush = new SolidBrush(fill))
         using (var border = new Pen(ControlPaint.Dark(fill, 0.1f), 1.2f))
@@ -182,15 +189,28 @@ internal sealed class AgentsView : ScrollableControl
         }
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
+        // Line 1: name, and on the right how long ago it last did anything.
+        string age = SessionState.FormatAge(n.LastActiveUtc);
         using var bold = new Font(Font, FontStyle.Bold);
-        TextRenderer.DrawText(g, n.Name, bold, new Rectangle(lx, y, w, Line), Color.Black, flags);
-        // The frame names the desktop; the folder tells apart sessions of one name (osis-dev vs evolx osis_fixes).
-        TextRenderer.DrawText(g, ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), Color.FromArgb(60, 60, 60), flags);
-        string state = n.State == StateKind.None ? "idle" : n.State.ToString().ToLowerInvariant();
-        TextRenderer.DrawText(g, $"{state} · since {n.LastSeenUtc.ToLocalTime():HH:mm}", Font, new Rectangle(lx, y + 2 * Line, w, Line), Color.FromArgb(60, 60, 60), flags);
+        int ageW = TextRenderer.MeasureText(age, bold).Width;
+        TextRenderer.DrawText(g, n.Name, bold, new Rectangle(lx, y, w - ageW - 4, Line), ink, flags);
+        TextRenderer.DrawText(g, age, bold, new Rectangle(lx + w - ageW, y, ageW, Line), ink, flags);
+        // Line 2: what the session is about (Claude Code's title for it).
         using var italic = new Font(Font, FontStyle.Italic);
-        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 3 * Line, w, Line), Color.Black, flags);
+        TextRenderer.DrawText(g, n.Topic ?? "", Font, new Rectangle(lx, y + Line, w, Line), ink, flags);
+        // Line 3: the folder — the frame names the desktop; this tells apart sessions of one name.
+        TextRenderer.DrawText(g, ShortFolder(n.Cwd), Font, new Rectangle(lx, y + 2 * Line, w, Line), dim, flags);
+        // Line 4: state, background work, when it started.
+        string state = n.State == StateKind.None ? "idle" : n.State.ToString().ToLowerInvariant();
+        string background = n.BackgroundActive ? " · ⏳ background" : "";
+        string started = n.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
+        TextRenderer.DrawText(g, state + background + started, Font, new Rectangle(lx, y + 3 * Line, w, Line), dim, flags);
+        // Line 5: its latest message or tool call.
+        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 4 * Line, w, Line), ink, flags);
     }
+
+    private static Color Blend(Color a, Color b, float toB) => Color.FromArgb(
+        (int)(a.R + (b.R - a.R) * toB), (int)(a.G + (b.G - a.G) * toB), (int)(a.B + (b.B - a.B) * toB));
 
     /// <summary>The last two segments of a folder: evolx\osis_fixes.</summary>
     private static string ShortFolder(string cwd)

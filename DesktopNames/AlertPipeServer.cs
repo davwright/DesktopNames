@@ -48,8 +48,12 @@ internal sealed class AlertPipeServer : IDisposable
     {
         // Sessions restored from disk may be idle for hours; name them now, not at their next hook.
         foreach (var (source, sid) in _state.TrackedSessions())
+        {
             if (_state.NameOf(source, sid).Length == 0 && _claudeSessions.Live(sid)?.Name is { Length: > 0 } name)
                 _state.SetName(source, sid, name);
+            if (_state.TranscriptOf(source, sid).Length == 0 && ClaudeSessionRegistry.FindTranscript(sid) is { } transcript)
+                _state.SetTranscript(source, sid, transcript);
+        }
         _thread = new Thread(Loop) { IsBackground = true, Name = "DesktopNames-AlertPipe" };
         _thread.Start();
     }
@@ -294,6 +298,7 @@ internal sealed class AlertPipeServer : IDisposable
     private void RefreshName(AlertMessage msg)
     {
         string source = msg.Source ?? "unknown", sid = msg.SessionId!;
+        if (msg.TranscriptPath is { Length: > 0 } transcript) _state.SetTranscript(source, sid, transcript);
         if (msg.HookEvent is not ("SessionStart" or "UserPromptSubmit") && _state.NameOf(source, sid).Length > 0) return;
         if (_claudeSessions.Live(sid)?.Name is { Length: > 0 } name) _state.SetName(source, sid, name);
     }

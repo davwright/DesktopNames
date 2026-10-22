@@ -116,6 +116,9 @@ internal sealed class SessionEntry
 
     /// <summary>Claude Code's name for the session ("kpmg-44", what SendMessage addresses); empty until known.</summary>
     public string Name { get; set; } = "";
+
+    /// <summary>The session's transcript (.jsonl): its title and real last activity come from it.</summary>
+    public string TranscriptPath { get; set; } = "";
 }
 
 /// <summary>One background task of a session: an agent or a run_in_background shell.</summary>
@@ -197,7 +200,8 @@ internal sealed class SessionState
 
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc);
     public sealed record AgentNode(string Source, string SessionId, string Name, string Cwd, Guid DesktopId, StateKind State,
-                                   string Doing, DateTime LastSeenUtc, IReadOnlyList<AgentChild> Children);
+                                   string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
+                                   string? Topic, DateTime? StartedUtc, bool BackgroundActive);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
@@ -207,8 +211,9 @@ internal sealed class SessionState
     {
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
                 e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId, e.Cwd,
-                kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, e.LastSeenUtc,
-                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc)).ToList())))
+                kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
+                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc)).ToList(),
+                Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive)))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
             // A later message on the same line replaces the earlier one.
@@ -246,6 +251,24 @@ internal sealed class SessionState
         SaveToDisk();
         ChangedFor(source, sessionId);
     }
+
+    public string TranscriptOf(string source, string sessionId) => Entry(source, sessionId)?.TranscriptPath ?? "";
+
+    public void SetTranscript(string source, string sessionId, string path)
+    {
+        if (Entry(source, sessionId) is not { } e || e.TranscriptPath == path) return;
+        e.TranscriptPath = path;
+        SaveToDisk();
+    }
+
+    /// <summary>When the session last did anything: its transcript's last write. LastSeenUtc is
+    /// reset when DesktopNames restarts (the stale sweep needs that), so it only stands in
+    /// for a session whose transcript isn't known.</summary>
+    private static DateTime LastActive(SessionEntry e) =>
+        e.TranscriptPath.Length > 0 && ClaudeSessionRegistry.Transcript(e.TranscriptPath) is { } t ? t.LastWriteUtc : e.LastSeenUtc;
+
+    private static string? Topic(SessionEntry e) =>
+        e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Title : null;
 
     private SessionEntry? Entry(string source, string sessionId) =>
         _location.TryGetValue((source, sessionId), out var desktop) && _byDesktop.TryGetValue(desktop, out var list)
@@ -324,6 +347,7 @@ internal sealed class SessionState
         public string Title { get; set; } = "";
         public string Body { get; set; } = "";
         public string Name { get; set; } = "";
+        public string? TranscriptPath { get; set; }
         public List<string> RecentBodies { get; set; } = new();
         public int SessionPid { get; set; }
         public int VsCodePid { get; set; }
@@ -352,7 +376,7 @@ internal sealed class SessionState
                     {
                         DesktopId = desktopId, Source = e.Source, SessionId = e.SessionId,
                         Activity = e.Activity, Asks = new List<PendingAsk>(e.Asks),
-                        Title = e.Title, Body = e.Body, Name = e.Name,
+                        Title = e.Title, Body = e.Body, Name = e.Name, TranscriptPath = e.TranscriptPath,
                         RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
@@ -389,7 +413,7 @@ internal sealed class SessionState
                 {
                     Source = p.Source, SessionId = p.SessionId,
                     Activity = p.Activity,
-                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", SessionPid = p.SessionPid,
+                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", TranscriptPath = p.TranscriptPath ?? "", SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
                     Cwd = p.Cwd, BackgroundActive = p.BackgroundActive, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore
@@ -507,7 +531,7 @@ internal sealed class SessionState
         // title's leaf name is generic). The Tip* markers style them in the owner-drawn tooltip.
         var sb = new System.Text.StringBuilder();
         sb.Append(TipHeader).Append((char)('0' + (int)e.State))
-          .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(e.LastSeenUtc)})");
+          .Append($"{label} ({sid} · {e.State.ToString().ToLowerInvariant()}, {FormatAge(LastActive(e))})");
         if (WorkingFor(e) is { } forWhom) sb.Append('\n').Append(TipBgHead).Append("← working for ").Append(forWhom);
         if (WaitingOn(e) is { } onWhom) sb.Append('\n').Append(TipBgHead).Append("→ waiting on ").Append(onWhom);
         // Earlier messages first, the current one last: a bullet list in the order it happened.
@@ -529,7 +553,7 @@ internal sealed class SessionState
         if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);
         // Two sessions in one folder look alike; when each started tells them apart.
         string since = ProcessStartedUtc(e.SessionPid) is { } at ? $"started {FormatAge(at)} ago · " : "";
-        sb.Append('\n').Append(TipDim).Append($"{since}last active {FormatAge(e.LastSeenUtc)} ago · session {e.SessionId}");
+        sb.Append('\n').Append(TipDim).Append($"{since}last active {FormatAge(LastActive(e))} ago · session {e.SessionId}");
         return sb.ToString();
     }
 
