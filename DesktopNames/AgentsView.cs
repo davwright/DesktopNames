@@ -260,7 +260,7 @@ internal sealed class AgentsView : ScrollableControl
         }
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
         // Line 1: the title VS Code lists it under; top right, last active / started, ⏳ while background work runs.
-        string corner = (n.BackgroundActive ? "⏳ " : "") + SessionState.FormatAge(n.LastActiveUtc)
+        string corner = (n.Usage is { } model ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + SessionState.FormatAge(n.LastActiveUtc)
                       + (n.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
         int cornerW = TextRenderer.MeasureText(corner, bold).Width;
@@ -299,6 +299,13 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>Tokens a model holds before Claude Code compacts. 1M for Opus, Sonnet and Fable as run
     /// here (contexts of 914k are in the transcripts); Haiku has 200k.</summary>
     private static long ContextWindow(string model) => model.Contains("haiku", StringComparison.Ordinal) ? 200_000 : 1_000_000;
+
+    /// <summary>"claude-opus-5-5" → "Opus 5.5", "claude-fable-5-1" → "Fable 5.1"; anything else as it is.</summary>
+    private static string ModelName(string model)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(model, @"^claude-([a-z]+)-(\d+)-(\d+)");
+        return m.Success ? char.ToUpperInvariant(m.Groups[1].Value[0]) + m.Groups[1].Value[1..] + " " + m.Groups[2].Value + "." + m.Groups[3].Value : model;
+    }
 
     private static string Flatten(string text) => string.Join(" ", text.Split((char[])['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
 
