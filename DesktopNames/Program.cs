@@ -762,7 +762,7 @@ internal sealed class HostForm : Form
         c.Add(new("claude.prevWaiting", "Previous waiting Claude", none, "", _ => { JumpToWaitingClaude(-1); return null; }));
         c.Add(new("claude.nextWaiting", "Next waiting Claude",     none, "", _ => { JumpToWaitingClaude(+1); return null; }));
         // Deferred: the window is modal, and its loop must not run inside the hotkey or pipe call.
-        c.Add(new("projects.open", "Open the DesktopNames window", none, "", _ => { BeginInvoke(() => _projects?.ShowDialog()); return null; }));
+        c.Add(new("projects.open", "Open the DesktopNames window", none, "", _ => { BeginInvoke(() => _projects?.ShowWindow()); return null; }));
         c.Add(new("desktop.switch", "Switch to desktop", n, nDoc, a => { _desktopService.SwitchToDesktop(DesktopNumber(a)); RefreshAllOverlays(); return null; }));
         c.Add(new("window.moveToDesktop", "Move the focused window to desktop", n, nDoc, a =>
         {
@@ -847,17 +847,16 @@ internal sealed class HostForm : Form
         }));
         c.Add(new("screens.delete", "Forget an unplugged screen and the layouts it is part of", new[] { "screen" }, screenDoc, a =>
             new { layoutsDeleted = _settings.DeleteScreen(a.RequiredStr("screen")) }));
-        // Deferred like projects.open: the window is modal.
         c.Add(new("layouts.open", "Open the screen layouts window", none, "", _ =>
         {
             if (_layoutsDialog != null) { _layoutsDialog.Activate(); return null; }
-            BeginInvoke(() =>
+            var dialog = _layoutsDialog = new LayoutsDialog(_settings, Commands);
+            dialog.FormClosed += (_, _) =>
             {
-                using (_layoutsDialog = new LayoutsDialog(_settings, Commands))
-                    _layoutsDialog.ShowDialog(_projects?.Dialog);
                 _layoutsDialog = null;
                 _projects?.Dialog?.RefreshState();
-            });
+            };
+            dialog.Show(_projects?.Dialog);
             return null;
         }));
         c.Add(new("desktop.rename", "Rename a desktop", new[] { "desktop", "name" }, desktopDoc + "; name: new name", a =>
@@ -1076,7 +1075,7 @@ internal sealed class HostForm : Form
         _alertServer?.SessionWorkspaceFolders(sessionId) ?? Array.Empty<string>();
 
     /// <summary>Overlay command: open the DesktopNames window (the same one Win+J opens).</summary>
-    public void ShowProjects() => _projects?.ShowDialog();
+    public void ShowProjects() => _projects?.ShowWindow();
 
     /// <summary>Overlay command: pull every open VS Code window onto one screen, each staying
     /// on its own virtual desktop and in its own snap position.</summary>

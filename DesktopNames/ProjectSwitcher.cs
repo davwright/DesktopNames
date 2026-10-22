@@ -72,26 +72,40 @@ internal sealed class ProjectSwitcher : IDisposable
         if (_launchHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_launchHook);
     }
 
-    /// <summary>Hotkey handler: show the switcher on the primary screen, or bring it forward if open.</summary>
-    public void ShowDialog()
+    /// <summary>
+    /// Hotkey handler: show the window (not modal) on the primary screen. Already open, it comes
+    /// to the current desktop and to the front, instead of Windows switching back to its desktop.
+    /// </summary>
+    public void ShowWindow()
     {
-        if (_dialog != null) { _dialog.Activate(); return; }
         try
         {
-            using (_dialog = new ProjectsDialog(this, _settings.ProjectsRoot))
+            if (_dialog != null)
             {
-                if (_sessions != null) _sessions.Changed += OnSessionsChanged;
+                var here = _desktop.GetCurrentDesktopId();
+                if (_desktop.GetDesktopForWindow(_dialog.Handle) != here && !_desktop.MoveWindowToDesktop(_dialog.Handle, here))
+                    throw new InvalidOperationException("Could not bring the DesktopNames window to this desktop.");
+                _dialog.Activate();
+                return;
+            }
+            var dialog = _dialog = new ProjectsDialog(this, _settings.ProjectsRoot);
+            if (_sessions != null) _sessions.Changed += OnSessionsChanged;
+            // A modeless form disposes itself on close; what it chose is read before that.
+            dialog.FormClosed += (_, _) =>
+            {
+                if (_sessions != null) _sessions.Changed -= OnSessionsChanged;
+                _dialog = null;
+                if (dialog.DialogResult != DialogResult.OK) return;
                 try
                 {
-                    if (_dialog.ShowDialog() != DialogResult.OK) return;
+                    if (dialog.NewProjectName != null) OpenNew(CreateFolder(dialog.NewProjectName));
+                    else Open(dialog.ChosenRow!);
                 }
-                finally { if (_sessions != null) _sessions.Changed -= OnSessionsChanged; }
-                if (_dialog.NewProjectName != null) OpenNew(CreateFolder(_dialog.NewProjectName));
-                else Open(_dialog.ChosenRow!);
-            }
+                catch (Exception ex) { ReportError(ex); }
+            };
+            dialog.Show();
         }
         catch (Exception ex) { ReportError(ex); }
-        finally { _dialog = null; }
     }
 
     private void OnSessionsChanged(Guid _) => _dialog?.RefreshState();
@@ -876,9 +890,14 @@ internal sealed class ProjectsDialog : Form
         // Folder takes the remaining width, so there is never a horizontal scrollbar.
         int folderIdx = _cols.FindIndex(c => c.Kind == Col.Folder);
         _list.ClientSizeChanged += (_, _) =>
+        {
+            // In a tab page that isn't shown first, the list's window is created later and its
+            // columns are re-inserted one by one, resizing it on the way: wait for the last one.
+            if (_list.Columns.Count != _cols.Count) return;
             // Actual widths: on a scaled screen they differ from the design widths in _cols.
             _list.Columns[folderIdx].Width = Math.Max(120, _list.ClientSize.Width
                 - _list.Columns.Cast<ColumnHeader>().Where(h => h.Index != folderIdx).Sum(h => h.Width));
+        };
         _list.DrawSubItem += DrawSubItem;
         _list.ColumnClick += (_, e) => SortBy(e.Column);
         _list.DoubleClick += (_, _) => { if (KindAt(_pressCol) != Col.Screen) Accept(); };
@@ -905,7 +924,8 @@ internal sealed class ProjectsDialog : Form
         _list.DragDrop += OnDragDrop;
         _list.DragLeave += (_, _) => SetDropTarget(-1, -1);
 
-        var cancel = new Button { Text = "Cancel (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var cancel = new Button { Text = "Cancel (Esc)", AutoSize = true };
+        cancel.Click += (_, _) => Finish(DialogResult.Cancel);
         var closeIdle = new Button { Text = "Close idle desktops…", AutoSize = true };
         closeIdle.Click += (_, _) => CloseIdleDesktops();
         var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -923,6 +943,12 @@ internal sealed class ProjectsDialog : Form
         if (switcher.Sessions != null)
             agentsTab.Controls.Add(_agents = new AgentsView(switcher.Sessions, Program.Host!.DesktopService) { Dock = DockStyle.Fill });
         _tabs.TabPages.AddRange(new[] { projectsTab, agentsTab });
+        ShowTab(Program.Host.Settings.ProjectsWindowTab);
+        _tabs.SelectedIndexChanged += (_, _) =>
+        {
+            Program.Host.Settings.ProjectsWindowTab = _tabs.SelectedIndex == 1 ? "agents" : "projects";
+            Program.Host.Settings.Save();
+        };
         Controls.Add(_tabs);
         var menu = BuildMenu(closeIdle);
         Controls.Add(menu);
@@ -1835,7 +1861,14 @@ internal sealed class ProjectsDialog : Form
             return;
         }
         Run("vscode.launch", row.Desktop == null ? new { folder = row.Folder } : (object)new { desktop = row.Desktop.Index + 1, folder = row.Folder });
-        DialogResult = DialogResult.Cancel;
+        Finish(DialogResult.Cancel);
+    }
+
+    /// <summary>The window is not modal: setting DialogResult alone does not close it.</summary>
+    private void Finish(DialogResult result)
+    {
+        DialogResult = result;
+        Close();
     }
 
     private void Accept()
@@ -1844,13 +1877,13 @@ internal sealed class ProjectsDialog : Form
         var row = (ProjectSwitcher.Row)_list.SelectedItems[0].Tag!;
         if (row.Desktop == null && row.Folder == null) return;
         ChosenRow = row;
-        DialogResult = DialogResult.OK;
+        Finish(DialogResult.OK);
     }
 
     private void CreateNew()
     {
         NewProjectName = _search.Text.Trim();
-        DialogResult = DialogResult.OK;
+        Finish(DialogResult.OK);
     }
 
     /// <summary>

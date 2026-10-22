@@ -105,6 +105,9 @@ internal sealed class Settings
     /// <summary>Where the project switcher (Win+J) creates new project folders and lists existing ones.</summary>
     public string ProjectsRoot { get; set; } = @"C:\git\projects";
 
+    /// <summary>The DesktopNames window's tab last shown: projects | agents.</summary>
+    public string ProjectsWindowTab { get; set; } = "projects";
+
     /// <summary>
     /// Projects removed from the switcher list (<see cref="FolderKey"/> → when). A project
     /// reappears once it is used again after that, so removal only clears out the ancient ones.

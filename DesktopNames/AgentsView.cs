@@ -9,7 +9,11 @@ namespace DesktopNames;
 /// </summary>
 internal sealed class AgentsView : ScrollableControl
 {
-    private const int BoxW = 220, BoxH = 80, ChildW = 196, ChildH = 40, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
+    // Heights follow the font, which scales with the screen: fixed pixels clipped the last line at 125%.
+    private int Line => Font.Height + 1;
+    private int BoxH => 10 + 4 * Line;
+    private int ChildH => 6 + 2 * Line;
+    private const int BoxW = 220, ChildW = 196, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
 
     private readonly SessionState _sessions;
     private readonly DesktopService _desktops;
@@ -70,38 +74,63 @@ internal sealed class AgentsView : ScrollableControl
 
     private string NameOf(string sessionId) => _placed.FirstOrDefault(p => p.Node.SessionId == sessionId)?.Node.Name ?? sessionId;
 
-    /// <summary>Sessions left to right in desktop order, wrapping into bands; children stacked under each.</summary>
+    private const int InnerGap = 16, GroupPad = 10, GroupTitle = 26;
+    private List<(string Label, Rectangle Frame)> _groups = new();
+
+    /// <summary>
+    /// One frame per desktop, in desktop order, flowing left to right and wrapping into bands. Inside
+    /// a frame its sessions sit side by side (wrapping when wider than the view), each with its
+    /// background agents and shells stacked under it.
+    /// </summary>
     private void Reflow()
     {
         _graph = _sessions.Graph();
         var desktops = _desktops.GetDesktops();
         int Order(Guid id) => desktops.FindIndex(d => d.Id == id) is int i and >= 0 ? i : int.MaxValue;
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
+        int StackHeight(SessionState.AgentNode n) => BoxH + n.Children.Count * (ChildH + ChildGap);
 
-        int width = Math.Max(ClientSize.Width, BoxW + 2 * Pad);
+        int width = Math.Max(ClientSize.Width, BoxW + 2 * (Pad + GroupPad));
+        int maxCols = Math.Max(1, (width - 2 * Pad - 2 * GroupPad + InnerGap) / (BoxW + InnerGap));
         int x = Pad, top = Pad + 30, bandHeight = 0;
         var placed = new List<Placed>();
-        foreach (var n in _graph.Nodes.OrderBy(n => Order(n.DesktopId)).ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
+        var groups = new List<(string, Rectangle)>();
+        foreach (var group in _graph.Nodes.GroupBy(n => n.DesktopId).OrderBy(g => Order(g.Key)))
         {
-            if (x + BoxW > width - Pad && x > Pad)
+            var nodes = group.OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            int cols = Math.Min(nodes.Count, maxCols);
+            int frameW = cols * BoxW + (cols - 1) * InnerGap + 2 * GroupPad;
+            if (x + frameW > width - Pad && x > Pad)
             {
                 x = Pad;
                 top += bandHeight + BandGap;
                 bandHeight = 0;
             }
-            var box = new Rectangle(x, top, BoxW, BoxH);
-            var children = new List<(SessionState.AgentChild, Rectangle)>();
-            int cy = box.Bottom + ChildGap;
-            foreach (var c in n.Children.OrderBy(c => c.StartedUtc ?? DateTime.MaxValue))
+            int rowTop = top + GroupTitle;
+            for (int r = 0; r * cols < nodes.Count; r++)
             {
-                children.Add((c, new Rectangle(box.Right - ChildW, cy, ChildW, ChildH)));
-                cy += ChildH + ChildGap;
+                var row = nodes.Skip(r * cols).Take(cols).ToList();
+                for (int c = 0; c < row.Count; c++)
+                {
+                    var box = new Rectangle(x + GroupPad + c * (BoxW + InnerGap), rowTop, BoxW, BoxH);
+                    var children = new List<(SessionState.AgentChild, Rectangle)>();
+                    int cy = box.Bottom + ChildGap;
+                    foreach (var child in row[c].Children.OrderBy(ch => ch.StartedUtc ?? DateTime.MaxValue))
+                    {
+                        children.Add((child, new Rectangle(box.Right - ChildW, cy, ChildW, ChildH)));
+                        cy += ChildH + ChildGap;
+                    }
+                    placed.Add(new Placed(row[c], Label(group.Key), box, children));
+                }
+                rowTop += row.Max(StackHeight) + InnerGap;
             }
-            bandHeight = Math.Max(bandHeight, cy - top);
-            placed.Add(new Placed(n, Label(n.DesktopId), box, children));
-            x += BoxW + Gap;
+            var frame = new Rectangle(x, top, frameW, rowTop - InnerGap + GroupPad - top);
+            groups.Add((Label(group.Key), frame));
+            bandHeight = Math.Max(bandHeight, frame.Height);
+            x += frameW + Gap;
         }
         _placed = placed;
+        _groups = groups;
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
     }
 
@@ -115,6 +144,17 @@ internal sealed class AgentsView : ScrollableControl
             TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText);
             return;
         }
+        using (var frameFill = new SolidBrush(Color.FromArgb(246, 246, 248)))
+        using (var framePen = new Pen(Color.FromArgb(205, 205, 212)))
+        using (var title = new Font(Font, FontStyle.Bold))
+            foreach (var (label, frame) in _groups)
+            {
+                using var path = TaskbarOverlay.RoundedRect(frame, 8);
+                g.FillPath(frameFill, path);
+                g.DrawPath(framePen, path);
+                TextRenderer.DrawText(g, label, title, new Rectangle(frame.Left + GroupPad, frame.Top + 4, frame.Width - 2 * GroupPad, 18),
+                    SystemColors.GrayText, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            }
         using var connector = new Pen(SystemColors.ControlDark, 1f);
         foreach (var p in _placed)
         {
@@ -143,12 +183,20 @@ internal sealed class AgentsView : ScrollableControl
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
         using var bold = new Font(Font, FontStyle.Bold);
-        TextRenderer.DrawText(g, n.Name, bold, new Rectangle(lx, y, w, 18), Color.Black, flags);
-        TextRenderer.DrawText(g, p.Desktop, Font, new Rectangle(lx, y + 18, w, 17), Color.FromArgb(60, 60, 60), flags);
+        TextRenderer.DrawText(g, n.Name, bold, new Rectangle(lx, y, w, Line), Color.Black, flags);
+        // The frame names the desktop; the folder tells apart sessions of one name (osis-dev vs evolx osis_fixes).
+        TextRenderer.DrawText(g, ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), Color.FromArgb(60, 60, 60), flags);
         string state = n.State == StateKind.None ? "idle" : n.State.ToString().ToLowerInvariant();
-        TextRenderer.DrawText(g, $"{state} · since {n.LastSeenUtc.ToLocalTime():HH:mm}", Font, new Rectangle(lx, y + 35, w, 17), Color.FromArgb(60, 60, 60), flags);
+        TextRenderer.DrawText(g, $"{state} · since {n.LastSeenUtc.ToLocalTime():HH:mm}", Font, new Rectangle(lx, y + 2 * Line, w, Line), Color.FromArgb(60, 60, 60), flags);
         using var italic = new Font(Font, FontStyle.Italic);
-        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 52, w, 17), Color.Black, flags);
+        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 3 * Line, w, Line), Color.Black, flags);
+    }
+
+    /// <summary>The last two segments of a folder: evolx\osis_fixes.</summary>
+    private static string ShortFolder(string cwd)
+    {
+        var parts = cwd.Replace('/', '\\').TrimEnd('\\').Split('\\');
+        return string.Join("\\", parts.Skip(Math.Max(0, parts.Length - 2)));
     }
 
     private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r)
@@ -162,8 +210,8 @@ internal sealed class AgentsView : ScrollableControl
         }
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
         string since = c.StartedUtc is { } s ? $" · {SessionState.FormatAge(s)}" : "";
-        TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, 17), SystemColors.ControlText, flags);
-        TextRenderer.DrawText(g, c.Activity, Font, new Rectangle(r.Left + 6, r.Top + 20, r.Width - 12, 17), SystemColors.GrayText, flags);
+        TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, flags);
+        TextRenderer.DrawText(g, c.Activity, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, flags);
     }
 
     /// <summary>A curve over the boxes from sender to recipient (or down the side to the sender's own

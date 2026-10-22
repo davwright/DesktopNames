@@ -196,7 +196,7 @@ internal sealed class SessionState
     }
 
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc);
-    public sealed record AgentNode(string Source, string SessionId, string Name, Guid DesktopId, StateKind State,
+    public sealed record AgentNode(string Source, string SessionId, string Name, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastSeenUtc, IReadOnlyList<AgentChild> Children);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
@@ -206,7 +206,7 @@ internal sealed class SessionState
     public AgentGraph Graph()
     {
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
-                e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
+                e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId, e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, e.LastSeenUtc,
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc)).ToList())))
             .ToList();

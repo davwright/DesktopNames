@@ -72,7 +72,9 @@ internal sealed class LayoutsDialog : Form
             if (hit >= 0) SelectMapScreen(hit, toggle: ModifierKeys.HasFlag(Keys.Control));
         };
 
-        var close = new Button { Text = "Close (Esc)", AutoSize = true, DialogResult = DialogResult.Cancel };
+        // Not modal: a DialogResult alone would not close it.
+        var close = new Button { Text = "Close (Esc)", AutoSize = true };
+        close.Click += (_, _) => Close();
         var mapArea = new Panel { Dock = DockStyle.Right, Width = 540 };
         var mapBar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, BackColor = ScreenMap.Background };
         mapBar.Controls.Add(_editInWindows);
