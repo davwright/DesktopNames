@@ -96,6 +96,8 @@ internal sealed class ProjectSwitcher : IDisposable
 
     private void OnSessionsChanged(Guid _) => _dialog?.RefreshState();
 
+    public SessionState? Sessions => _sessions;
+
     /// <summary>The DesktopNames window while it is open (for the control channel).</summary>
     public ProjectsDialog? Dialog => _dialog;
 
@@ -806,6 +808,20 @@ internal sealed class ProjectsDialog : Form
     /// <summary>Set when the user asked for a new project with this folder name.</summary>
     public string? NewProjectName { get; private set; }
 
+    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
+    private AgentsView? _agents;
+
+    /// <summary>For the control channel: show a tab, as clicking it does.</summary>
+    public void ShowTab(string tab) => _tabs.SelectedIndex = tab switch
+    {
+        "projects" => 0,
+        "agents" => 1,
+        _ => throw new ArgumentException($"tab \"{tab}\" is not one of: projects, agents"),
+    };
+
+    /// <summary>For the control channel: the sessions, children and message arrows the Agents tab shows.</summary>
+    public object AgentsShown() => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).Describe();
+
     public ProjectsDialog(ProjectSwitcher switcher, string projectsRoot)
     {
         _switcher = switcher;
@@ -898,10 +914,16 @@ internal sealed class ProjectsDialog : Form
         var hint = new Label { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
             Text = $"New projects are created in {projectsRoot}" };
 
-        Controls.Add(_list);
-        Controls.Add(_search);
-        Controls.Add(hint);
-        Controls.Add(bar);
+        var projectsTab = new TabPage("Projects");
+        projectsTab.Controls.Add(_list);
+        projectsTab.Controls.Add(_search);
+        projectsTab.Controls.Add(hint);
+        projectsTab.Controls.Add(bar);
+        var agentsTab = new TabPage("Agents");
+        if (switcher.Sessions != null)
+            agentsTab.Controls.Add(_agents = new AgentsView(switcher.Sessions, Program.Host!.DesktopService) { Dock = DockStyle.Fill });
+        _tabs.TabPages.AddRange(new[] { projectsTab, agentsTab });
+        Controls.Add(_tabs);
         var menu = BuildMenu(closeIdle);
         Controls.Add(menu);
         MainMenuStrip = menu;

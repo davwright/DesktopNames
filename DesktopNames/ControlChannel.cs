@@ -39,6 +39,13 @@ internal sealed class ControlChannel
         }));
         _methods.Add(new("ui.rows", "The rows a window shows", new[] { "window" }, "window: projects (default) | layouts", a =>
             (a.Str("window") ?? "projects") == "projects" ? ProjectsWindow().VisibleRows() : LayoutsWindow().Rows()));
+        _methods.Add(new("ui.tab", "Show a tab of the DesktopNames window", new[] { "tab" }, "tab: projects | agents", a =>
+        {
+            ProjectsWindow().ShowTab(a.RequiredStr("tab"));
+            return null;
+        }));
+        _methods.Add(new("ui.agents", "What the Agents tab shows: sessions, their agents and shells, message arrows", none, "", _ =>
+            ProjectsWindow().AgentsShown()));
         _methods.Add(new("ui.rename", "Start editing a row's desktop name in place, as F2 does", new[] { "row" }, "row: 0-based visible row", a =>
         {
             var w = ProjectsWindow();

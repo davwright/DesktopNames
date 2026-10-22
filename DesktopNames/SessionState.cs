@@ -178,6 +178,45 @@ internal sealed class SessionState
         Log.State($"peer link {senderName} ({senderId}) -> {peerName} ({peerId})");
         ChangedFor(source, senderId);
         ChangedFor(source, peerId);
+        Updated?.Invoke();
+    }
+
+    /// <summary>One SendMessage: to another session (<see cref="ToSessionId"/>) or to one of the
+    /// sender's own subagents (<see cref="To"/> is its agent id).</summary>
+    public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc);
+
+    private static readonly TimeSpan MessageMemory = TimeSpan.FromMinutes(30);
+    private readonly List<PeerMessage> _messages = new();
+
+    public void RecordMessage(PeerMessage m)
+    {
+        _messages.RemoveAll(x => DateTime.UtcNow - x.AtUtc > MessageMemory);
+        _messages.Add(m);
+        Updated?.Invoke();
+    }
+
+    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc);
+    public sealed record AgentNode(string Source, string SessionId, string Name, Guid DesktopId, StateKind State,
+                                   string Doing, DateTime LastSeenUtc, IReadOnlyList<AgentChild> Children);
+    /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
+    public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
+    public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
+
+    /// <summary>Every tracked session with its background agents and shells, and who messaged whom.</summary>
+    public AgentGraph Graph()
+    {
+        var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
+                e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
+                kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, e.LastSeenUtc,
+                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc)).ToList())))
+            .ToList();
+        var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
+            // A later message on the same line replaces the earlier one.
+            .GroupBy(m => (m.FromId, m.To)).Select(g => g.MaxBy(m => m.AtUtc)!)
+            .Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.AtUtc,
+                m.ToSessionId != null && _waits.TryGetValue((m.Source, m.FromId), out var w) && w.PeerId == m.ToSessionId))
+            .ToList();
+        return new AgentGraph(nodes, edges);
     }
 
     /// <summary><paramref name="sessionId"/>'s turn ended or it went away: whoever waited on it stops
@@ -192,6 +231,7 @@ internal sealed class SessionState
         }
         if (gone && _waits.Remove((source, sessionId))) Log.State($"peer link from {sessionId} ended (sender gone)");
         ChangedFor(source, sessionId);
+        Updated?.Invoke();
     }
 
     public List<(string Source, string SessionId)> TrackedSessions() => _location.Keys.ToList();
@@ -295,8 +335,14 @@ internal sealed class SessionState
         public bool Consumed { get; set; }
     }
 
+    /// <summary>Anything about any session changed — its activity text included, which
+    /// <see cref="Changed"/> skips. The agents view redraws on it.</summary>
+    public event Action? Updated;
+
     private void SaveToDisk()
     {
+        // Every mutation saves, so this is also the one place that announces it.
+        Updated?.Invoke();
         try
         {
             var list = new List<PersistedEntry>();

@@ -308,10 +308,14 @@ internal sealed class AlertPipeServer : IDisposable
         string source = msg.Source ?? "unknown", sid = msg.SessionId!;
         if (msg.SendTo is { Length: > 0 } to)
         {
-            if (_claudeSessions.SessionIdByName(to) is { } peer)
-                _state.LinkPeer(source, sid, _claudeSessions.Live(sid)?.Name is { Length: > 0 } me ? me : EventLabel(msg), peer[..Math.Min(8, peer.Length)], to);
+            string? peerId = _claudeSessions.SessionIdByName(to) is { } peer ? peer[..Math.Min(8, peer.Length)] : null;
+            if (peerId != null)
+                _state.LinkPeer(source, sid, _claudeSessions.Live(sid)?.Name is { Length: > 0 } me ? me : EventLabel(msg), peerId, to);
             else
                 Log.State($"message from {sid} to '{to}': no live session has that name (a subagent?) — not linked");
+            // ClaudeHook describes it as "Message <to>: <summary>".
+            string summary = msg.ToolDescription is { } d && d.IndexOf(": ", StringComparison.Ordinal) is int colon and >= 0 ? d[(colon + 2)..] : "";
+            _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, DateTime.UtcNow));
         }
         if (removed || msg.HookEvent is "Stop" or "StopFailure")
             _state.EndPeerWork(source, sid, gone: removed);
