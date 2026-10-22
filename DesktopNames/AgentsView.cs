@@ -47,8 +47,38 @@ internal sealed class AgentsView : ScrollableControl
         BackColor = SystemColors.Window;
         _columns = Math.Clamp(Program.Host!.Settings.AgentsColumns, 2, 6);
         _sessions.Updated += OnUpdated;
-        Disposed += (_, _) => { _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); };
+        _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
+        VisibleChanged += (_, _) => UpdateShimmer();
+        Disposed += (_, _) => { _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); };
         Reflow();
+    }
+
+    // What is happening right now — busy sessions' current action, their subagents' current tool call —
+    // carries a highlight sweeping across it, so the eye goes there. It is animation, so it runs on a
+    // timer, but only while this tab is visible and something is busy, and repaints only those strips.
+    private readonly System.Windows.Forms.Timer _shimmer = new() { Interval = 40 };
+    private List<Rectangle> _live = new();
+    private const int ShimmerMs = 1800;
+
+    private void UpdateShimmer() => _shimmer.Enabled = Visible && _live.Count > 0;
+
+    private void DrawShimmer(Graphics g, Rectangle r)
+    {
+        float phase = Environment.TickCount64 % ShimmerMs / (float)ShimmerMs;
+        int band = Math.Max(40, r.Width / 3);
+        int x = r.Left - band + (int)((r.Width + band) * phase);
+        var clip = g.Clip;
+        g.SetClip(r, CombineMode.Intersect);
+        using (var brush = new LinearGradientBrush(new Rectangle(x, r.Top, band, r.Height), Color.Transparent, Color.Transparent, LinearGradientMode.Horizontal))
+        {
+            brush.InterpolationColors = new ColorBlend
+            {
+                Colors = new[] { Color.FromArgb(0, Color.White), Color.FromArgb(170, Color.White), Color.FromArgb(0, Color.White) },
+                Positions = new[] { 0f, 0.5f, 1f },
+            };
+            g.FillRectangle(brush, x, r.Top, band, r.Height);
+        }
+        g.Clip = clip;
     }
 
     private void OnUpdated()
@@ -80,6 +110,7 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>For the control channel: what the tab shows.</summary>
     public object Describe() => new
     {
+        animating = _shimmer.Enabled,
         nodes = _placed.Select(p => new
         {
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
@@ -170,6 +201,11 @@ internal sealed class AgentsView : ScrollableControl
         }
         _placed = placed;
         _groups = groups;
+        _live = placed.Where(p => p.Node.State == StateKind.Busy)
+            .SelectMany(p => p.Children.Where(c => c.Child.Activity.Length > 0)
+                .Select(c => new Rectangle(c.Box.Left, c.Box.Top + 4 + Line, c.Box.Width, Line))
+                .Prepend(ActionZone(p.Box))).ToList();
+        UpdateShimmer();
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
     }
 
@@ -230,7 +266,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 int spine = p.Box.Left + (BoxW - ChildW) / 2;
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
-                DrawChild(g, child, r, Fill(p.Node));
+                DrawChild(g, child, r, Fill(p.Node), live: p.Node.State == StateKind.Busy);
             }
             foreach (var (message, r) in p.Messages)
             {
@@ -285,6 +321,7 @@ internal sealed class AgentsView : ScrollableControl
                 (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + 2 * Line, w, 2 * Line));
         // Lines 5-6: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
+        if (n.State == StateKind.Busy) DrawShimmer(g, ActionZone(p.Box));
         DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 4 * Line, w, 2 * Line));
     }
 
@@ -386,7 +423,7 @@ internal sealed class AgentsView : ScrollableControl
     /// what it does, and in the corner last output / started, as the session shows last active /
     /// started. Line 2: a subagent's current tool call, or a shell's process.
     /// </summary>
-    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r, Color parentFill)
+    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r, Color parentFill, bool live)
     {
         Color fill = Blend(parentFill, Color.White, 0.6f);
         using (var path = TaskbarOverlay.RoundedRect(r, 5))
@@ -412,7 +449,10 @@ internal sealed class AgentsView : ScrollableControl
             null => c.LastOutputUtc == null ? "output file gone" : "process not known yet",
         };
         if (c.Activity.Length > 0)
+        {
+            if (live) DrawShimmer(g, new Rectangle(r.Left, y + Line, r.Width, Line));
             DrawCommand(g, ToolIcon(c.ActivityTool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
+        }
         else
             TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
     }
