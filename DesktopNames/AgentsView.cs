@@ -211,7 +211,7 @@ internal sealed class AgentsView : ScrollableControl
         // Line 2: the name sessions message it by (when the title isn't it) and its folder.
         // Right: the context its latest call sent, and how much of it came from the prompt cache — a
         // low share means the cache had expired (KPMG: 912k sent, 30k read, 882k written again).
-        string tokens = n.Usage is { } u ? $"{Tokens(u.Context)} · {Tokens(u.CacheRead)} cached" : "";
+        string tokens = n.Usage is { Context: > 0 } u ? $"{Tokens(u.Context)} · {100 * u.CacheRead / u.Context}% cached" : "";
         int tokensW = tokens.Length > 0 ? TextRenderer.MeasureText(tokens, Font).Width : 0;
         string id = n.Name == n.Title ? "" : n.Name + " · ";
         TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w - tokensW - 4, Line), dim, Flags);
@@ -305,7 +305,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 key = p.Node.SessionId;
                 string usage = p.Node.Usage is { } u
-                    ? $"{u.Model}: latest call sent {u.Context:N0} tokens ({u.CacheRead:N0} read from cache, {u.CacheWrite:N0} written to it, {u.Input:N0} uncached), got {u.Output:N0}\n\n" : "";
+                    ? $"{u.Model}, at its last call ({SessionState.FormatAge(p.Node.LastActiveUtc)} ago): sent {u.Context:N0} tokens ({u.CacheRead:N0} read from cache, {u.CacheWrite:N0} written to it, {u.Input:N0} uncached), got {u.Output:N0}\n\n" : "";
                 text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
