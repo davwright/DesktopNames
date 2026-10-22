@@ -836,6 +836,8 @@ internal sealed class ProjectsDialog : Form
     /// <summary>For the control channel: the sessions, children and message arrows the Agents tab shows.</summary>
     public void ScrollAgents(int y) => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).ScrollTo(y);
 
+    public AgentsView Agents => _agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)");
+
     public object AgentsShown() => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).Describe();
 
     public ProjectsDialog(ProjectSwitcher switcher, string projectsRoot)

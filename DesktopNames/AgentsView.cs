@@ -17,7 +17,13 @@ internal sealed class AgentsView : ScrollableControl
     private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis
                                           | TextFormatFlags.PreserveGraphicsTranslateTransform;
     private int ChildH => 6 + 2 * Line;
-    private const int BoxW = 300, ChildW = 280, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
+    private const int Gap = 12, ChildGap = 6, Pad = 16, BandGap = 44;
+
+    // Boxes per row (2–6, Ctrl+wheel) set the box width; the text scales with it.
+    private int _columns;
+    private int BoxW = 300;
+    private int ChildW => BoxW - 20;
+    private Font _iconFont = new("Segoe MDL2 Assets", 9f);
 
     private readonly SessionState _sessions;
     private readonly DesktopService _desktops;
@@ -36,8 +42,9 @@ internal sealed class AgentsView : ScrollableControl
         DoubleBuffered = true;
         AutoScroll = true;
         BackColor = SystemColors.Window;
+        _columns = Math.Clamp(Program.Host!.Settings.AgentsColumns, 2, 6);
         _sessions.Updated += OnUpdated;
-        Disposed += (_, _) => { _sessions.Updated -= OnUpdated; _tip.Dispose(); };
+        Disposed += (_, _) => { _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); };
         Reflow();
     }
 
@@ -87,7 +94,9 @@ internal sealed class AgentsView : ScrollableControl
 
     private string NameOf(string sessionId) => _placed.FirstOrDefault(p => p.Node.SessionId == sessionId)?.Node.Name ?? sessionId;
 
-    private const int InnerGap = 16, GroupPad = 10, GroupTitle = 26;
+    // InnerGap = Gap + 2 * GroupPad: boxes inside a frame sit on the same columns as single-box frames.
+    private const int GroupPad = 8, InnerGap = Gap + 2 * GroupPad;
+    private int GroupTitle => Font.Height + 8;
     private List<(string Label, Rectangle Frame)> _groups = new();
 
     /// <summary>
@@ -103,8 +112,10 @@ internal sealed class AgentsView : ScrollableControl
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
         int StackHeight(SessionState.AgentNode n) => BoxH + n.Children.Count * (ChildH + ChildGap);
 
-        int width = Math.Max(ClientSize.Width, BoxW + 2 * (Pad + GroupPad));
-        int maxCols = Math.Max(1, (width - 2 * Pad - 2 * GroupPad + InnerGap) / (BoxW + InnerGap));
+        int width = Math.Max(ClientSize.Width, 400);
+        int maxCols = _columns;
+        BoxW = (width - 2 * Pad - (_columns - 1) * Gap) / _columns - 2 * GroupPad;
+        ScaleText(BoxW / 300f);
         int x = Pad, top = Pad + 30, bandHeight = 0;
         var placed = new List<Placed>();
         var groups = new List<(string, Rectangle)>();
@@ -149,6 +160,35 @@ internal sealed class AgentsView : ScrollableControl
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
     }
 
+    /// <summary>Text grows and shrinks with the boxes (300 px wide = the window's 9 pt).</summary>
+    private void ScaleText(float scale)
+    {
+        float size = Math.Clamp(9f * scale, 7f, 15f);
+        if (Math.Abs(Font.Size - size) < 0.1f) return;
+        Font = new Font("Segoe UI", size);
+        _iconFont.Dispose();
+        _iconFont = new Font("Segoe MDL2 Assets", size);
+    }
+
+    /// <summary>Ctrl+wheel: fewer, larger boxes per row, or more, smaller ones.</summary>
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (ModifierKeys != Keys.Control) { base.OnMouseWheel(e); return; }
+        SetColumns(_columns + (e.Delta > 0 ? -1 : 1));
+    }
+
+    /// <summary>Boxes per row, 2–6, remembered.</summary>
+    public void SetColumns(int columns)
+    {
+        columns = Math.Clamp(columns, 2, 6);
+        if (columns == _columns) return;
+        _columns = columns;
+        Program.Host!.Settings.AgentsColumns = columns;
+        Program.Host.Settings.Save();
+        Reflow();
+        Invalidate();
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -167,7 +207,7 @@ internal sealed class AgentsView : ScrollableControl
                 using var path = TaskbarOverlay.RoundedRect(frame, 8);
                 g.FillPath(frameFill, path);
                 g.DrawPath(framePen, path);
-                TextRenderer.DrawText(g, label, title, new Rectangle(frame.Left + GroupPad, frame.Top + 4, frame.Width - 2 * GroupPad, 18),
+                TextRenderer.DrawText(g, label, title, new Rectangle(frame.Left + GroupPad, frame.Top + 3, frame.Width - 2 * GroupPad, Font.Height + 2),
                     SystemColors.GrayText, Flags);
             }
         using var connector = new Pen(SystemColors.ControlDark, 1f);
@@ -222,10 +262,10 @@ internal sealed class AgentsView : ScrollableControl
     }
 
     /// <summary>
-    /// The latest call's tokens as two bars over the box colour, the box's width being the model's
-    /// window: a light shade over the whole height for the context it sent, and a darker one over
-    /// the lower half for the part of it read from the prompt cache. A cache that had expired
-    /// shows as a short lower bar under a long upper one (KPMG: 912k sent, 30k cached).
+    /// The latest call's tokens as two full-height shades over the box colour, the box's width being
+    /// the model's window: a light one for the context it sent, a darker one for the part read from
+    /// the prompt cache. Two vertical edges: a cache that had expired leaves the darker edge far
+    /// left of the lighter one (KPMG: 912k sent, 30k cached).
     /// </summary>
     private static void DrawContext(Graphics g, GraphicsPath box, Rectangle r, Color fill, ClaudeSessionRegistry.Usage u)
     {
@@ -235,7 +275,7 @@ internal sealed class AgentsView : ScrollableControl
         var clip = g.Clip;
         g.SetClip(box, CombineMode.Intersect);
         using (var tokens = new SolidBrush(Blend(fill, Color.Black, 0.08f))) g.FillRectangle(tokens, r.Left, r.Top, used, r.Height);
-        using (var cache = new SolidBrush(Blend(fill, Color.Black, 0.17f))) g.FillRectangle(cache, r.Left, r.Top + r.Height / 2, cached, r.Height - r.Height / 2);
+        using (var cache = new SolidBrush(Blend(fill, Color.Black, 0.17f))) g.FillRectangle(cache, r.Left, r.Top, cached, r.Height);
         g.Clip = clip;
     }
 
@@ -272,13 +312,12 @@ internal sealed class AgentsView : ScrollableControl
         _ => IconThink,
     };
 
-    private static readonly Font IconFont = new("Segoe MDL2 Assets", 9f);
 
     /// <summary>An icon, then the text wrapped into the rest of the box, cut with … on its last line.</summary>
-    private static void DrawCommand(Graphics g, char icon, string text, Font font, Color ink, Rectangle r)
+    private void DrawCommand(Graphics g, char icon, string text, Font font, Color ink, Rectangle r)
     {
-        const int IconW = 18;
-        TextRenderer.DrawText(g, icon.ToString(), IconFont, new Rectangle(r.Left, r.Top + 1, IconW, r.Height), ink, Flags);
+        int IconW = Line + 2;
+        TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Rectangle(r.Left, r.Top + 1, IconW, r.Height), ink, Flags);
         TextRenderer.DrawText(g, text, font, new Rectangle(r.Left + IconW, r.Top, r.Width - IconW, r.Height), ink,
             TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis
             | TextFormatFlags.PreserveGraphicsTranslateTransform);
@@ -336,7 +375,7 @@ internal sealed class AgentsView : ScrollableControl
         if (c.Activity.Length > 0)
             DrawCommand(g, ToolIcon(c.ActivityTool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
         else
-            TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + 18, y + Line, w - 18, Line), Color.FromArgb(60, 60, 60), Flags);
+            TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
     }
 
     /// <summary>The child's own hover text: everything known about it, in full.</summary>
@@ -400,28 +439,101 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, text, Font, label, edge.Waiting ? SystemColors.ControlText : SystemColors.GrayText, Flags);
     }
 
+    // The box's two prompt lines and two action lines (DrawSession's lines 3-4 and 5-6).
+    private Rectangle PromptZone(Rectangle box) => new(box.Left, box.Top + 5 + 2 * Line, box.Width, 2 * Line);
+    private Rectangle ActionZone(Rectangle box) => new(box.Left, box.Top + 5 + 4 * Line, box.Width, 2 * Line);
+
+    private DetailPopup? _popup;
+    private string? _popupFor;
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
-        string? key = null, text = null;
+        // Over a prompt or the actions: the full message, or the recent actions, in a popup.
+        foreach (var p in _placed)
+        {
+            string? zone = PromptZone(p.Box).Contains(at) && p.Node.Prompt != null ? "prompt" : ActionZone(p.Box).Contains(at) ? "actions" : null;
+            if (zone == null) continue;
+            string key = zone + "/" + p.Node.SessionId;
+            if (key != _popupFor)
+            {
+                ClosePopup();
+                _tipFor = null;
+                _tip.Hide(this);
+                _popupFor = key;
+                _popup = new DetailPopup(zone == "prompt" ? PromptRows(p.Node) : ActionRows(p.Node), Cursor.Position);
+                _popup.Show();
+            }
+            return;
+        }
+        ClosePopup();
+
+        string? key2 = null, text = null;
         foreach (var p in _placed)
         {
             if (p.Box.Contains(at))
             {
-                key = p.Node.SessionId;
+                key2 = p.Node.SessionId;
                 string usage = p.Node.Usage is { } u
                     ? $"{u.Model}, at its last call ({SessionState.FormatAge(p.Node.LastActiveUtc)} ago): sent {u.Context:N0} tokens ({u.CacheRead:N0} read from cache, {u.CacheWrite:N0} written to it, {u.Input:N0} uncached), got {u.Output:N0}\n\n" : "";
                 text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
-                if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
+                if (r.Contains(at)) { key2 = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
         }
-        if (key == _tipFor) return;
-        _tipFor = key;
+        if (key2 == _tipFor) return;
+        _tipFor = key2;
         if (text == null) _tip.Hide(this);
         else _tip.Show(text, this, e.X + 12, e.Y + 16);
     }
+
+    /// <summary>For the control channel: hover a session's prompt or actions, as the mouse does.</summary>
+    public void HoverZone(string session, string zone)
+    {
+        var p = _placed.FirstOrDefault(x => x.Node.SessionId == session || x.Node.Name == session)
+            ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
+        if (zone is not ("prompt" or "actions")) throw new ArgumentException("zone must be prompt or actions");
+        if (zone == "prompt" && p.Node.Prompt == null) throw new InvalidOperationException($"{p.Node.Name} has no prompt yet");
+        ClosePopup();
+        _popupFor = zone + "/" + p.Node.SessionId;
+        var corner = PointToScreen(new Point(p.Box.Left + AutoScrollPosition.X, (zone == "prompt" ? PromptZone(p.Box) : ActionZone(p.Box)).Top + AutoScrollPosition.Y));
+        _popup = new DetailPopup(zone == "prompt" ? PromptRows(p.Node) : ActionRows(p.Node), corner);
+        _popup.Show();
+        _popup.Refresh(); // painted before this returns, so a screenshot right after shows it
+    }
+
+    public IntPtr? PopupHandle => _popup is { IsDisposed: false } popup ? popup.Handle : null;
+
+    private void ClosePopup()
+    {
+        _popup?.Close();
+        _popup = null;
+        _popupFor = null;
+    }
+
+    /// <summary>The last prompt in full, read again from the transcript, with the images pasted into it.</summary>
+    private static List<DetailPopup.Row> PromptRows(SessionState.AgentNode n)
+    {
+        var prompt = n.Prompt!;
+        var (text, images) = ClaudeSessionRegistry.PromptDetail(n.TranscriptPath, prompt);
+        string who = prompt.FromPeer ? $"from {prompt.From}" : "you";
+        var rows = new List<DetailPopup.Row> { new(prompt.FromPeer ? IconPeer : IconUser, text.Trim(), $"{who} · {prompt.AtUtc.ToLocalTime():HH:mm:ss}", null) };
+        foreach (var bytes in images)
+        {
+            using var stream = new MemoryStream(bytes);
+            using var decoded = Image.FromStream(stream);
+            rows.Add(new(null, "", null, new Bitmap(decoded)));
+        }
+        return rows;
+    }
+
+    /// <summary>Claude's recent tool calls and replies, oldest first, each behind the icon of its kind.</summary>
+    private static List<DetailPopup.Row> ActionRows(SessionState.AgentNode n) =>
+        n.Actions.Count == 0
+            ? new() { new(ActivityIcon(n.HookEvent, n.ToolName), n.Doing, null, null) }
+            : n.Actions.Select(a => new DetailPopup.Row(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool),
+                  TaskbarOverlay.Truncate(a.Text.Trim(), 400), a.AtUtc.ToLocalTime().ToString("HH:mm:ss"), null)).ToList();
 
     /// <summary>Right-click a session: close it. Right-click elsewhere: close the long-idle ones.</summary>
     protected override void OnMouseUp(MouseEventArgs e)
@@ -463,5 +575,99 @@ internal sealed class AgentsView : ScrollableControl
         base.OnMouseLeave(e);
         _tipFor = null;
         _tip.Hide(this);
+        ClosePopup();
     }
 }
+
+/// <summary>
+/// A hover popup of rows — an icon, wrapped text and a small note (who, when), or an image —
+/// divided by dotted lines. Never takes focus; images it is given are disposed with it.
+/// </summary>
+internal sealed class DetailPopup : Form
+{
+    public sealed record Row(char? Icon, string Text, string? Note, Image? Image);
+
+    private const int Pad = 8, RowGap = 6, MaxWidth = 520, MaxImageHeight = 420;
+    private readonly List<(Row Row, Rectangle Text, Rectangle Image)> _laid = new();
+    private readonly Font _font, _iconFont, _noteFont;
+
+    private const TextFormatFlags Wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
+
+    public DetailPopup(List<Row> rows, Point screenAt)
+    {
+        // Its own 9 pt text, whatever the Agents tab is zoomed to.
+        _font = new Font("Segoe UI", 9f);
+        _iconFont = new Font("Segoe MDL2 Assets", 9f);
+        _noteFont = new Font("Segoe UI", 7.5f);
+        var font = _font;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        BackColor = TipCard.Back(false);
+        DoubleBuffered = true;
+
+        int iconW = font.Height + 4, textW = MaxWidth - 2 * Pad - iconW;
+        int y = Pad;
+        foreach (var row in rows)
+        {
+            if (row.Image is { } image)
+            {
+                float scale = Math.Min(1f, Math.Min((float)(MaxWidth - 2 * Pad) / image.Width, (float)MaxImageHeight / image.Height));
+                var r = new Rectangle(Pad, y, (int)(image.Width * scale), (int)(image.Height * scale));
+                _laid.Add((row, Rectangle.Empty, r));
+                y = r.Bottom + RowGap * 2;
+                continue;
+            }
+            int noteH = row.Note != null ? _noteFont.Height : 0;
+            int textH = TextRenderer.MeasureText(row.Text, font, new Size(textW, int.MaxValue), Wrap).Height;
+            _laid.Add((row, new Rectangle(Pad + iconW, y + noteH, textW, textH), Rectangle.Empty));
+            y += noteH + textH + RowGap * 2;
+        }
+        var work = Screen.FromPoint(screenAt).WorkingArea;
+        Size = new Size(MaxWidth, Math.Min(y - RowGap + Pad, work.Height - 20));
+        Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
+        FormClosed += (_, _) =>
+        {
+            foreach (var (row, _, _) in _laid) row.Image?.Dispose();
+            _font.Dispose();
+            _iconFont.Dispose();
+            _noteFont.Dispose();
+        };
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var border = new Pen(TipCard.Border(false))) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        using var dotted = new Pen(TipCard.Border(false)) { DashStyle = DashStyle.Dot };
+        for (int i = 0; i < _laid.Count; i++)
+        {
+            var (row, text, image) = _laid[i];
+            if (i > 0)
+            {
+                int top = (row.Image != null ? image.Top : text.Top - (row.Note != null ? _noteFont.Height : 0)) - RowGap;
+                g.DrawLine(dotted, Pad, top, Width - Pad, top);
+            }
+            if (row.Image is { } img) { g.DrawImage(img, image); continue; }
+            if (row.Note is { } note)
+                TextRenderer.DrawText(g, note, _noteFont, new Point(text.Left, text.Top - _noteFont.Height), SystemColors.GrayText, TextFormatFlags.NoPrefix);
+            if (row.Icon is { } icon)
+                TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, row.Text, _font, text, SystemColors.ControlText, Wrap);
+        }
+    }
+}
+

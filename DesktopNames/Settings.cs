@@ -108,6 +108,9 @@ internal sealed class Settings
     /// <summary>The DesktopNames window's tab last shown: projects | agents.</summary>
     public string ProjectsWindowTab { get; set; } = "projects";
 
+    /// <summary>Session boxes per row in the Agents tab (2–6), set with Ctrl+wheel; text scales with them.</summary>
+    public int AgentsColumns { get; set; } = 4;
+
     /// <summary>
     /// Projects removed from the switcher list (<see cref="FolderKey"/> → when). A project
     /// reappears once it is used again after that, so removal only clears out the ancient ones.

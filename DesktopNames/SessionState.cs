@@ -216,7 +216,8 @@ internal sealed class SessionState
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
                                    string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage,
-                                   ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent);
+                                   ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent,
+                                   string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
@@ -233,7 +234,8 @@ internal sealed class SessionState
                     b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
                     b.Value.Command, b.Value.ActivityTool)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
-                e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent)))
+                e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent,
+                e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [])))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
             // A later message on the same line replaces the earlier one.

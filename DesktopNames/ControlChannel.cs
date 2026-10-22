@@ -51,6 +51,16 @@ internal sealed class ControlChannel
             ProjectsWindow().ScrollAgents(a.RequiredInt("y"));
             return null;
         }));
+        _methods.Add(new("ui.agentsHover", "Hover a session's prompt or actions in the Agents tab: opens its popup (screenshot window detail)", new[] { "session", "zone" }, "session: name or id; zone: prompt | actions", a =>
+        {
+            ProjectsWindow().Agents.HoverZone(a.RequiredStr("session"), a.RequiredStr("zone"));
+            return null;
+        }));
+        _methods.Add(new("ui.agentsColumns", "Session boxes per row in the Agents tab, as Ctrl+wheel sets it", new[] { "columns" }, "columns: 2-6", a =>
+        {
+            ProjectsWindow().Agents.SetColumns(a.RequiredInt("columns"));
+            return null;
+        }));
         _methods.Add(new("ui.rename", "Start editing a row's desktop name in place, as F2 does", new[] { "row" }, "row: 0-based visible row", a =>
         {
             var w = ProjectsWindow();
@@ -90,6 +100,7 @@ internal sealed class ControlChannel
                     "projects" => ProjectsWindow().Handle,
                     "layouts" => LayoutsWindow().Handle,
                     "screen-popup" => ProjectsWindow().ScreenPopupHandle,
+                    "detail" => ProjectsWindow().Agents.PopupHandle ?? throw new InvalidOperationException("no Agents popup is open; call ui.agentsHover first"),
                     "overlay" => _host.Overlays.FirstOrDefault()?.Handle ?? throw new InvalidOperationException("no overlay"),
                     "card" => _host.Overlays.Select(o => o.CardHandle).FirstOrDefault(h => h != null)
                               ?? throw new InvalidOperationException("no hover card is showing; call ui.hoverOverlay first"),

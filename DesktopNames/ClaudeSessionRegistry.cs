@@ -274,14 +274,29 @@ internal sealed class ClaudeSessionRegistry
     }
 
     /// <summary>The last prompt a session got: from the user, or (<see cref="FromPeer"/>) a message
-    /// another session sent it, then <see cref="From"/> is that session's name.</summary>
-    public sealed record Prompt(bool FromPeer, string From, string Text, DateTime AtUtc);
+    /// another session sent it, then <see cref="From"/> is that session's name. <see cref="Offset"/>
+    /// is where its line starts in the transcript, to read it again in full (<see cref="PromptDetail"/>).</summary>
+    public sealed record Prompt(bool FromPeer, string From, string Text, DateTime AtUtc, long Offset);
 
-    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt);
+    /// <summary>One thing Claude did: a tool call (<see cref="Tool"/> its name) or, with Tool empty, a reply.</summary>
+    public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc);
 
-    // path → (bytes scanned, latest ai-title, latest usage, latest prompt). Transcripts only grow, so
-    // each read scans what was appended — up to its last complete line, so no record is read half-written.
-    private static readonly Dictionary<string, (long Length, string? Title, Usage? Usage, Prompt? Prompt)> _transcripts = new(StringComparer.OrdinalIgnoreCase);
+    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions);
+
+    private const int ActionsKept = 15;
+
+    private sealed class Scanned
+    {
+        public long Length;
+        public string? Title;
+        public Usage? Usage;
+        public Prompt? Prompt;
+        public List<ClaudeAction> Actions = new();
+    }
+
+    // path → what its scan found so far. Transcripts only grow, so each read scans what was appended —
+    // up to its last complete line, so no record is read half-written.
+    private static readonly Dictionary<string, Scanned> _transcripts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly System.Text.RegularExpressions.Regex AiTitle =
         new("\"type\":\"ai-title\",\"aiTitle\":(\"(?:[^\"\\\\]|\\\\.)*\")", System.Text.RegularExpressions.RegexOptions.Compiled);
     // An assistant record: "model":"claude-…" … "usage":{"input_tokens":2,"cache_creation_input_tokens":…,"cache_read_input_tokens":…,"output_tokens":…
@@ -289,28 +304,72 @@ internal sealed class ClaudeSessionRegistry
         "\"model\":\"(claude[^\"]*)\"[^\\n]*?\"usage\":\\{\"input_tokens\":(\\d+),\"cache_creation_input_tokens\":(\\d+),\"cache_read_input_tokens\":(\\d+),\"output_tokens\":(\\d+)",
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>The latest title, usage and prompt in a run of complete transcript lines; each null when absent.</summary>
-    private static (string? Title, Usage? Usage, Prompt? Prompt) Scan(string text)
+    /// <summary>Fold a run of complete transcript lines, starting at byte <paramref name="offset"/>, into <paramref name="into"/>.</summary>
+    private static void Scan(string text, long offset, Scanned into)
     {
         var titles = AiTitle.Matches(text);
-        string? title = titles.Count > 0 ? JsonSerializer.Deserialize<string>(titles[^1].Groups[1].Value) : null;
+        if (titles.Count > 0) into.Title = JsonSerializer.Deserialize<string>(titles[^1].Groups[1].Value);
         var usages = UsageRecord.Matches(text);
-        Usage? usage = null;
         if (usages.Count > 0)
         {
             var g = usages[^1].Groups;
-            usage = new Usage(g[1].Value, long.Parse(g[2].Value), long.Parse(g[4].Value), long.Parse(g[3].Value), long.Parse(g[5].Value));
+            into.Usage = new Usage(g[1].Value, long.Parse(g[2].Value), long.Parse(g[4].Value), long.Parse(g[3].Value), long.Parse(g[5].Value));
         }
-        Prompt? prompt = null;
         foreach (var line in text.Split('\n'))
+        {
             if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal) && line.Contains("\"type\":\"user\"", StringComparison.Ordinal)
-                && PromptOf(line) is { } p)
-                prompt = p;
-        return (title, usage, prompt);
+                && PromptOf(line, offset) is { } p)
+                into.Prompt = p;
+            else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && !line.Contains("\"isSidechain\":true", StringComparison.Ordinal))
+                into.Actions.AddRange(ActionsOf(line));
+            offset += System.Text.Encoding.UTF8.GetByteCount(line) + 1;
+        }
+        if (into.Actions.Count > ActionsKept) into.Actions.RemoveRange(0, into.Actions.Count - ActionsKept);
+    }
+
+    /// <summary>The tool calls and replies in one assistant record.</summary>
+    private static IEnumerable<ClaudeAction> ActionsOf(string line)
+    {
+        using var doc = JsonDocument.Parse(line);
+        var r = doc.RootElement;
+        if (!r.TryGetProperty("message", out var message) || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            return Array.Empty<ClaudeAction>();
+        DateTime at = r.TryGetProperty("timestamp", out var ts) ? ts.GetDateTime().ToUniversalTime() : DateTime.MinValue;
+        var actions = new List<ClaudeAction>();
+        foreach (var block in content.EnumerateArray())
+        {
+            string type = block.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
+            if (type == "tool_use")
+            {
+                string tool = block.GetProperty("name").GetString() ?? "";
+                actions.Add(new ClaudeAction(tool, ToolSummary(tool, block.TryGetProperty("input", out var input) ? input : default), at));
+            }
+            else if (type == "text" && block.GetProperty("text").GetString() is { Length: > 0 } reply)
+                actions.Add(new ClaudeAction("", reply, at));
+        }
+        return actions;
+    }
+
+    /// <summary>What a tool call was about, from its input: a Bash call's own description, the file read or edited, the pattern searched.</summary>
+    private static string ToolSummary(string tool, JsonElement input)
+    {
+        string? Get(string name) => input.ValueKind == JsonValueKind.Object && input.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        return tool switch
+        {
+            "Bash" or "PowerShell" => Get("description") ?? Get("command") ?? tool,
+            "Read" or "Edit" or "Write" or "MultiEdit" or "NotebookEdit" => $"{tool} {Path.GetFileName(Get("file_path") ?? Get("notebook_path") ?? "")}",
+            "Grep" or "Glob" => $"{tool} {Get("pattern")}",
+            "WebFetch" => $"Fetch {Get("url")}",
+            "WebSearch" => $"Search {Get("query")}",
+            "Agent" or "Task" => $"Agent: {Get("description")}",
+            "SendMessage" => $"Message {Get("to")}: {Get("summary")}",
+            "Skill" => $"Skill {Get("skill")}",
+            _ => Get("description") ?? tool,
+        };
     }
 
     /// <summary>A user record with an origin: the human typing, or a peer session's message.</summary>
-    private static Prompt? PromptOf(string line)
+    private static Prompt? PromptOf(string line, long offset)
     {
         using var doc = JsonDocument.Parse(line);
         var r = doc.RootElement;
@@ -321,68 +380,101 @@ internal sealed class ClaudeSessionRegistry
         {
             case "peer":
                 return new Prompt(true, origin.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
-                                  origin.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "", at);
+                                  origin.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "", at, offset);
             case "human":
                 break;
             default:
                 return null; // task-notification: Claude Code telling the session a background task ended
         }
-        var content = r.GetProperty("message").GetProperty("content");
-        // VS Code adds its context (open file, selection) as blocks of their own; pasted text comes
-        // wrapped in a tag. Keep what the user wrote.
+        string text = HumanText(r.GetProperty("message").GetProperty("content"));
+        return text.Trim().Length == 0 ? null : new Prompt(false, "", text, at, offset);
+    }
+
+    /// <summary>What the user wrote: VS Code adds its context (open file, selection) as blocks of
+    /// their own, and pasted text comes wrapped in a tag.</summary>
+    private static string HumanText(JsonElement content)
+    {
         var blocks = content.ValueKind == JsonValueKind.String ? new[] { content.GetString() ?? "" }
             : content.EnumerateArray()
                 .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "text")
                 .Select(c => c.GetProperty("text").GetString() ?? "")
                 .Where(s => !s.StartsWith("<ide_", StringComparison.Ordinal) && !s.StartsWith("<system-reminder", StringComparison.Ordinal))
                 .ToArray();
-        string text = Tag.Replace(string.Join(" ", blocks), "");
-        return text.Trim().Length == 0 ? null : new Prompt(false, "", text, at);
+        return Tag.Replace(string.Join("\n", blocks), "");
     }
 
     private static readonly System.Text.RegularExpressions.Regex Tag = new("</?[A-Za-z_][^>\\n]*>", System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>Bytes [from, end) of a file, cut after its last newline; how many bytes that is.</summary>
-    private static (string Text, int Bytes) CompleteLines(string path, long from)
+    /// <summary>A prompt read again in full: its text, and the images pasted with it (PNG/JPEG bytes).</summary>
+    public static (string Text, List<byte[]> Images) PromptDetail(string path, Prompt prompt)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        stream.Seek(prompt.Offset, SeekOrigin.Begin);
+        string line = new StreamReader(stream, System.Text.Encoding.UTF8).ReadLine()
+            ?? throw new InvalidDataException($"{path}: no line at byte {prompt.Offset}");
+        using var doc = JsonDocument.Parse(line);
+        var r = doc.RootElement;
+        if (prompt.FromPeer) return (prompt.Text, new List<byte[]>());
+        var content = r.GetProperty("message").GetProperty("content");
+        var images = content.ValueKind != JsonValueKind.Array ? new List<byte[]>()
+            : content.EnumerateArray()
+                .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "image"
+                            && c.GetProperty("source").TryGetProperty("data", out _))
+                .Select(c => Convert.FromBase64String(c.GetProperty("source").GetProperty("data").GetString()!))
+                .ToList();
+        return (HumanText(content), images);
+    }
+
+    /// <summary>Bytes [from, end) of a file, cut after its last newline — and, with <paramref name="skipPartial"/>,
+    /// before its first, for a read that starts mid-line. Returns the text and the byte offset it starts at.</summary>
+    private static (string Text, long Start, long End) CompleteLines(string path, long from, bool skipPartial)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         stream.Seek(from, SeekOrigin.Begin);
         var bytes = new byte[stream.Length - from];
         stream.ReadExactly(bytes);
+        int start = skipPartial ? Array.IndexOf(bytes, (byte)'\n') + 1 : 0;
         int end = Array.LastIndexOf(bytes, (byte)'\n') + 1;
-        return (System.Text.Encoding.UTF8.GetString(bytes, 0, end), end);
+        if (end < start) end = start;
+        return (System.Text.Encoding.UTF8.GetString(bytes, start, end - start), from + start, from + end);
     }
 
     /// <summary>
     /// What a transcript says about its session: the latest <c>ai-title</c> Claude Code gave it
-    /// ("Osis dev privileges review"), the latest call's token usage, the last prompt, and when it
-    /// was last written — the session's real last activity, which survives a DesktopNames restart.
-    /// Null when the file is gone.
+    /// ("Osis dev privileges review"), the latest call's token usage, the last prompt, Claude's
+    /// recent actions, and when it was last written — the session's real last activity, which
+    /// survives a DesktopNames restart. Null when the file is gone.
     /// </summary>
     public static TranscriptFacts? Transcript(string path)
     {
         var file = new FileInfo(path);
         if (!file.Exists) return null;
-        _transcripts.TryGetValue(path, out var seen);
-        // First sight: the tail usually holds a title, a usage and the last prompt, so a
-        // multi-megabyte file needn't be read whole (that made the window open in 3 s).
-        const long Tail = 512 * 1024;
-        if (seen.Length == 0 && file.Length > Tail)
+        if (!_transcripts.TryGetValue(path, out var seen))
         {
-            var (text, bytes) = CompleteLines(path, file.Length - Tail);
-            int firstLine = text.IndexOf('\n') + 1; // the tail starts mid-line
-            var found = Scan(text[firstLine..]);
-            if (found.Title != null && found.Prompt != null)
-                _transcripts[path] = seen = (file.Length - Tail + bytes, found.Title, found.Usage, found.Prompt);
+            seen = new Scanned();
+            // First sight: the tail usually holds a title, a usage and the last prompt, so a
+            // multi-megabyte file needn't be read whole (that made the window open in 3 s).
+            const long Tail = 512 * 1024;
+            if (file.Length > Tail)
+            {
+                var (text, start, end) = CompleteLines(path, file.Length - Tail, skipPartial: true);
+                var tail = new Scanned();
+                Scan(text, start, tail);
+                if (tail.Title != null && tail.Prompt != null)
+                {
+                    tail.Length = end;
+                    seen = tail;
+                }
+            }
+            _transcripts[path] = seen;
         }
-        if (file.Length != seen.Length)
+        if (file.Length > seen.Length)
         {
-            long from = file.Length > seen.Length ? seen.Length : 0;
-            var (text, bytes) = CompleteLines(path, from);
-            var found = Scan(text);
-            _transcripts[path] = seen = (from + bytes, found.Title ?? seen.Title, found.Usage ?? seen.Usage, found.Prompt ?? seen.Prompt);
+            var (text, start, end) = CompleteLines(path, seen.Length, skipPartial: false);
+            Scan(text, start, seen);
+            seen.Length = end;
         }
-        return new TranscriptFacts(seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt);
+        return new TranscriptFacts(seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList());
     }
 
     private static string ClaudeDir => Path.Combine(
