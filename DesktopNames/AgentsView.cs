@@ -60,7 +60,9 @@ internal sealed class AgentsView : ScrollableControl
     private List<Rectangle> _live = new();
     private const int ShimmerMs = 1800;
 
-    private void UpdateShimmer() => _shimmer.Enabled = Visible && _live.Count > 0;
+    /// <summary>Animate only while this tab is the one showing (a control in a hidden tab page still says Visible).</summary>
+    public void UpdateShimmer() =>
+        _shimmer.Enabled = _live.Count > 0 && Visible && (Parent is not TabPage page || page.Parent is not TabControl tabs || tabs.SelectedTab == page);
 
     private void DrawShimmer(Graphics g, Rectangle r)
     {

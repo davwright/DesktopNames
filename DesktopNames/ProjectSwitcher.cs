@@ -951,6 +951,7 @@ internal sealed class ProjectsDialog : Form
         _tabs.SelectedIndexChanged += (_, _) =>
         {
             Program.Host.Settings.ProjectsWindowTab = _tabs.SelectedIndex == 1 ? "agents" : "projects";
+            _agents?.UpdateShimmer();
             Program.Host.Settings.Save();
         };
         Controls.Add(_tabs);
