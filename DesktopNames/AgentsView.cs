@@ -74,7 +74,7 @@ internal sealed class AgentsView : ScrollableControl
         {
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
             state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing, topic = p.Node.Topic,
-            lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive,
+            lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive, usage = p.Node.Usage,
             children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity }),
         }),
         edges = _graph.Edges.Select(e => new
@@ -209,12 +209,20 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx, y, w - cornerW - 4, Line), ink, Flags);
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
         // Line 2: the name sessions message it by (when the title isn't it) and its folder.
+        // Right: the context its latest call sent, and how much of it came from the prompt cache — a
+        // low share means the cache had expired (KPMG: 912k sent, 30k read, 882k written again).
+        string tokens = n.Usage is { } u ? $"{Tokens(u.Context)} · {Tokens(u.CacheRead)} cached" : "";
+        int tokensW = tokens.Length > 0 ? TextRenderer.MeasureText(tokens, Font).Width : 0;
         string id = n.Name == n.Title ? "" : n.Name + " · ";
-        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), dim, Flags);
+        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w - tokensW - 4, Line), dim, Flags);
+        if (tokens.Length > 0) TextRenderer.DrawText(g, tokens, Font, new Rectangle(lx + w - tokensW, y + Line, tokensW, Line), dim, Flags);
         // Line 3: its latest message or tool call. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
         TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 2 * Line, w, Line), ink, Flags);
     }
+
+    /// <summary>471k, 1.2M.</summary>
+    private static string Tokens(long n) => n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M" : n >= 1000 ? $"{n / 1000}k" : n.ToString();
 
     private static Color Blend(Color a, Color b, float toB) => Color.FromArgb(
         (int)(a.R + (b.R - a.R) * toB), (int)(a.G + (b.G - a.G) * toB), (int)(a.B + (b.B - a.B) * toB));
@@ -296,7 +304,9 @@ internal sealed class AgentsView : ScrollableControl
             if (p.Box.Contains(at))
             {
                 key = p.Node.SessionId;
-                text = SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
+                string usage = p.Node.Usage is { } u
+                    ? $"{u.Model}: latest call sent {u.Context:N0} tokens ({u.CacheRead:N0} read from cache, {u.CacheWrite:N0} written to it, {u.Input:N0} uncached), got {u.Output:N0}\n\n" : "";
+                text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
                 if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = $"{c.Kind}: {c.Description}\n{c.Activity}"; }

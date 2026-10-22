@@ -149,17 +149,39 @@ internal sealed class ClaudeSessionRegistry
         return hits.Count == 1 ? hits[0] : null;
     }
 
-    // path → (bytes scanned, latest ai-title). Transcripts only grow, so each read scans what was appended.
-    private static readonly Dictionary<string, (long Length, string? Title)> _transcripts = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The token usage of a session's latest API call. <see cref="Context"/> is what it sent
+    /// (the context window in use); <see cref="CacheRead"/> the part of it served from the prompt cache.</summary>
+    public sealed record Usage(string Model, long Input, long CacheRead, long CacheWrite, long Output)
+    {
+        public long Context => Input + CacheRead + CacheWrite;
+    }
+
+    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage);
+
+    // path → (bytes scanned, latest ai-title, latest usage). Transcripts only grow, so each read scans what was appended.
+    private static readonly Dictionary<string, (long Length, string? Title, Usage? Usage)> _transcripts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly System.Text.RegularExpressions.Regex AiTitle =
         new("\"type\":\"ai-title\",\"aiTitle\":(\"(?:[^\"\\\\]|\\\\.)*\")", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // An assistant record: "model":"claude-…" … "usage":{"input_tokens":2,"cache_creation_input_tokens":…,"cache_read_input_tokens":…,"output_tokens":…
+    private static readonly System.Text.RegularExpressions.Regex UsageRecord = new(
+        "\"model\":\"(claude[^\"]*)\"[^\\n]*?\"usage\":\\{\"input_tokens\":(\\d+),\"cache_creation_input_tokens\":(\\d+),\"cache_read_input_tokens\":(\\d+),\"output_tokens\":(\\d+)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static Usage? LastUsage(string text, Usage? before)
+    {
+        var all = UsageRecord.Matches(text);
+        if (all.Count == 0) return before;
+        var g = all[^1].Groups;
+        return new Usage(g[1].Value, long.Parse(g[2].Value), long.Parse(g[4].Value), long.Parse(g[3].Value), long.Parse(g[5].Value));
+    }
 
     /// <summary>
     /// What a transcript says about its session: the latest <c>ai-title</c> Claude Code gave it
-    /// ("Osis dev privileges review") and when it was last written — the session's real last
-    /// activity, which survives a DesktopNames restart. Null when the file is gone.
+    /// ("Osis dev privileges review"), the latest call's token usage, and when it was last
+    /// written — the session's real last activity, which survives a DesktopNames restart. Null
+    /// when the file is gone.
     /// </summary>
-    public static (string? Title, DateTime LastWriteUtc)? Transcript(string path)
+    public static TranscriptFacts? Transcript(string path)
     {
         var file = new FileInfo(path);
         if (!file.Exists) return null;
@@ -171,9 +193,10 @@ internal sealed class ClaudeSessionRegistry
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             stream.Seek(-Tail, SeekOrigin.End);
-            var matches = AiTitle.Matches(new StreamReader(stream, System.Text.Encoding.UTF8).ReadToEnd());
+            string tail = new StreamReader(stream, System.Text.Encoding.UTF8).ReadToEnd();
+            var matches = AiTitle.Matches(tail);
             if (matches.Count > 0)
-                _transcripts[path] = seen = (stream.Position, JsonSerializer.Deserialize<string>(matches[^1].Groups[1].Value));
+                _transcripts[path] = seen = (stream.Position, JsonSerializer.Deserialize<string>(matches[^1].Groups[1].Value), LastUsage(tail, null));
         }
         if (file.Length != seen.Length)
         {
@@ -183,9 +206,9 @@ internal sealed class ClaudeSessionRegistry
             string appended = new StreamReader(stream, System.Text.Encoding.UTF8).ReadToEnd();
             var matches = AiTitle.Matches(appended);
             string? title = matches.Count > 0 ? JsonSerializer.Deserialize<string>(matches[^1].Groups[1].Value) : seen.Title;
-            _transcripts[path] = seen = (stream.Position, title);
+            _transcripts[path] = seen = (stream.Position, title, LastUsage(appended, seen.Usage));
         }
-        return (seen.Title, file.LastWriteTimeUtc);
+        return new TranscriptFacts(seen.Title, file.LastWriteTimeUtc, seen.Usage);
     }
 
     private static string ClaudeDir => Path.Combine(

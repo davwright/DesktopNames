@@ -208,7 +208,7 @@ internal sealed class SessionState
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
-                                   string? Topic, DateTime? StartedUtc, bool BackgroundActive);
+                                   string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
@@ -221,7 +221,7 @@ internal sealed class SessionState
                 e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc)).ToList(),
-                Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive)))
+                Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e))))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
             // A later message on the same line replaces the earlier one.
@@ -275,6 +275,9 @@ internal sealed class SessionState
     /// for a session whose transcript isn't known.</summary>
     private static DateTime LastActive(SessionEntry e) =>
         e.TranscriptPath.Length > 0 && ClaudeSessionRegistry.Transcript(e.TranscriptPath) is { } t ? t.LastWriteUtc : e.LastSeenUtc;
+
+    private static ClaudeSessionRegistry.Usage? Usage(SessionEntry e) =>
+        e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Usage : null;
 
     private static string? Topic(SessionEntry e) =>
         e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Title : null;
