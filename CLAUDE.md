@@ -29,6 +29,7 @@ moves for other agents (`window.list`, `window.place`) are documented in the use
 | `commands` / `execute` | — / `{"command":"desktop.toggleBlue","params":{"desktop":3}}` |
 | `inspect` | desktops, Claude sessions, screen setup, window open? |
 | `ui.open` / `ui.close` | `{"window":"projects"\|"layouts"}` |
+| `ui.tab` / `ui.agents` | `{"tab":"projects"\|"agents"}` / what the Agents tab draws: sessions, children, message arrows |
 | `ui.rows` | what each visible row shows; `{"window":"layouts"}` for the screen layouts window |
 | `ui.hover` | `{"row":1,"column":"Claude"}` → tooltip text, or `{"header":"Screen 1"}` → layout popup |
 | `ui.rename` | `{"row":17}` → opens the in-place desktop-name editor, as F2 does (call after the window has shown) |
