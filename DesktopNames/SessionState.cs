@@ -133,6 +133,9 @@ internal sealed class BackgroundWork
     /// <summary>When it started (creation time of its task output file, sent by ClaudeHook). Null
     /// until a Stop reports it, e.g. for an agent first seen through its own tool call.</summary>
     public DateTime? StartedUtc { get; set; }
+    /// <summary>When a Stop last listed it as running. A shell reports nothing else, so this is
+    /// how old the claim that it runs is. Null for tasks listed before this field existed.</summary>
+    public DateTime? ListedUtc { get; set; }
 }
 
 /// <summary>
@@ -198,7 +201,7 @@ internal sealed class SessionState
         Updated?.Invoke();
     }
 
-    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc);
+    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc);
     public sealed record AgentNode(string Source, string SessionId, string Name, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
                                    string? Topic, DateTime? StartedUtc, bool BackgroundActive);
@@ -212,7 +215,7 @@ internal sealed class SessionState
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
                 e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId, e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
-                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc)).ToList(),
+                e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive)))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
@@ -1030,6 +1033,7 @@ internal sealed class SessionState
             work.Kind = type == "subagent" ? "agent" : type;
             work.Description = description;
             if (startedUtc != null) work.StartedUtc = startedUtc;
+            work.ListedUtc = DateTime.UtcNow;
             running[id] = work;
         }
         entry.Background.Clear();

@@ -13,7 +13,7 @@ internal sealed class AgentsView : ScrollableControl
     private int Line => Font.Height + 1;
     private int BoxH => 10 + 5 * Line;
     private int ChildH => 6 + 2 * Line;
-    private const int BoxW = 220, ChildW = 196, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
+    private const int BoxW = 300, ChildW = 270, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
 
     private readonly SessionState _sessions;
     private readonly DesktopService _desktops;
@@ -96,7 +96,9 @@ internal sealed class AgentsView : ScrollableControl
         int x = Pad, top = Pad + 30, bandHeight = 0;
         var placed = new List<Placed>();
         var groups = new List<(string, Rectangle)>();
-        foreach (var group in _graph.Nodes.GroupBy(n => n.DesktopId).OrderBy(g => Order(g.Key)))
+        // Every desktop that no longer exists is one "no desktop" frame.
+        Guid GroupOf(Guid id) => Order(id) == int.MaxValue ? Guid.Empty : id;
+        foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Order(g.Key)))
         {
             var nodes = group.OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
             int cols = Math.Min(nodes.Count, maxCols);
@@ -229,9 +231,13 @@ internal sealed class AgentsView : ScrollableControl
             g.DrawPath(border, path);
         }
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
-        string since = c.StartedUtc is { } s ? $" · {SessionState.FormatAge(s)}" : "";
+        string since = c.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
+        // A subagent reports each tool call; a shell only appears in the session's Stop list, so say how old that list is.
+        string second = c.Activity.Length > 0 ? c.Activity
+            : c.ListedUtc is { } listed ? $"running, says a Stop {SessionState.FormatAge(listed)} ago"
+            : "running, says a Stop from before DN restarted";
         TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, flags);
-        TextRenderer.DrawText(g, c.Activity, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, flags);
+        TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, flags);
     }
 
     /// <summary>A curve over the boxes from sender to recipient (or down the side to the sender's own
