@@ -192,7 +192,7 @@ internal sealed class AlertPipeServer : IDisposable
                     if (transition.Agent)
                     {
                         bool known = _state.ApplyAgent(msg.Source ?? "unknown", msg.SessionId!, msg.AgentId!,
-                                                       msg.AgentType ?? "agent", body, stop: msg.HookEvent == "SubagentStop");
+                                                       msg.AgentType ?? "agent", body, msg.ToolName ?? "", stop: msg.HookEvent == "SubagentStop");
                         reply.Ok = true;
                         Log.State($"agent session={msg.SessionId} agent={msg.AgentType}/{msg.AgentId} {msg.HookEvent} sessionKnown={known} '{body}'");
                         return;

@@ -11,7 +11,7 @@ internal sealed class AgentsView : ScrollableControl
 {
     // Heights follow the font, which scales with the screen: fixed pixels clipped the last line at 125%.
     private int Line => Font.Height + 1;
-    private int BoxH => 10 + 3 * Line;
+    private int BoxH => 10 + 6 * Line;
 
     // TextRenderer ignores the Graphics transform unless told to: without this the text stayed put while the boxes scrolled.
     private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis
@@ -198,6 +198,7 @@ internal sealed class AgentsView : ScrollableControl
         using (var border = new Pen(ControlPaint.Dark(fill, 0.1f), 1.2f))
         {
             g.FillPath(brush, path);
+            if (n.Usage is { } u) DrawContext(g, path, p.Box, fill, u);
             g.DrawPath(border, path);
         }
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
@@ -209,20 +210,79 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx, y, w - cornerW - 4, Line), ink, Flags);
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
         // Line 2: the name sessions message it by (when the title isn't it) and its folder.
-        // Right: the context its latest call sent, and how much of it came from the prompt cache — a
-        // low share means the cache had expired (KPMG: 912k sent, 30k read, 882k written again).
-        string tokens = n.Usage is { Context: > 0 } u ? $"{Tokens(u.Context)} · {100 * u.CacheRead / u.Context}% cached" : "";
-        int tokensW = tokens.Length > 0 ? TextRenderer.MeasureText(tokens, Font).Width : 0;
         string id = n.Name == n.Title ? "" : n.Name + " · ";
-        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w - tokensW - 4, Line), dim, Flags);
-        if (tokens.Length > 0) TextRenderer.DrawText(g, tokens, Font, new Rectangle(lx + w - tokensW, y + Line, tokensW, Line), dim, Flags);
-        // Line 3: its latest message or tool call. The state is the colour.
+        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), dim, Flags);
+        // Lines 3-4: the last prompt — the user's, or another session's message to it.
+        if (n.Prompt is { } prompt)
+            DrawCommand(g, prompt.FromPeer ? IconPeer : IconUser,
+                (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + 2 * Line, w, 2 * Line));
+        // Lines 5-6: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
-        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 2 * Line, w, Line), ink, Flags);
+        DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 4 * Line, w, 2 * Line));
     }
 
-    /// <summary>471k, 1.2M.</summary>
-    private static string Tokens(long n) => n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M" : n >= 1000 ? $"{n / 1000}k" : n.ToString();
+    /// <summary>
+    /// The latest call's tokens as two bars over the box colour, the box's width being the model's
+    /// window: a light shade over the whole height for the context it sent, and a darker one over
+    /// the lower half for the part of it read from the prompt cache. A cache that had expired
+    /// shows as a short lower bar under a long upper one (KPMG: 912k sent, 30k cached).
+    /// </summary>
+    private static void DrawContext(Graphics g, GraphicsPath box, Rectangle r, Color fill, ClaudeSessionRegistry.Usage u)
+    {
+        long window = ContextWindow(u.Model);
+        int used = (int)(r.Width * Math.Min(1.0, (double)u.Context / window));
+        int cached = (int)(r.Width * Math.Min(1.0, (double)u.CacheRead / window));
+        var clip = g.Clip;
+        g.SetClip(box, CombineMode.Intersect);
+        using (var tokens = new SolidBrush(Blend(fill, Color.Black, 0.08f))) g.FillRectangle(tokens, r.Left, r.Top, used, r.Height);
+        using (var cache = new SolidBrush(Blend(fill, Color.Black, 0.17f))) g.FillRectangle(cache, r.Left, r.Top + r.Height / 2, cached, r.Height - r.Height / 2);
+        g.Clip = clip;
+    }
+
+    /// <summary>Tokens a model holds before Claude Code compacts. 1M for Opus, Sonnet and Fable as run
+    /// here (contexts of 914k are in the transcripts); Haiku has 200k.</summary>
+    private static long ContextWindow(string model) => model.Contains("haiku", StringComparison.Ordinal) ? 200_000 : 1_000_000;
+
+    private static string Flatten(string text) => string.Join(" ", text.Split((char[])['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
+
+    // Segoe MDL2 Assets glyphs: who spoke, or which kind of tool ran.
+    private const char IconUser = '', IconPeer = '', IconShell = '', IconRead = '', IconEdit = '',
+                       IconSearch = '', IconWeb = '', IconAgent = '', IconMcp = '', IconReply = '',
+                       IconAsk = '', IconThink = '', IconTool = '';
+
+    private static char ToolIcon(string tool) => tool switch
+    {
+        "Bash" or "PowerShell" or "BashOutput" or "KillShell" or "Monitor" => IconShell,
+        "Read" or "NotebookRead" => IconRead,
+        "Edit" or "Write" or "MultiEdit" or "NotebookEdit" => IconEdit,
+        "Grep" or "Glob" or "ToolSearch" => IconSearch,
+        "WebFetch" or "WebSearch" => IconWeb,
+        "Agent" or "Task" => IconAgent,
+        "SendMessage" => IconPeer,
+        _ when tool.StartsWith("mcp__", StringComparison.Ordinal) => IconMcp,
+        "" => IconThink,
+        _ => IconTool,
+    };
+
+    private static char ActivityIcon(string hookEvent, string tool) => hookEvent switch
+    {
+        "Stop" or "SubagentStop" => IconReply,
+        "Notification" or "PermissionRequest" => IconAsk,
+        "PreToolUse" or "PostToolUse" => ToolIcon(tool),
+        _ => IconThink,
+    };
+
+    private static readonly Font IconFont = new("Segoe MDL2 Assets", 9f);
+
+    /// <summary>An icon, then the text wrapped into the rest of the box, cut with … on its last line.</summary>
+    private static void DrawCommand(Graphics g, char icon, string text, Font font, Color ink, Rectangle r)
+    {
+        const int IconW = 18;
+        TextRenderer.DrawText(g, icon.ToString(), IconFont, new Rectangle(r.Left, r.Top + 1, IconW, r.Height), ink, Flags);
+        TextRenderer.DrawText(g, text, font, new Rectangle(r.Left + IconW, r.Top, r.Width - IconW, r.Height), ink,
+            TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis
+            | TextFormatFlags.PreserveGraphicsTranslateTransform);
+    }
 
     /// <summary>A session's colour: its state, faded when it is a leftover.</summary>
     private static Color Fill(SessionState.AgentNode n)
@@ -264,7 +324,7 @@ internal sealed class AgentsView : ScrollableControl
         if (c.Activity.Length > 0) corner = c.StartedUtc is { } started ? SessionState.FormatAge(started) : "";
         using var bold = new Font(Font, FontStyle.Bold);
         int cornerW = corner.Length > 0 ? TextRenderer.MeasureText(corner, bold).Width : 0;
-        TextRenderer.DrawText(g, c.Description, bold, new Rectangle(lx, y, w - cornerW - 4, Line), Color.Black, Flags);
+        DrawCommand(g, c.Kind == "shell" ? IconShell : IconAgent, c.Description, bold, Color.Black, new Rectangle(lx, y, w - cornerW - 4, Line));
         if (corner.Length > 0) TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
         string state = c.Activity.Length > 0 ? c.Activity : c.Shell switch
         {
@@ -273,7 +333,10 @@ internal sealed class AgentsView : ScrollableControl
             { Matches: var n } => $"{n} processes run this command",
             null => c.LastOutputUtc == null ? "output file gone" : "process not known yet",
         };
-        TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx, y + Line, w, Line), Color.FromArgb(60, 60, 60), Flags);
+        if (c.Activity.Length > 0)
+            DrawCommand(g, ToolIcon(c.ActivityTool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
+        else
+            TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + 18, y + Line, w - 18, Line), Color.FromArgb(60, 60, 60), Flags);
     }
 
     /// <summary>The child's own hover text: everything known about it, in full.</summary>

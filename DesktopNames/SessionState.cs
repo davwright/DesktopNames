@@ -133,6 +133,8 @@ internal sealed class BackgroundWork
     public string Description { get; set; } = "";
     /// <summary>Agents only: its latest tool call ("Bash: Fetch botcomponents…").</summary>
     public string Activity { get; set; } = "";
+    /// <summary>Agents only: the tool of that call (Bash, Read, …), for its icon.</summary>
+    public string ActivityTool { get; set; } = "";
     /// <summary>When it started (creation time of its task output file, sent by ClaudeHook). Null
     /// until a Stop reports it, e.g. for an agent first seen through its own tool call.</summary>
     public DateTime? StartedUtc { get; set; }
@@ -209,11 +211,12 @@ internal sealed class SessionState
     /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
     /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc,
-                                    ClaudeSessionRegistry.ShellProcess? Shell, string? Command);
+                                    ClaudeSessionRegistry.ShellProcess? Shell, string? Command, string ActivityTool);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
-                                   string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage);
+                                   string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage,
+                                   ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
@@ -228,8 +231,9 @@ internal sealed class SessionState
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
                     e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
                     b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
-                    b.Value.Command)).ToList(),
-                Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e))))
+                    b.Value.Command, b.Value.ActivityTool)).ToList(),
+                Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
+                e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent)))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
             // A later message on the same line replaces the earlier one.
@@ -862,7 +866,7 @@ internal sealed class SessionState
     /// Record what a background agent of a known session is doing (or that it ended). Never
     /// touches the session's state or colour. Returns false when the session isn't tracked.
     /// </summary>
-    public bool ApplyAgent(string source, string sessionId, string agentId, string agentType, string line, bool stop)
+    public bool ApplyAgent(string source, string sessionId, string agentId, string agentType, string line, string toolName, bool stop)
     {
         if (!_location.TryGetValue((source, sessionId), out var desktop) ||
             !_byDesktop.TryGetValue(desktop, out var list)) return false;
@@ -877,6 +881,7 @@ internal sealed class SessionState
                 entry.Background[agentId] = work = new BackgroundWork
                     { Kind = "agent", Description = agentType };
             work.Activity = line;
+            work.ActivityTool = toolName;
         }
         SaveToDisk();
         return true;
