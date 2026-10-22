@@ -209,7 +209,7 @@ internal sealed class SessionState
     /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
     /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc,
-                                    ClaudeSessionRegistry.ShellProcess? Shell);
+                                    ClaudeSessionRegistry.ShellProcess? Shell, string? Command);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
@@ -227,7 +227,8 @@ internal sealed class SessionState
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
                     e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
-                    b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null)).ToList(),
+                    b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
+                    b.Value.Command)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e))))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)

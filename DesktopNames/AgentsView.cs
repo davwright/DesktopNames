@@ -17,7 +17,7 @@ internal sealed class AgentsView : ScrollableControl
     private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis
                                           | TextFormatFlags.PreserveGraphicsTranslateTransform;
     private int ChildH => 6 + 2 * Line;
-    private const int BoxW = 300, ChildW = 270, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
+    private const int BoxW = 300, ChildW = 280, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
 
     private readonly SessionState _sessions;
     private readonly DesktopService _desktops;
@@ -76,7 +76,7 @@ internal sealed class AgentsView : ScrollableControl
             state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing, topic = p.Node.Topic,
             lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive, usage = p.Node.Usage,
             children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity,
-                shellPid = c.Child.Shell?.Pid, shellMatches = c.Child.Shell?.Matches, lastOutput = c.Child.LastOutputUtc?.ToLocalTime() }),
+                shellPid = c.Child.Shell?.Pid, shellMatches = c.Child.Shell?.Matches, lastOutput = c.Child.LastOutputUtc?.ToLocalTime(), tip = ChildTip(c.Child) }),
         }),
         edges = _graph.Edges.Select(e => new
         {
@@ -177,7 +177,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 int spine = p.Box.Left + (BoxW - ChildW) / 2;
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
-                DrawChild(g, child, r);
+                DrawChild(g, child, r, Fill(p.Node));
             }
             DrawSession(g, p);
         }
@@ -191,8 +191,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         var n = p.Node;
         bool stale = DateTime.UtcNow - n.LastActiveUtc > Stale;
-        Color fill = n.State == StateKind.None ? SystemColors.Control : SessionFlyout.StateColor(n.State);
-        if (stale) fill = Blend(fill, SystemColors.Control, 0.65f);
+        Color fill = Fill(n);
         Color ink = stale ? SystemColors.GrayText : Color.Black, dim = stale ? SystemColors.GrayText : Color.FromArgb(60, 60, 60);
         using (var path = TaskbarOverlay.RoundedRect(p.Box, 6))
         using (var brush = new SolidBrush(fill))
@@ -225,6 +224,13 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>471k, 1.2M.</summary>
     private static string Tokens(long n) => n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M" : n >= 1000 ? $"{n / 1000}k" : n.ToString();
 
+    /// <summary>A session's colour: its state, faded when it is a leftover.</summary>
+    private static Color Fill(SessionState.AgentNode n)
+    {
+        Color fill = n.State == StateKind.None ? SystemColors.Control : SessionFlyout.StateColor(n.State);
+        return DateTime.UtcNow - n.LastActiveUtc > Stale ? Blend(fill, SystemColors.Control, 0.65f) : fill;
+    }
+
     private static Color Blend(Color a, Color b, float toB) => Color.FromArgb(
         (int)(a.R + (b.R - a.R) * toB), (int)(a.G + (b.G - a.G) * toB), (int)(a.B + (b.B - a.B) * toB));
 
@@ -235,30 +241,58 @@ internal sealed class AgentsView : ScrollableControl
         return string.Join("\\", parts.Skip(Math.Max(0, parts.Length - 2)));
     }
 
-    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r)
+    private static string KindLabel(string kind) => kind switch { "shell" => "background shell", "agent" => "subagent", _ => kind };
+
+    /// <summary>
+    /// A background agent or shell, drawn like its session in a lighter tint of its colour. Line 1:
+    /// what it does, and in the corner last output / started, as the session shows last active /
+    /// started. Line 2: a subagent's current tool call, or a shell's process.
+    /// </summary>
+    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r, Color parentFill)
     {
-        using (var path = TaskbarOverlay.RoundedRect(r, 4))
-        using (var brush = new SolidBrush(SystemColors.Window))
-        using (var border = new Pen(SystemColors.ControlDark))
+        Color fill = Blend(parentFill, Color.White, 0.6f);
+        using (var path = TaskbarOverlay.RoundedRect(r, 5))
+        using (var brush = new SolidBrush(fill))
+        using (var border = new Pen(ControlPaint.Dark(parentFill, 0.1f)))
         {
             g.FillPath(brush, path);
             g.DrawPath(border, path);
         }
-        string kind = c.Kind switch { "shell" => "background shell", "agent" => "subagent", _ => c.Kind };
-        string since = c.StartedUtc is { } s ? $" · {SessionState.FormatAge(s)}" : "";
-        // A subagent reports each tool call; a shell reports nothing, but writes its output to a file.
-        string output = c.LastOutputUtc is { } o ? $"last output {SessionState.FormatAge(o)} ago" : "output file gone";
-        // A shell's process: found by its command under the session's Claude (see FindShell).
-        string process = c.Shell switch
+        int lx = r.Left + 8, w = r.Width - 16, y = r.Top + 4;
+        string corner = (c.LastOutputUtc is { } o ? SessionState.FormatAge(o) : "–")
+                      + (c.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
+        if (c.Activity.Length > 0) corner = c.StartedUtc is { } started ? SessionState.FormatAge(started) : "";
+        using var bold = new Font(Font, FontStyle.Bold);
+        int cornerW = corner.Length > 0 ? TextRenderer.MeasureText(corner, bold).Width : 0;
+        TextRenderer.DrawText(g, c.Description, bold, new Rectangle(lx, y, w - cornerW - 4, Line), Color.Black, Flags);
+        if (corner.Length > 0) TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
+        string state = c.Activity.Length > 0 ? c.Activity : c.Shell switch
         {
-            { Pid: int pid } => $"running · pid {pid} · ",
-            { Matches: 0 } => "ended · ",
-            { Matches: var n } => $"{n} processes run this command · ",
-            null => "",
+            { Pid: int pid } => $"running · pid {pid}",
+            { Matches: 0 } => "ended",
+            { Matches: var n } => $"{n} processes run this command",
+            null => c.LastOutputUtc == null ? "output file gone" : "process not known yet",
         };
-        string second = c.Activity.Length > 0 ? c.Activity : process + output;
-        TextRenderer.DrawText(g, $"{kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, Flags);
-        TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, Flags);
+        TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx, y + Line, w, Line), Color.FromArgb(60, 60, 60), Flags);
+    }
+
+    /// <summary>The child's own hover text: everything known about it, in full.</summary>
+    private static string ChildTip(SessionState.AgentChild c)
+    {
+        var lines = new List<string> { c.Description };
+        lines.Add(KindLabel(c.Kind) + (c.StartedUtc is { } s ? $", started {SessionState.FormatAge(s)} ago ({s.ToLocalTime():HH:mm:ss})" : ""));
+        if (c.Activity.Length > 0) lines.Add($"now: {c.Activity}");
+        if (c.Shell is { } shell)
+            lines.Add(shell switch
+            {
+                { Pid: int pid } => $"running as bash pid {pid}",
+                { Matches: 0 } => "ended: no bash under its Claude runs this command any more",
+                { Matches: var n } => $"{n} bash processes run this command",
+            });
+        if (c.Kind == "shell")
+            lines.Add(c.LastOutputUtc is { } o ? $"last output {SessionState.FormatAge(o)} ago ({o.ToLocalTime():HH:mm:ss})" : "its output file is gone");
+        if (c.Command is { Length: > 0 } command) { lines.Add(""); lines.Add(command); }
+        return string.Join(Environment.NewLine, lines);
     }
 
     /// <summary>A curve over the boxes from sender to recipient (or down the side to the sender's own
@@ -318,8 +352,7 @@ internal sealed class AgentsView : ScrollableControl
                 text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
-                if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = $"{c.Kind}: {c.Description}\n{c.Activity}"
-                    + (c.ListedUtc is { } listed ? $"\nlisted as running when its session last ended a turn, {SessionState.FormatAge(listed)} ago" : ""); }
+                if (r.Contains(at)) { key = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
         }
         if (key == _tipFor) return;
         _tipFor = key;
