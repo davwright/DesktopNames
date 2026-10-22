@@ -46,6 +46,11 @@ internal sealed class ControlChannel
         }));
         _methods.Add(new("ui.agents", "What the Agents tab shows: sessions, their agents and shells, message arrows", none, "", _ =>
             ProjectsWindow().AgentsShown()));
+        _methods.Add(new("ui.scrollAgents", "Scroll the Agents tab, as the wheel does", new[] { "y" }, "y: pixels from the top", a =>
+        {
+            ProjectsWindow().ScrollAgents(a.RequiredInt("y"));
+            return null;
+        }));
         _methods.Add(new("ui.rename", "Start editing a row's desktop name in place, as F2 does", new[] { "row" }, "row: 0-based visible row", a =>
         {
             var w = ProjectsWindow();

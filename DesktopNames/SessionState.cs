@@ -119,6 +119,9 @@ internal sealed class SessionEntry
 
     /// <summary>The session's transcript (.jsonl): its title and real last activity come from it.</summary>
     public string TranscriptPath { get; set; } = "";
+
+    /// <summary><c>user</c> when the user renamed the session: then <see cref="Name"/> is its title too.</summary>
+    public string NameSource { get; set; } = "";
 }
 
 /// <summary>One background task of a session: an agent or a run_in_background shell.</summary>
@@ -202,7 +205,8 @@ internal sealed class SessionState
     }
 
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc);
-    public sealed record AgentNode(string Source, string SessionId, string Name, string Cwd, Guid DesktopId, StateKind State,
+    /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
+    public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
                                    string? Topic, DateTime? StartedUtc, bool BackgroundActive);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
@@ -213,7 +217,8 @@ internal sealed class SessionState
     public AgentGraph Graph()
     {
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
-                e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId, e.Cwd,
+                e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
+                e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive)))
@@ -247,10 +252,11 @@ internal sealed class SessionState
     /// <summary>The session's name, or empty while unknown (or the session isn't tracked).</summary>
     public string NameOf(string source, string sessionId) => Entry(source, sessionId)?.Name ?? "";
 
-    public void SetName(string source, string sessionId, string name)
+    public void SetName(string source, string sessionId, string name, string nameSource)
     {
-        if (Entry(source, sessionId) is not { } e || e.Name == name) return;
+        if (Entry(source, sessionId) is not { } e || (e.Name == name && e.NameSource == nameSource)) return;
         e.Name = name;
+        e.NameSource = nameSource;
         SaveToDisk();
         ChangedFor(source, sessionId);
     }
@@ -351,6 +357,7 @@ internal sealed class SessionState
         public string Body { get; set; } = "";
         public string Name { get; set; } = "";
         public string? TranscriptPath { get; set; }
+        public string? NameSource { get; set; }
         public List<string> RecentBodies { get; set; } = new();
         public int SessionPid { get; set; }
         public int VsCodePid { get; set; }
@@ -379,7 +386,7 @@ internal sealed class SessionState
                     {
                         DesktopId = desktopId, Source = e.Source, SessionId = e.SessionId,
                         Activity = e.Activity, Asks = new List<PendingAsk>(e.Asks),
-                        Title = e.Title, Body = e.Body, Name = e.Name, TranscriptPath = e.TranscriptPath,
+                        Title = e.Title, Body = e.Body, Name = e.Name, TranscriptPath = e.TranscriptPath, NameSource = e.NameSource,
                         RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
@@ -416,7 +423,7 @@ internal sealed class SessionState
                 {
                     Source = p.Source, SessionId = p.SessionId,
                     Activity = p.Activity,
-                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", TranscriptPath = p.TranscriptPath ?? "", SessionPid = p.SessionPid,
+                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", TranscriptPath = p.TranscriptPath ?? "", NameSource = p.NameSource ?? "", SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
                     Cwd = p.Cwd, BackgroundActive = p.BackgroundActive, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore

@@ -11,7 +11,11 @@ internal sealed class AgentsView : ScrollableControl
 {
     // Heights follow the font, which scales with the screen: fixed pixels clipped the last line at 125%.
     private int Line => Font.Height + 1;
-    private int BoxH => 10 + 5 * Line;
+    private int BoxH => 10 + 3 * Line;
+
+    // TextRenderer ignores the Graphics transform unless told to: without this the text stayed put while the boxes scrolled.
+    private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis
+                                          | TextFormatFlags.PreserveGraphicsTranslateTransform;
     private int ChildH => 6 + 2 * Line;
     private const int BoxW = 300, ChildW = 270, Gap = 60, ChildGap = 6, Pad = 20, BandGap = 80;
 
@@ -53,6 +57,13 @@ internal sealed class AgentsView : ScrollableControl
     protected override void OnScroll(ScrollEventArgs se)
     {
         base.OnScroll(se);
+        Invalidate();
+    }
+
+    /// <summary>For the control channel: scroll as the wheel does.</summary>
+    public void ScrollTo(int y)
+    {
+        AutoScrollPosition = new Point(0, y);
         Invalidate();
     }
 
@@ -100,7 +111,7 @@ internal sealed class AgentsView : ScrollableControl
         Guid GroupOf(Guid id) => Order(id) == int.MaxValue ? Guid.Empty : id;
         foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Order(g.Key)))
         {
-            var nodes = group.OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            var nodes = group.OrderByDescending(n => n.LastActiveUtc).ToList();  // most recently active first
             int cols = Math.Min(nodes.Count, maxCols);
             int frameW = cols * BoxW + (cols - 1) * InnerGap + 2 * GroupPad;
             if (x + frameW > width - Pad && x > Pad)
@@ -144,7 +155,7 @@ internal sealed class AgentsView : ScrollableControl
         g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
         if (_placed.Count == 0)
         {
-            TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText);
+            TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText, Flags);
             return;
         }
         using (var frameFill = new SolidBrush(Color.FromArgb(246, 246, 248)))
@@ -156,7 +167,7 @@ internal sealed class AgentsView : ScrollableControl
                 g.FillPath(frameFill, path);
                 g.DrawPath(framePen, path);
                 TextRenderer.DrawText(g, label, title, new Rectangle(frame.Left + GroupPad, frame.Top + 4, frame.Width - 2 * GroupPad, 18),
-                    SystemColors.GrayText, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                    SystemColors.GrayText, Flags);
             }
         using var connector = new Pen(SystemColors.ControlDark, 1f);
         foreach (var p in _placed)
@@ -189,26 +200,20 @@ internal sealed class AgentsView : ScrollableControl
             g.FillPath(brush, path);
             g.DrawPath(border, path);
         }
-        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
-        // Line 1: name, and on the right how long ago it last did anything.
-        string age = SessionState.FormatAge(n.LastActiveUtc);
+        // Line 1: the title VS Code lists it under; top right, last active / started, ⏳ while background work runs.
+        string corner = (n.BackgroundActive ? "⏳ " : "") + SessionState.FormatAge(n.LastActiveUtc)
+                      + (n.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
-        int ageW = TextRenderer.MeasureText(age, bold).Width;
-        TextRenderer.DrawText(g, n.Name, bold, new Rectangle(lx, y, w - ageW - 4, Line), ink, flags);
-        TextRenderer.DrawText(g, age, bold, new Rectangle(lx + w - ageW, y, ageW, Line), ink, flags);
-        // Line 2: what the session is about (Claude Code's title for it).
+        int cornerW = TextRenderer.MeasureText(corner, bold).Width;
+        TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx, y, w - cornerW - 4, Line), ink, Flags);
+        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
+        // Line 2: the name sessions message it by (when the title isn't it) and its folder.
+        string id = n.Name == n.Title ? "" : n.Name + " · ";
+        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), dim, Flags);
+        // Line 3: its latest message or tool call. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
-        TextRenderer.DrawText(g, n.Topic ?? "", Font, new Rectangle(lx, y + Line, w, Line), ink, flags);
-        // Line 3: the folder — the frame names the desktop; this tells apart sessions of one name.
-        TextRenderer.DrawText(g, ShortFolder(n.Cwd), Font, new Rectangle(lx, y + 2 * Line, w, Line), dim, flags);
-        // Line 4: state, background work, when it started.
-        string state = n.State == StateKind.None ? "idle" : n.State.ToString().ToLowerInvariant();
-        string background = n.BackgroundActive ? " · ⏳ background" : "";
-        string started = n.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
-        TextRenderer.DrawText(g, state + background + started, Font, new Rectangle(lx, y + 3 * Line, w, Line), dim, flags);
-        // Line 5: its latest message or tool call.
-        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 4 * Line, w, Line), ink, flags);
+        TextRenderer.DrawText(g, n.Doing, italic, new Rectangle(lx, y + 2 * Line, w, Line), ink, Flags);
     }
 
     private static Color Blend(Color a, Color b, float toB) => Color.FromArgb(
@@ -230,14 +235,13 @@ internal sealed class AgentsView : ScrollableControl
             g.FillPath(brush, path);
             g.DrawPath(border, path);
         }
-        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
-        string since = c.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
+                string since = c.StartedUtc is { } s ? $" · started {SessionState.FormatAge(s)} ago" : "";
         // A subagent reports each tool call; a shell only appears in the session's Stop list, so say how old that list is.
         string second = c.Activity.Length > 0 ? c.Activity
             : c.ListedUtc is { } listed ? $"running, says a Stop {SessionState.FormatAge(listed)} ago"
             : "running, says a Stop from before DN restarted";
-        TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, flags);
-        TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, flags);
+        TextRenderer.DrawText(g, $"{c.Kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, Flags);
+        TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, Flags);
     }
 
     /// <summary>A curve over the boxes from sender to recipient (or down the side to the sender's own
@@ -279,7 +283,7 @@ internal sealed class AgentsView : ScrollableControl
         var size = TextRenderer.MeasureText(text, Font);
         var label = new Rectangle(mid.X - size.Width / 2, mid.Y - size.Height / 2, size.Width, size.Height);
         using (var back = new SolidBrush(SystemColors.Window)) g.FillRectangle(back, label);
-        TextRenderer.DrawText(g, text, Font, label, edge.Waiting ? SystemColors.ControlText : SystemColors.GrayText, TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(g, text, Font, label, edge.Waiting ? SystemColors.ControlText : SystemColors.GrayText, Flags);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)

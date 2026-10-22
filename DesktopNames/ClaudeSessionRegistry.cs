@@ -132,7 +132,8 @@ internal sealed class ClaudeSessionRegistry
     /// </summary>
     /// <summary>A live session as its registry file describes it. <see cref="Entrypoint"/> is
     /// <c>cli</c> for a Claude started in a terminal, <c>claude-vscode</c> for the VS Code panel.</summary>
-    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd, string Name)
+    /// <summary><see cref="NameSource"/> is <c>user</c> when the user renamed the session, <c>derived</c> otherwise.</summary>
+    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd, string Name, string NameSource)
     {
         public bool IsTerminal => Entrypoint == "cli";
     }
@@ -186,7 +187,8 @@ internal sealed class ClaudeSessionRegistry
                     r.TryGetProperty("pid", out var p) ? p.GetInt32() : 0,
                     r.TryGetProperty("entrypoint", out var e) ? e.GetString() ?? "" : "",
                     r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "",
-                    r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "");
+                    r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                    r.TryGetProperty("nameSource", out var ns) ? ns.GetString() ?? "" : "");
             }
         }
         return hits == 1 ? found : null;
