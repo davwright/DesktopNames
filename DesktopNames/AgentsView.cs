@@ -75,7 +75,8 @@ internal sealed class AgentsView : ScrollableControl
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
             state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing, topic = p.Node.Topic,
             lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive, usage = p.Node.Usage,
-            children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity }),
+            children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity,
+                shellPid = c.Child.Shell?.Pid, shellMatches = c.Child.Shell?.Matches, lastOutput = c.Child.LastOutputUtc?.ToLocalTime() }),
         }),
         edges = _graph.Edges.Select(e => new
         {
@@ -246,9 +247,16 @@ internal sealed class AgentsView : ScrollableControl
         string kind = c.Kind switch { "shell" => "background shell", "agent" => "subagent", _ => c.Kind };
         string since = c.StartedUtc is { } s ? $" · {SessionState.FormatAge(s)}" : "";
         // A subagent reports each tool call; a shell reports nothing, but writes its output to a file.
-        string second = c.Activity.Length > 0 ? c.Activity
-            : c.LastOutputUtc is { } output ? $"last output {SessionState.FormatAge(output)} ago"
-            : "output file gone";
+        string output = c.LastOutputUtc is { } o ? $"last output {SessionState.FormatAge(o)} ago" : "output file gone";
+        // A shell's process: found by its command under the session's Claude (see FindShell).
+        string process = c.Shell switch
+        {
+            { Pid: int pid } => $"running · pid {pid} · ",
+            { Matches: 0 } => "ended · ",
+            { Matches: var n } => $"{n} processes run this command · ",
+            null => "",
+        };
+        string second = c.Activity.Length > 0 ? c.Activity : process + output;
         TextRenderer.DrawText(g, $"{kind}{since} · {c.Description}", Font, new Rectangle(r.Left + 6, r.Top + 3, r.Width - 12, Line), SystemColors.ControlText, Flags);
         TextRenderer.DrawText(g, second, Font, new Rectangle(r.Left + 6, r.Top + 3 + Line, r.Width - 12, Line), SystemColors.GrayText, Flags);
     }

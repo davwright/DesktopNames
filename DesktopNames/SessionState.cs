@@ -139,6 +139,8 @@ internal sealed class BackgroundWork
     /// <summary>When a Stop last listed it as running. A shell reports nothing else, so this is
     /// how old the claim that it runs is. Null for tasks listed before this field existed.</summary>
     public DateTime? ListedUtc { get; set; }
+    /// <summary>Shells: the command, as the Stop lists it; its bash process is found by it.</summary>
+    public string? Command { get; set; }
 }
 
 /// <summary>
@@ -205,7 +207,9 @@ internal sealed class SessionState
     }
 
     /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
-    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc);
+    /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
+    public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc,
+                                    ClaudeSessionRegistry.ShellProcess? Shell);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
@@ -222,7 +226,8 @@ internal sealed class SessionState
                 e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
                 kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
-                    e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null)).ToList(),
+                    e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
+                    b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e))))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
@@ -345,6 +350,8 @@ internal sealed class SessionState
     {
         _isProcessAlive = isProcessAlive;
         LoadFromDisk();
+        // A background shell's process ending changes what its session shows, though no hook fires.
+        ClaudeSessionRegistry.ShellExited += () => Updated?.Invoke();
         // Every aggregate change (apply / consume / sweep / move / clear) is a persistable
         // edit — one subscription covers them all. Pulse animation doesn't fire Changed, so
         // this only writes when the displayed state actually moves.
@@ -458,7 +465,7 @@ internal sealed class SessionState
                            string? hookEvent = null, string? toolName = null,
                            string? toolDescription = null, string cwd = "",
                            bool backgroundActive = false,
-                           IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)>? backgroundTasks = null)
+                           IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc, string? Command)>? backgroundTasks = null)
     {
         var key = (source, sessionId);
         Guid prevDesktop = _location.TryGetValue(key, out var d) ? d : Guid.Empty;
@@ -481,7 +488,7 @@ internal sealed class SessionState
             effective = UpsertEntry(desktopId, source, sessionId, activity, ask, title, body,
                                     sessionPid, vsCodePid, hookEvent ?? "", toolName ?? "",
                                     toolDescription ?? "", cwd ?? "", backgroundActive,
-                                    backgroundTasks ?? Array.Empty<(string, string, string, DateTime?)>());
+                                    backgroundTasks ?? Array.Empty<(string, string, string, DateTime?, string?)>());
             _location[key] = desktopId;
         }
 
@@ -982,7 +989,7 @@ internal sealed class SessionState
                                   int sessionPid, int vsCodePid,
                                   string hookEvent, string toolName, string toolDescription, string cwd,
                                   bool backgroundActive,
-                                  IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)> backgroundTasks)
+                                  IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc, string? Command)> backgroundTasks)
     {
         if (!_byDesktop.TryGetValue(desktopId, out var list))
         {
@@ -1035,10 +1042,10 @@ internal sealed class SessionState
     /// <summary>A Stop lists every background task still running: keep those (with their start time
     /// and last activity), add new ones, drop the rest.</summary>
     private static void ReconcileBackground(SessionEntry entry,
-                                            IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc)> tasks)
+                                            IReadOnlyList<(string Id, string Type, string Description, DateTime? StartedUtc, string? Command)> tasks)
     {
         var running = new Dictionary<string, BackgroundWork>();
-        foreach (var (id, type, description, startedUtc) in tasks)
+        foreach (var (id, type, description, startedUtc, command) in tasks)
         {
             var work = entry.Background.TryGetValue(id, out var w) ? w
                      : new BackgroundWork();
@@ -1046,6 +1053,7 @@ internal sealed class SessionState
             work.Description = description;
             if (startedUtc != null) work.StartedUtc = startedUtc;
             work.ListedUtc = DateTime.UtcNow;
+            if (command != null) work.Command = command;
             running[id] = work;
         }
         entry.Background.Clear();

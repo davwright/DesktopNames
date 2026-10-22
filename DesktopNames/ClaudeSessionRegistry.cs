@@ -149,6 +149,100 @@ internal sealed class ClaudeSessionRegistry
         return hits.Count == 1 ? hits[0] : null;
     }
 
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr handle, int infoClass, IntPtr info, int size, out int returned);
+
+    /// <summary>A process's command line (ProcessCommandLineInformation), or null when it can't be read.</summary>
+    private static string? CommandLine(int pid)
+    {
+        const int ProcessQueryLimitedInformation = 0x1000, ProcessCommandLineInformation = 60;
+        IntPtr handle = OpenProcess(ProcessQueryLimitedInformation, false, pid);
+        if (handle == IntPtr.Zero) return null;
+        IntPtr buffer = Marshal.AllocHGlobal(32 * 1024);
+        try
+        {
+            if (NtQueryInformationProcess(handle, ProcessCommandLineInformation, buffer, 32 * 1024, out _) != 0) return null;
+            // UNICODE_STRING { ushort Length; ushort MaximumLength; IntPtr Buffer }, its text in the same buffer.
+            int bytes = Marshal.ReadInt16(buffer) & 0xFFFF;
+            IntPtr text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+            return Marshal.PtrToStringUni(text, bytes / 2);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+            CloseHandle(handle);
+        }
+    }
+
+    /// <summary>Where a background shell's process stands. <see cref="Pid"/> is set when exactly one matched.</summary>
+    public sealed record ShellProcess(int? Pid, int Matches);
+
+    // task id → the bash process found for it, with its start time so a reused pid isn't taken for it.
+    private static readonly Dictionary<string, (int Pid, DateTime StartUtc)> _shells = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The bash process running a background task: a child of the session's Claude process whose
+    /// command line holds <c>eval '&lt;command&gt;'</c> — the command as the Stop lists it, with ' written
+    /// as '\'' for bash and " as \" for the Windows command line. Matches = 0 means no such process
+    /// any more: the shell has ended.
+    /// </summary>
+    public static ShellProcess FindShell(int claudePid, string taskId, string command)
+    {
+        if (_shells.TryGetValue(taskId, out var known))
+        {
+            if (StillRunning(known.Pid, known.StartUtc)) return new ShellProcess(known.Pid, 1);
+            _shells.Remove(taskId);
+            return new ShellProcess(null, 0);
+        }
+        string needle = "eval '" + command.Replace("'", "'\\''").Replace("\"", "\\\"") + "'";
+        var hits = new List<(int, DateTime)>();
+        foreach (var p in System.Diagnostics.Process.GetProcessesByName("bash"))
+            using (p)
+            {
+                if (GetParentPid(p.Id) != claudePid || CommandLine(p.Id) is not { } line || !line.Contains(needle, StringComparison.Ordinal)) continue;
+                hits.Add((p.Id, p.StartTime.ToUniversalTime()));
+            }
+        if (hits.Count == 1)
+        {
+            _shells[taskId] = hits[0];
+            WatchExit(hits[0].Item1);
+        }
+        return new ShellProcess(hits.Count == 1 ? hits[0].Item1 : null, hits.Count);
+    }
+
+    /// <summary>A shell found by <see cref="FindShell"/> has exited (raised on the thread that found it).</summary>
+    public static event Action? ShellExited;
+
+    // Held so their Exited events keep firing.
+    private static readonly Dictionary<int, System.Diagnostics.Process> _watched = new();
+
+    /// <summary>Raise <see cref="ShellExited"/> when the process ends, on the calling (UI) thread.</summary>
+    private static void WatchExit(int pid)
+    {
+        if (_watched.ContainsKey(pid)) return;
+        var context = SynchronizationContext.Current ?? throw new InvalidOperationException("FindShell must run on the UI thread");
+        var process = System.Diagnostics.Process.GetProcessById(pid);
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => context.Post(_ =>
+        {
+            _watched.Remove(pid);
+            process.Dispose();
+            ShellExited?.Invoke();
+        }, null);
+        _watched[pid] = process;
+    }
+
+    /// <summary>The process <paramref name="pid"/> is still the one that started at <paramref name="startUtc"/>.</summary>
+    private static bool StillRunning(int pid, DateTime startUtc)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return !p.HasExited && p.StartTime.ToUniversalTime() == startUtc;
+        }
+        catch (ArgumentException) { return false; } // no process with that pid any more
+    }
+
     // task id → its output file, once found (a task's file never moves).
     private static readonly Dictionary<string, string> _taskOutputs = new(StringComparer.Ordinal);
 
