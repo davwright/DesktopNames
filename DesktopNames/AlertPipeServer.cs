@@ -314,11 +314,15 @@ internal sealed class AlertPipeServer : IDisposable
         string source = msg.Source ?? "unknown", sid = msg.SessionId!;
         if (msg.SendTo is { Length: > 0 } to)
         {
-            string? peerId = _claudeSessions.SessionIdByName(to) is { } peer ? peer[..Math.Min(8, peer.Length)] : null;
-            if (peerId != null)
-                _state.LinkPeer(source, sid, _claudeSessions.Live(sid)?.Name is { Length: > 0 } me ? me : EventLabel(msg), peerId, to);
+            var peer = _claudeSessions.SessionByAddress(to);
+            string? peerId = peer is { } p ? p.SessionId[..Math.Min(8, p.SessionId.Length)] : null;
+            if (peer is { } found)
+            {
+                to = found.Name.Length > 0 ? found.Name : to;
+                _state.LinkPeer(source, sid, _claudeSessions.Live(sid)?.Name is { Length: > 0 } me ? me : EventLabel(msg), peerId!, to);
+            }
             else
-                Log.State($"message from {sid} to '{to}': no live session has that name (a subagent?) — not linked");
+                Log.State($"message from {sid} to '{to}': no live session has that name or pipe (a subagent?) — not linked");
             // ClaudeHook describes it as "Message <to>: <summary>".
             string summary = msg.ToolDescription is { } d && d.IndexOf(": ", StringComparison.Ordinal) is int colon and >= 0 ? d[(colon + 2)..] : "";
             _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, DateTime.UtcNow));

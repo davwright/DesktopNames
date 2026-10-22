@@ -229,23 +229,28 @@ internal sealed class ClaudeSessionRegistry
     }
 
     /// <summary>
-    /// The full sessionId of the live session called <paramref name="name"/> ("evolxcli-67", the
-    /// name SendMessage addresses another session by), or null when no session or several have it.
+    /// The live session a SendMessage <c>to</c> addresses — by name ("evolxcli-67") or by its
+    /// messaging pipe ("uds:\\.\pipe\LOCAL\cc-msg-…", what a reply to a received message uses) —
+    /// as its full sessionId and its name. Null when no session or several match.
     /// </summary>
-    public string? SessionIdByName(string name)
+    public (string SessionId, string Name)? SessionByAddress(string to)
     {
         var dir = Path.Combine(ClaudeDir, "sessions");
         if (!Directory.Exists(dir)) return null;
-        var hits = new List<string>();
+        var hits = new List<(string, string)>();
         foreach (var file in Directory.GetFiles(dir, "*.json"))
         {
             JsonDocument doc;
             try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
             catch (Exception ex) when (ex is IOException or JsonException) { continue; } // half-written mid-launch
             using (doc)
-                if (doc.RootElement.TryGetProperty("name", out var n) && n.GetString() == name
-                    && doc.RootElement.TryGetProperty("sessionId", out var sid) && sid.GetString() is { } full)
-                    hits.Add(full);
+            {
+                var r = doc.RootElement;
+                string name = r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                string pipe = r.TryGetProperty("messagingSocketPath", out var m) ? "uds:" + m.GetString() : "";
+                if ((name == to || pipe == to) && r.TryGetProperty("sessionId", out var sid) && sid.GetString() is { } full)
+                    hits.Add((full, name));
+            }
         }
         return hits.Count == 1 ? hits[0] : null;
     }
