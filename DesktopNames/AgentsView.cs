@@ -3,9 +3,9 @@ using System.Drawing.Drawing2D;
 namespace DesktopNames;
 
 /// <summary>
-/// The Agents tab: a box per live Claude session in its state colour, its background agents and
-/// shells under it, and arrows for SendMessage — solid while the sender waits on the recipient,
-/// grey dashed for the last half hour's messages. Redraws on every session update, no timer.
+/// The Agents tab: a box per live Claude session in its state colour, and under it its background
+/// agents and shells and the messages it sent (SendMessage, last half hour) — solid while it waits
+/// on the recipient's reply. Redraws on every session update, no timer.
 /// </summary>
 internal sealed class AgentsView : ScrollableControl
 {
@@ -33,7 +33,10 @@ internal sealed class AgentsView : ScrollableControl
     private string? _tipFor;
 
     private sealed record Placed(SessionState.AgentNode Node, string Desktop, Rectangle Box,
-                                 List<(SessionState.AgentChild Child, Rectangle Box)> Children);
+                                 List<(SessionState.AgentChild Child, Rectangle Box)> Children,
+                                 List<(SessionState.AgentEdge Message, Rectangle Box)> Messages);
+
+    private const int MessagesShown = 3;
 
     public AgentsView(SessionState sessions, DesktopService desktops)
     {
@@ -110,13 +113,16 @@ internal sealed class AgentsView : ScrollableControl
         var desktops = _desktops.GetDesktops();
         int Order(Guid id) => desktops.FindIndex(d => d.Id == id) is int i and >= 0 ? i : int.MaxValue;
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
-        int StackHeight(SessionState.AgentNode n) => BoxH + n.Children.Count * (ChildH + ChildGap);
+        // The messages each session sent: its newest few, under its agents and shells.
+        var sent = _graph.Edges.GroupBy(e => e.FromId).ToDictionary(g => g.Key, g => g.OrderBy(e => e.AtUtc).TakeLast(MessagesShown).ToList());
+        List<SessionState.AgentEdge> SentBy(SessionState.AgentNode n) => sent.TryGetValue(n.SessionId, out var list) ? list : new();
+        int StackHeight(SessionState.AgentNode n) => BoxH + (n.Children.Count + SentBy(n).Count) * (ChildH + ChildGap);
 
         int width = Math.Max(ClientSize.Width, 400);
         int maxCols = _columns;
         BoxW = (width - 2 * Pad - (_columns - 1) * Gap) / _columns - 2 * GroupPad;
         ScaleText(BoxW / 300f);
-        int x = Pad, top = Pad + 30, bandHeight = 0;
+        int x = Pad, top = Pad, bandHeight = 0;
         var placed = new List<Placed>();
         var groups = new List<(string, Rectangle)>();
         // Every desktop that no longer exists is one "no desktop" frame.
@@ -146,7 +152,13 @@ internal sealed class AgentsView : ScrollableControl
                         children.Add((child, new Rectangle(box.Right - ChildW, cy, ChildW, ChildH)));
                         cy += ChildH + ChildGap;
                     }
-                    placed.Add(new Placed(row[c], Label(group.Key), box, children));
+                    var messages = new List<(SessionState.AgentEdge, Rectangle)>();
+                    foreach (var message in SentBy(row[c]))
+                    {
+                        messages.Add((message, new Rectangle(box.Right - ChildW, cy, ChildW, ChildH)));
+                        cy += ChildH + ChildGap;
+                    }
+                    placed.Add(new Placed(row[c], Label(group.Key), box, children, messages));
                 }
                 rowTop += row.Max(StackHeight) + InnerGap;
             }
@@ -219,9 +231,14 @@ internal sealed class AgentsView : ScrollableControl
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
                 DrawChild(g, child, r, Fill(p.Node));
             }
+            foreach (var (message, r) in p.Messages)
+            {
+                int spine = p.Box.Left + (BoxW - ChildW) / 2;
+                g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
+                DrawMessage(g, message, r, p);
+            }
             DrawSession(g, p);
         }
-        foreach (var edge in _graph.Edges) DrawEdge(g, edge);
     }
 
     /// <summary>Idle this long, a session is a leftover rather than live work: drawn faded.</summary>
@@ -397,47 +414,41 @@ internal sealed class AgentsView : ScrollableControl
         return string.Join(Environment.NewLine, lines);
     }
 
-    /// <summary>A curve over the boxes from sender to recipient (or down the side to the sender's own
-    /// subagent), labelled with the message summary. Skipped when an end is no longer shown.</summary>
-    private void DrawEdge(Graphics g, SessionState.AgentEdge edge)
+    private const char IconSent = '';
+
+    /// <summary>Who a message went to: the session's name, or for one of the sender's own subagents, what that agent does.</summary>
+    private static string Recipient(SessionState.AgentEdge e, Placed from) =>
+        e.ToSessionId != null ? e.To
+        : from.Children.FirstOrDefault(c => c.Child.Id == e.To).Child is { } agent ? $"subagent: {agent.Description}" : $"subagent {e.To}";
+
+    /// <summary>
+    /// A message the session sent, drawn like its agents and shells: line 1 the send icon and who it
+    /// went to, in the corner when; line 2 its summary, and that the sender waits on a reply.
+    /// </summary>
+    private void DrawMessage(Graphics g, SessionState.AgentEdge e, Rectangle r, Placed from)
     {
-        var from = _placed.FirstOrDefault(p => p.Node.SessionId == edge.FromId);
-        if (from == null) return;
-        Point start, end, c1, c2;
-        if (edge.ToSessionId != null)
+        Color parentFill = Fill(from.Node);
+        using (var path = TaskbarOverlay.RoundedRect(r, 5))
+        using (var brush = new SolidBrush(Blend(parentFill, Color.White, e.Waiting ? 0.35f : 0.75f)))
+        using (var border = new Pen(ControlPaint.Dark(parentFill, 0.1f)) { DashStyle = e.Waiting ? DashStyle.Solid : DashStyle.Dash })
         {
-            if (_placed.FirstOrDefault(p => p.Node.SessionId == edge.ToSessionId) is not { } to) return;
-            start = new Point(from.Box.Left + BoxW / 2 - 20, from.Box.Top);
-            end = new Point(to.Box.Left + BoxW / 2 + 20, to.Box.Top);
-            int lift = 40 + Math.Abs(end.X - start.X) / 8;
-            c1 = new Point(start.X, Math.Min(start.Y, end.Y) - lift);
-            c2 = new Point(end.X, Math.Min(start.Y, end.Y) - lift);
+            g.FillPath(brush, path);
+            g.DrawPath(border, path);
         }
-        else
-        {
-            int i = from.Children.FindIndex(c => c.Child.Id == edge.To);
-            if (i < 0) return;
-            var target = from.Children[i].Box;
-            start = new Point(from.Box.Right, from.Box.Top + BoxH / 2);
-            end = new Point(target.Right, target.Top + target.Height / 2);
-            c1 = new Point(start.X + 36, start.Y);
-            c2 = new Point(end.X + 36, end.Y);
-        }
-
-        using var pen = edge.Waiting
-            ? new Pen(Color.FromArgb(40, 40, 40), 2f)
-            : new Pen(Color.FromArgb(150, 150, 150), 1.3f) { DashStyle = DashStyle.Dash };
-        pen.CustomEndCap = new AdjustableArrowCap(4, 5);
-        g.DrawBezier(pen, start, c1, c2, end);
-
-        string text = TaskbarOverlay.Truncate(edge.Summary.Length > 0 ? edge.Summary : "message", 40)
-                    + (edge.Waiting ? " · waiting" : $" · {edge.AtUtc.ToLocalTime():HH:mm}");
-        var mid = new Point((start.X + 3 * c1.X + 3 * c2.X + end.X) / 8, (start.Y + 3 * c1.Y + 3 * c2.Y + end.Y) / 8);
-        var size = TextRenderer.MeasureText(text, Font);
-        var label = new Rectangle(mid.X - size.Width / 2, mid.Y - size.Height / 2, size.Width, size.Height);
-        using (var back = new SolidBrush(SystemColors.Window)) g.FillRectangle(back, label);
-        TextRenderer.DrawText(g, text, Font, label, edge.Waiting ? SystemColors.ControlText : SystemColors.GrayText, Flags);
+        int lx = r.Left + 8, w = r.Width - 16, y = r.Top + 4;
+        string corner = SessionState.FormatAge(e.AtUtc);
+        using var bold = new Font(Font, FontStyle.Bold);
+        int cornerW = TextRenderer.MeasureText(corner, bold).Width;
+        DrawCommand(g, IconSent, "to " + Recipient(e, from), bold, Color.Black, new Rectangle(lx, y, w - cornerW - 4, Line));
+        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
+        string second = (e.Waiting ? "waiting for a reply · " : "") + (e.Summary.Length > 0 ? e.Summary : "message");
+        TextRenderer.DrawText(g, second, Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
     }
+
+    private static string MessageTip(SessionState.AgentEdge e, Placed from) =>
+        $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago ({e.AtUtc.ToLocalTime():HH:mm:ss})"
+        + (e.Waiting ? "\nthe sender waits on a reply: it ends when the recipient's turn ends" : "")
+        + (e.Summary.Length > 0 ? "\n\n" + e.Summary : "");
 
     // The box's two prompt lines and two action lines (DrawSession's lines 3-4 and 5-6).
     private Rectangle PromptZone(Rectangle box) => new(box.Left, box.Top + 5 + 2 * Line, box.Width, 2 * Line);
@@ -481,6 +492,8 @@ internal sealed class AgentsView : ScrollableControl
             }
             foreach (var (c, r) in p.Children)
                 if (r.Contains(at)) { key2 = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
+            foreach (var (m, r) in p.Messages)
+                if (r.Contains(at)) { key2 = p.Node.SessionId + "/msg/" + m.To + m.AtUtc.Ticks; text = MessageTip(m, p); }
         }
         if (key2 == _tipFor) return;
         _tipFor = key2;
