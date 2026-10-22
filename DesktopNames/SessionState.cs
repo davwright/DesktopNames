@@ -122,6 +122,9 @@ internal sealed class SessionEntry
 
     /// <summary><c>user</c> when the user renamed the session: then <see cref="Name"/> is its title too.</summary>
     public string NameSource { get; set; } = "";
+
+    /// <summary>Remote Control (claude.ai) can see this session: its registry file has a bridge session.</summary>
+    public bool RemoteControl { get; set; }
 }
 
 /// <summary>One background task of a session: an agent or a run_in_background shell.</summary>
@@ -217,7 +220,7 @@ internal sealed class SessionState
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
                                    string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage,
                                    ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent,
-                                   string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions);
+                                   string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, bool RemoteControl);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
@@ -235,7 +238,8 @@ internal sealed class SessionState
                     b.Value.Command, b.Value.ActivityTool)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
                 e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent,
-                e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [])))
+                e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],
+                e.RemoteControl)))
             .ToList();
         var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
             // A later message on the same line replaces the earlier one.
@@ -266,11 +270,13 @@ internal sealed class SessionState
     /// <summary>The session's name, or empty while unknown (or the session isn't tracked).</summary>
     public string NameOf(string source, string sessionId) => Entry(source, sessionId)?.Name ?? "";
 
-    public void SetName(string source, string sessionId, string name, string nameSource)
+    /// <summary>What Claude Code's registry file says about the session: its name, whether the user gave it, Remote Control.</summary>
+    public void SetRegistryFacts(string source, string sessionId, string name, string nameSource, bool remoteControl)
     {
-        if (Entry(source, sessionId) is not { } e || (e.Name == name && e.NameSource == nameSource)) return;
+        if (Entry(source, sessionId) is not { } e || (e.Name == name && e.NameSource == nameSource && e.RemoteControl == remoteControl)) return;
         e.Name = name;
         e.NameSource = nameSource;
+        e.RemoteControl = remoteControl;
         SaveToDisk();
         ChangedFor(source, sessionId);
     }
@@ -377,6 +383,7 @@ internal sealed class SessionState
         public string Name { get; set; } = "";
         public string? TranscriptPath { get; set; }
         public string? NameSource { get; set; }
+        public bool RemoteControl { get; set; }
         public List<string> RecentBodies { get; set; } = new();
         public int SessionPid { get; set; }
         public int VsCodePid { get; set; }
@@ -405,7 +412,7 @@ internal sealed class SessionState
                     {
                         DesktopId = desktopId, Source = e.Source, SessionId = e.SessionId,
                         Activity = e.Activity, Asks = new List<PendingAsk>(e.Asks),
-                        Title = e.Title, Body = e.Body, Name = e.Name, TranscriptPath = e.TranscriptPath, NameSource = e.NameSource,
+                        Title = e.Title, Body = e.Body, Name = e.Name, TranscriptPath = e.TranscriptPath, NameSource = e.NameSource, RemoteControl = e.RemoteControl,
                         RecentBodies = new List<string>(e.RecentBodies),
                         SessionPid = e.SessionPid, VsCodePid = e.VsCodePid,
                         HookEvent = e.HookEvent, ToolName = e.ToolName, Cwd = e.Cwd,
@@ -442,7 +449,7 @@ internal sealed class SessionState
                 {
                     Source = p.Source, SessionId = p.SessionId,
                     Activity = p.Activity,
-                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", TranscriptPath = p.TranscriptPath ?? "", NameSource = p.NameSource ?? "", SessionPid = p.SessionPid,
+                    Title = p.Title, Body = p.Body, Name = p.Name ?? "", TranscriptPath = p.TranscriptPath ?? "", NameSource = p.NameSource ?? "", RemoteControl = p.RemoteControl, SessionPid = p.SessionPid,
                     VsCodePid = p.VsCodePid, HookEvent = p.HookEvent, ToolName = p.ToolName,
                     Cwd = p.Cwd, BackgroundActive = p.BackgroundActive, Consumed = p.Consumed,
                     LastSeenUtc = now, // reset so the busy-stale sweep doesn't reap on restore

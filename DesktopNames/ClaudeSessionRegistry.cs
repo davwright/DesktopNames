@@ -317,7 +317,10 @@ internal sealed class ClaudeSessionRegistry
         }
         foreach (var line in text.Split('\n'))
         {
-            if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal) && line.Contains("\"type\":\"user\"", StringComparison.Ordinal)
+            // A user record with an origin, or a queued_command: a message (the user's, or a peer
+            // session's) that arrived while the session was busy and was taken in mid-turn.
+            if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal)
+                && (line.Contains("\"type\":\"user\"", StringComparison.Ordinal) || line.Contains("\"type\":\"queued_command\"", StringComparison.Ordinal))
                 && PromptOf(line, offset) is { } p)
                 into.Prompt = p;
             else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && !line.Contains("\"isSidechain\":true", StringComparison.Ordinal))
@@ -373,8 +376,9 @@ internal sealed class ClaudeSessionRegistry
     {
         using var doc = JsonDocument.Parse(line);
         var r = doc.RootElement;
-        if (r.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) return null;
-        var origin = r.GetProperty("origin");
+        bool queued = r.TryGetProperty("attachment", out var attachment);
+        if (!queued && r.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) return null;
+        var origin = queued ? attachment.GetProperty("origin") : r.GetProperty("origin");
         DateTime at = r.TryGetProperty("timestamp", out var ts) ? ts.GetDateTime().ToUniversalTime() : DateTime.MinValue;
         switch (origin.GetProperty("kind").GetString())
         {
@@ -386,7 +390,8 @@ internal sealed class ClaudeSessionRegistry
             default:
                 return null; // task-notification: Claude Code telling the session a background task ended
         }
-        string text = HumanText(r.GetProperty("message").GetProperty("content"));
+        // A queued prompt is a string, or blocks like a message's content when it carries images.
+        string text = HumanText(queued ? attachment.GetProperty("prompt") : r.GetProperty("message").GetProperty("content"));
         return text.Trim().Length == 0 ? null : new Prompt(false, "", text, at, offset);
     }
 
@@ -414,7 +419,7 @@ internal sealed class ClaudeSessionRegistry
             ?? throw new InvalidDataException($"{path}: no line at byte {prompt.Offset}");
         using var doc = JsonDocument.Parse(line);
         var r = doc.RootElement;
-        if (prompt.FromPeer) return (prompt.Text, new List<byte[]>());
+        if (prompt.FromPeer || r.TryGetProperty("attachment", out _)) return (prompt.Text, new List<byte[]>());
         var content = r.GetProperty("message").GetProperty("content");
         var images = content.ValueKind != JsonValueKind.Array ? new List<byte[]>()
             : content.EnumerateArray()
@@ -489,7 +494,8 @@ internal sealed class ClaudeSessionRegistry
     /// <summary>A live session as its registry file describes it. <see cref="Entrypoint"/> is
     /// <c>cli</c> for a Claude started in a terminal, <c>claude-vscode</c> for the VS Code panel.</summary>
     /// <summary><see cref="NameSource"/> is <c>user</c> when the user renamed the session, <c>derived</c> otherwise.</summary>
-    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd, string Name, string NameSource)
+    /// <see cref="RemoteControl"/>: it has a bridge session — Remote Control (claude.ai) can see and drive it.
+    public sealed record LiveSession(int Pid, string Entrypoint, string Cwd, string Name, string NameSource, bool RemoteControl)
     {
         public bool IsTerminal => Entrypoint == "cli";
     }
@@ -525,6 +531,29 @@ internal sealed class ClaudeSessionRegistry
     /// window of its own (Windows Terminal, a console), found by walking up its parent processes.</summary>
     public sealed record TerminalHost(bool InVsCode, IntPtr Window);
 
+    /// <summary>One registry file: its session's full id and what it says, or null while it is
+    /// half-written (Claude Code rewrites it on every status change; the next write is whole).</summary>
+    public static (string SessionId, LiveSession Live)? ReadRegistryFile(string file)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
+        catch (Exception ex) when (ex is IOException or JsonException) { return null; }
+        using (doc)
+        {
+            var r = doc.RootElement;
+            if (!r.TryGetProperty("sessionId", out var sid) || sid.GetString() is not { } full) return null;
+            return (full, new LiveSession(
+                r.TryGetProperty("pid", out var p) ? p.GetInt32() : 0,
+                r.TryGetProperty("entrypoint", out var e) ? e.GetString() ?? "" : "",
+                r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "",
+                r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                r.TryGetProperty("nameSource", out var ns) ? ns.GetString() ?? "" : "",
+                r.TryGetProperty("bridgeSessionId", out var bridge) && bridge.GetString() is { Length: > 0 }));
+        }
+    }
+
+    public static string SessionsDir => Path.Combine(ClaudeDir, "sessions");
+
     /// <summary>The live registry entry for <paramref name="sessionId"/>, or null when it has none
     /// (ended, or the prefix is ambiguous). Not cached: sessions end.</summary>
     public LiveSession? Live(string sessionId)
@@ -549,7 +578,8 @@ internal sealed class ClaudeSessionRegistry
                     r.TryGetProperty("entrypoint", out var e) ? e.GetString() ?? "" : "",
                     r.TryGetProperty("cwd", out var c) ? c.GetString() ?? "" : "",
                     r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
-                    r.TryGetProperty("nameSource", out var ns) ? ns.GetString() ?? "" : "");
+                    r.TryGetProperty("nameSource", out var ns) ? ns.GetString() ?? "" : "",
+                    r.TryGetProperty("bridgeSessionId", out var bridge) && bridge.GetString() is { Length: > 0 });
             }
         }
         return hits == 1 ? found : null;

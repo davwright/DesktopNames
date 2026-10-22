@@ -51,17 +51,38 @@ internal sealed class AlertPipeServer : IDisposable
         {
             // Every time: a rename since the last run changes the name and its source.
             if (_claudeSessions.Live(sid) is { Name.Length: > 0 } live)
-                _state.SetName(source, sid, live.Name, live.NameSource);
+                _state.SetRegistryFacts(source, sid, live.Name, live.NameSource, live.RemoteControl);
             if (_state.TranscriptOf(source, sid).Length == 0 && ClaudeSessionRegistry.FindTranscript(sid) is { } transcript)
                 _state.SetTranscript(source, sid, transcript);
         }
+        // A rename, or Remote Control connecting, rewrites the session's registry file but fires no
+        // hook: watch the folder, so the change shows when it happens, not at the next turn.
+        _registryWatcher = new FileSystemWatcher(ClaudeSessionRegistry.SessionsDir, "*.json")
+        {
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
+            EnableRaisingEvents = true,
+        };
+        _registryWatcher.Changed += (_, e) => _host.BeginInvoke(() => RegistryFileChanged(e.FullPath));
+        _registryWatcher.Created += (_, e) => _host.BeginInvoke(() => RegistryFileChanged(e.FullPath));
+        _registryWatcher.Renamed += (_, e) => _host.BeginInvoke(() => RegistryFileChanged(e.FullPath));
         _thread = new Thread(Loop) { IsBackground = true, Name = "DesktopNames-AlertPipe" };
         _thread.Start();
+    }
+
+    private FileSystemWatcher? _registryWatcher;
+
+    private void RegistryFileChanged(string file)
+    {
+        if (ClaudeSessionRegistry.ReadRegistryFile(file) is not { } read) return; // half-written; the next write is whole
+        foreach (var (source, sid) in _state.TrackedSessions())
+            if (read.SessionId.StartsWith(sid, StringComparison.OrdinalIgnoreCase) && read.Live.Name.Length > 0)
+                _state.SetRegistryFacts(source, sid, read.Live.Name, read.Live.NameSource, read.Live.RemoteControl);
     }
 
     public void Stop()
     {
         _stopping = true;
+        _registryWatcher?.Dispose();
         try { _current?.Dispose(); } catch { }
         try { _thread?.Join(500); } catch { }
     }
@@ -301,7 +322,7 @@ internal sealed class AlertPipeServer : IDisposable
         string source = msg.Source ?? "unknown", sid = msg.SessionId!;
         if (msg.TranscriptPath is { Length: > 0 } transcript) _state.SetTranscript(source, sid, transcript);
         if (msg.HookEvent is not ("SessionStart" or "UserPromptSubmit") && _state.NameOf(source, sid).Length > 0) return;
-        if (_claudeSessions.Live(sid) is { Name.Length: > 0 } live) _state.SetName(source, sid, live.Name, live.NameSource);
+        if (_claudeSessions.Live(sid) is { Name.Length: > 0 } live) _state.SetRegistryFacts(source, sid, live.Name, live.NameSource, live.RemoteControl);
     }
 
     /// <summary>

@@ -985,7 +985,7 @@ internal sealed class ProjectsDialog : Form
         if (Text != title) Text = title;
     }
 
-    private static Icon LoadIcon(string name)
+    internal static Icon LoadIcon(string name)
     {
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         string res = asm.GetManifestResourceNames().Single(n => n.EndsWith("." + name, StringComparison.OrdinalIgnoreCase));

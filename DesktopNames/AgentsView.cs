@@ -85,6 +85,7 @@ internal sealed class AgentsView : ScrollableControl
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
             state = p.Node.State.ToString().ToLowerInvariant(), doing = p.Node.Doing, topic = p.Node.Topic,
             lastActive = SessionState.FormatAge(p.Node.LastActiveUtc), background = p.Node.BackgroundActive, usage = p.Node.Usage,
+            title = p.Node.Title, remoteControl = p.Node.RemoteControl,
             children = p.Children.Select(c => new { kind = c.Child.Kind, description = c.Child.Description, activity = c.Child.Activity,
                 shellPid = c.Child.Shell?.Pid, shellMatches = c.Child.Shell?.Matches, lastOutput = c.Child.LastOutputUtc?.ToLocalTime(), tip = ChildTip(c.Child) }),
         }),
@@ -264,14 +265,23 @@ internal sealed class AgentsView : ScrollableControl
                       + (n.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
         int cornerW = TextRenderer.MeasureText(corner, bold).Width;
-        TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx, y, w - cornerW - 4, Line), ink, Flags);
+        // A blue badge: Remote Control (claude.ai) can see this session.
+        int badge = 0;
+        if (n.RemoteControl)
+        {
+            int d = Line * 3 / 5;
+            using var blue = new SolidBrush(Color.FromArgb(0, 120, 215));
+            g.FillEllipse(blue, lx, y + (Line - d) / 2, d, d);
+            badge = d + 5;
+        }
+        TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx + badge, y, w - cornerW - 4 - badge, Line), ink, Flags);
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
         // Line 2: the name sessions message it by (when the title isn't it) and its folder.
         string id = n.Name == n.Title ? "" : n.Name + " · ";
         TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), dim, Flags);
         // Lines 3-4: the last prompt — the user's, or another session's message to it.
         if (n.Prompt is { } prompt)
-            DrawCommand(g, prompt.FromPeer ? IconPeer : IconUser,
+            DrawCommand(g, prompt.FromPeer ? IconClaude : IconUser,
                 (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + 2 * Line, w, 2 * Line));
         // Lines 5-6: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
@@ -310,6 +320,10 @@ internal sealed class AgentsView : ScrollableControl
     private static string Flatten(string text) => string.Join(" ", text.Split((char[])['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
 
     // Segoe MDL2 Assets glyphs: who spoke, or which kind of tool ran.
+    /// <summary>Stands for the Claude logo, drawn from claude.ico: input from another Claude session.</summary>
+    internal const char IconClaude = (char)0xF8FF;
+    internal static readonly Icon ClaudeIcon = ProjectsDialog.LoadIcon("claude.ico");
+
     private const char IconUser = '', IconPeer = '', IconShell = '', IconRead = '', IconEdit = '',
                        IconSearch = '', IconWeb = '', IconAgent = '', IconMcp = '', IconReply = '',
                        IconAsk = '', IconThink = '', IconTool = '';
@@ -341,7 +355,8 @@ internal sealed class AgentsView : ScrollableControl
     private void DrawCommand(Graphics g, char icon, string text, Font font, Color ink, Rectangle r)
     {
         int IconW = Line + 2;
-        TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Rectangle(r.Left, r.Top + 1, IconW, r.Height), ink, Flags);
+        if (icon == IconClaude) g.DrawIcon(ClaudeIcon, new Rectangle(r.Left, r.Top + 1, Line - 2, Line - 2));
+        else TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Rectangle(r.Left, r.Top + 1, IconW, r.Height), ink, Flags);
         TextRenderer.DrawText(g, text, font, new Rectangle(r.Left + IconW, r.Top, r.Width - IconW, r.Height), ink,
             TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis
             | TextFormatFlags.PreserveGraphicsTranslateTransform);
@@ -495,7 +510,8 @@ internal sealed class AgentsView : ScrollableControl
                 key2 = p.Node.SessionId;
                 string usage = p.Node.Usage is { } u
                     ? $"{u.Model}, at its last call ({SessionState.FormatAge(p.Node.LastActiveUtc)} ago): sent {u.Context:N0} tokens ({u.CacheRead:N0} read from cache, {u.CacheWrite:N0} written to it, {u.Input:N0} uncached), got {u.Output:N0}\n\n" : "";
-                text = usage + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
+                text = (p.Node.RemoteControl ? "Remote Control (claude.ai) can see this session.\n\n" : "") + usage
+                     + SessionState.StripTipMarkers(_sessions.DescribeSession(p.Node.Source, p.Node.SessionId));
             }
             foreach (var (c, r) in p.Children)
                 if (r.Contains(at)) { key2 = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
@@ -538,7 +554,7 @@ internal sealed class AgentsView : ScrollableControl
         var prompt = n.Prompt!;
         var (text, images) = ClaudeSessionRegistry.PromptDetail(n.TranscriptPath, prompt);
         string who = prompt.FromPeer ? $"from {prompt.From}" : "you";
-        var rows = new List<DetailPopup.Row> { new(prompt.FromPeer ? IconPeer : IconUser, text.Trim(), $"{who} · {prompt.AtUtc.ToLocalTime():HH:mm:ss}", null) };
+        var rows = new List<DetailPopup.Row> { new(prompt.FromPeer ? IconClaude : IconUser, text.Trim(), $"{who} · {prompt.AtUtc.ToLocalTime():HH:mm:ss}", null) };
         foreach (var bytes in images)
         {
             using var stream = new MemoryStream(bytes);
@@ -684,7 +700,9 @@ internal sealed class DetailPopup : Form
             if (row.Image is { } img) { g.DrawImage(img, image); continue; }
             if (row.Note is { } note)
                 TextRenderer.DrawText(g, note, _noteFont, new Point(text.Left, text.Top - _noteFont.Height), SystemColors.GrayText, TextFormatFlags.NoPrefix);
-            if (row.Icon is { } icon)
+            if (row.Icon == AgentsView.IconClaude)
+                g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
+            else if (row.Icon is { } icon)
                 TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, TextFormatFlags.NoPrefix);
             TextRenderer.DrawText(g, row.Text, _font, text, SystemColors.ControlText, Wrap);
         }
