@@ -4,9 +4,23 @@
 //   dn <method> '<params-json>'          the same with JSON (PowerShell 5.1 strips its quotes: use key=value there)
 // Exit 0 ok, 1 the request failed, 2 usage error.
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+
+// Internal, for DesktopNames' claude.close: Ctrl+Break into another process's console. A
+// throwaway process does it because the event hits every process on that console, the sender
+// included — it ended DesktopNames itself, handler or not.
+if (args is ["--ctrl-break", var target])
+{
+    FreeConsole();
+    if (!AttachConsole(uint.Parse(target))) { Console.Error.WriteLine($"cannot attach to the console of pid {target}: error {Marshal.GetLastWin32Error()}"); return 3; }
+    SetConsoleCtrlHandler(_ => true, true);
+    const uint CtrlBreakEvent = 1;
+    if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, 0)) return 4;
+    return 0;
+}
 
 if (args.Length == 0)
 {
@@ -53,8 +67,15 @@ pipe.Write(bytes);
 pipe.Flush();
 
 using var reader = new StreamReader(pipe, Encoding.UTF8);
-var line = reader.ReadLine() ?? throw new IOException("DesktopNames closed the pipe without replying");
+if (reader.ReadLine() is not { } line) { Console.Error.WriteLine("DesktopNames closed the pipe without replying (did it exit?)"); return 1; }
 var reply = JsonNode.Parse(line)!;
 Console.OutputEncoding = Encoding.UTF8;
 Console.WriteLine(reply.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
 return reply["ok"]?.GetValue<bool>() == true ? 0 : 1;
+
+[DllImport("kernel32.dll", SetLastError = true)] static extern bool FreeConsole();
+[DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint pid);
+[DllImport("kernel32.dll", SetLastError = true)] static extern bool GenerateConsoleCtrlEvent(uint ctrlEvent, uint processGroupId);
+[DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(CtrlHandler handler, bool add);
+
+delegate bool CtrlHandler(uint ctrlType);

@@ -70,6 +70,73 @@ internal sealed class ClaudeSessionRegistry
         return Array.Empty<string>();
     }
 
+    /// <summary>A live session's registry file as Claude Code writes it: <see cref="Status"/> is its
+    /// own <c>idle</c> / <c>busy</c>, set at <see cref="StatusSinceUtc"/>.</summary>
+    public sealed record Registered(string SessionId, int Pid, string Name, string Status, DateTime StatusSinceUtc);
+
+    public static List<Registered> AllRegistered()
+    {
+        var dir = Path.Combine(ClaudeDir, "sessions");
+        var result = new List<Registered>();
+        if (!Directory.Exists(dir)) return result;
+        foreach (var file in Directory.GetFiles(dir, "*.json"))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
+            catch (Exception ex) when (ex is IOException or JsonException) { continue; } // half-written mid-launch
+            using (doc)
+            {
+                var r = doc.RootElement;
+                if (!r.TryGetProperty("sessionId", out var sid) || !r.TryGetProperty("pid", out var pid)) continue;
+                result.Add(new Registered(sid.GetString() ?? "", pid.GetInt32(),
+                    r.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                    r.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "",
+                    r.TryGetProperty("statusUpdatedAt", out var at) ? DateTimeOffset.FromUnixTimeMilliseconds(at.GetInt64()).UtcDateTime : DateTime.MinValue));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>The one live session called <paramref name="nameOrId"/> (its name, or a prefix of its id);
+    /// none or several is an error that lists them.</summary>
+    public static Registered FindRegistered(string nameOrId)
+    {
+        var all = AllRegistered().Where(s => IsRunning(s.Pid)).ToList();
+        var hits = all.Where(s => s.Name == nameOrId || (nameOrId.Length >= 4 && s.SessionId.StartsWith(nameOrId, StringComparison.OrdinalIgnoreCase))).ToList();
+        return hits.Count == 1 ? hits[0]
+            : throw new ArgumentException(hits.Count == 0
+                ? $"no running Claude session is called \"{nameOrId}\"; running: {string.Join(", ", all.Select(s => s.Name))}"
+                : $"\"{nameOrId}\" matches {hits.Count} sessions: {string.Join(", ", hits.Select(s => $"{s.Name} ({s.SessionId[..8]})"))}");
+    }
+
+    public static bool IsRunning(int pid)
+    {
+        try { using var p = System.Diagnostics.Process.GetProcessById(pid); return !p.HasExited; }
+        catch (ArgumentException) { return false; } // no such process
+    }
+
+    /// <summary>
+    /// Ctrl+Break in the console of <paramref name="pid"/>. Measured on claude.exe in the VS Code
+    /// extension's stream-json mode: Ctrl+C only interrupts (twice did nothing to an idle session);
+    /// Ctrl+Break makes it run its SessionEnd hook, delete its sessions\*.json and exit 0.
+    /// The event reaches every process on that console, the sender included: attached itself,
+    /// DesktopNames was ended by it, handler or not. So <c>dn --ctrl-break</c>, a throwaway
+    /// process next to this exe, attaches and sends it.
+    /// </summary>
+    public static void SendCtrlBreak(int pid)
+    {
+        var helper = Path.Combine(AppContext.BaseDirectory, "dn.exe");
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(helper, $"--ctrl-break {pid}")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException($"could not start {helper}");
+        string error = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        // 0: sent. 0xC000013A: sent, and the helper's own copy of the Ctrl+Break ended it.
+        if (p.ExitCode is not (0 or unchecked((int)0xC000013A)))
+            throw new InvalidOperationException($"Ctrl+Break to pid {pid} failed (dn --ctrl-break exit {p.ExitCode}) {error.Trim()}");
+    }
+
     /// <summary>The transcript <c>projects\*\&lt;sessionId&gt;.jsonl</c> of a session known by its id
     /// prefix, or null when none or several match. For sessions restored from disk, whose hooks
     /// (which carry the path) haven't fired since.</summary>

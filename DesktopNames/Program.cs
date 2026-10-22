@@ -712,6 +712,28 @@ internal sealed class HostForm : Form
     public int OverlayCount => _overlays.Count;
     public CommandRegistry Commands { get; } = new();
 
+    private static List<ClaudeSessionRegistry.Registered> IdleClaudes(int hours) =>
+        ClaudeSessionRegistry.AllRegistered()
+            .Where(s => s.Status == "idle" && DateTime.UtcNow - s.StatusSinceUtc >= TimeSpan.FromHours(hours) && ClaudeSessionRegistry.IsRunning(s.Pid))
+            .OrderBy(s => s.StatusSinceUtc).ToList();
+
+    /// <summary>Ctrl+Break to an idle session; its tile goes when the process's exit event fires.</summary>
+    private object CloseClaude(ClaudeSessionRegistry.Registered s)
+    {
+        if (s.Status != "idle") throw new InvalidOperationException($"{s.Name} is {s.Status}, not idle: only an idle session is closed");
+        var process = System.Diagnostics.Process.GetProcessById(s.Pid);
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => BeginInvoke(() =>
+        {
+            Log.State($"claude.close: {s.Name} (pid {s.Pid}) exited");
+            _sessionState?.Sweep();
+            process.Dispose();
+        });
+        ClaudeSessionRegistry.SendCtrlBreak(s.Pid);
+        Log.State($"claude.close: Ctrl+Break sent to {s.Name} (pid {s.Pid}, idle since {s.StatusSinceUtc.ToLocalTime():g})");
+        return new { session = s.Name, pid = s.Pid, sent = "Ctrl+Break" };
+    }
+
     /// <summary>Desktop by 1-based number from a command's "desktop" param, else the current one.</summary>
     private Guid DesktopArg(CommandArgs a)
     {
@@ -759,6 +781,12 @@ internal sealed class HostForm : Form
             (_sessionState ?? throw new InvalidOperationException("not ready")).RemoveSession(a.RequiredStr("source"), a.RequiredStr("session"));
             return null;
         }));
+        c.Add(new("claude.close", "End an idle Claude session gracefully (Ctrl+Break: it runs SessionEnd and exits); /resume brings it back",
+            new[] { "session" }, "session: its name (osis-fixes-d3) or the start of its id", a => CloseClaude(ClaudeSessionRegistry.FindRegistered(a.RequiredStr("session")))));
+        c.Add(new("claude.idle", "Running Claude sessions idle for at least some hours, as Claude Code reports them", new[] { "hours" }, "hours: idle at least this long", a =>
+            IdleClaudes(a.RequiredInt("hours")).Select(s => new { s.Name, session = s.SessionId[..8], s.Pid, idleSince = s.StatusSinceUtc.ToLocalTime() })));
+        c.Add(new("claude.closeIdle", "End every Claude session idle for at least some hours (claude.idle lists them)", new[] { "hours" }, "hours: idle at least this long", a =>
+            IdleClaudes(a.RequiredInt("hours")).Select(CloseClaude).ToList()));
         c.Add(new("claude.prevWaiting", "Previous waiting Claude", none, "", _ => { JumpToWaitingClaude(-1); return null; }));
         c.Add(new("claude.nextWaiting", "Next waiting Claude",     none, "", _ => { JumpToWaitingClaude(+1); return null; }));
         // Deferred: the window is modal, and its loop must not run inside the hotkey or pipe call.

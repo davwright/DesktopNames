@@ -307,6 +307,41 @@ internal sealed class AgentsView : ScrollableControl
         else _tip.Show(text, this, e.X + 12, e.Y + 16);
     }
 
+    /// <summary>Right-click a session: close it. Right-click elsewhere: close the long-idle ones.</summary>
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Right) return;
+        var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        var menu = new ContextMenuStrip();
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        if (_placed.FirstOrDefault(p => p.Box.Contains(at)) is { } hit)
+            menu.Items.Add($"Close \"{hit.Node.Title}\"…", null, (_, _) => Confirm(
+                $"End the Claude session \"{hit.Node.Title}\" ({hit.Node.Name})?\n\nIt runs its SessionEnd hook and exits; /resume in VS Code brings it back. Only an idle session is closed.",
+                () => Run("claude.close", new { session = hit.Node.SessionId })));
+        else
+            menu.Items.Add("Close sessions idle for over a day…", null, (_, _) =>
+            {
+                var idle = Program.Host!.Commands.Execute("claude.idle", System.Text.Json.JsonSerializer.SerializeToElement(new { hours = 24 }));
+                var names = System.Text.Json.JsonSerializer.SerializeToElement(idle).EnumerateArray().Select(x => x.GetProperty("Name").GetString()).ToList();
+                if (names.Count == 0) { MessageBox.Show(this, "No session has been idle for over a day.", "DesktopNames"); return; }
+                Confirm($"End these {names.Count} Claude sessions, idle for over a day?\n\n{string.Join("\n", names)}\n\n/resume in VS Code brings any of them back.",
+                    () => Run("claude.closeIdle", new { hours = 24 }));
+            });
+        menu.Show(this, e.Location);
+    }
+
+    private void Confirm(string question, Action act)
+    {
+        if (MessageBox.Show(this, question, "Close Claude sessions", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK) act();
+    }
+
+    private void Run(string command, object args)
+    {
+        try { Program.Host!.Commands.Execute(command, System.Text.Json.JsonSerializer.SerializeToElement(args)); }
+        catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+    }
+
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
