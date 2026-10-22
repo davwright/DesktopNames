@@ -347,6 +347,38 @@ internal sealed class ClaudeSessionRegistry
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    /// <summary>One process of a session's tree; <see cref="StartUtc"/> tells it from a later process that reuses its pid.</summary>
+    public sealed record TreeProcess(int Pid, string Name, DateTime StartUtc);
+
+    /// <summary>Every process descended from <paramref name="pid"/>: its MCP servers, background shells
+    /// and what those started. A child must have started after its parent, or the parent link is a reused pid.</summary>
+    public static List<TreeProcess> Descendants(int pid)
+    {
+        var all = new List<(int Pid, int Parent, string Name, DateTime Start)>();
+        foreach (var p in System.Diagnostics.Process.GetProcesses())
+            using (p)
+            {
+                DateTime start;
+                try { start = p.StartTime.ToUniversalTime(); }
+                // System processes deny it, and a process may exit mid-scan: neither belongs to a session.
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { continue; }
+                all.Add((p.Id, GetParentPid(p.Id), p.ProcessName, start));
+            }
+        var result = new List<TreeProcess>();
+        var frontier = new Queue<(int Pid, DateTime Start)>();
+        if (all.FirstOrDefault(x => x.Pid == pid) is { Pid: > 0 } root) frontier.Enqueue((root.Pid, root.Start));
+        while (frontier.Count > 0)
+        {
+            var (parent, parentStart) = frontier.Dequeue();
+            foreach (var child in all.Where(x => x.Parent == parent && x.Start >= parentStart))
+            {
+                result.Add(new TreeProcess(child.Pid, child.Name, child.Start));
+                frontier.Enqueue((child.Pid, child.Start));
+            }
+        }
+        return result;
+    }
+
     private static int GetParentPid(int pid)
     {
         const int ProcessQueryLimitedInformation = 0x1000;

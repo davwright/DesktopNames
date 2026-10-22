@@ -722,16 +722,47 @@ internal sealed class HostForm : Form
     {
         if (s.Status != "idle") throw new InvalidOperationException($"{s.Name} is {s.Status}, not idle: only an idle session is closed");
         var process = System.Diagnostics.Process.GetProcessById(s.Pid);
+        // Its MCP servers end with it; its background shells do not (Ctrl+Break never reaches
+        // them): closing qed-53 left its dev-server bash running. Whatever of the tree outlives
+        // Claude is ended once Claude has exited.
+        var tree = ClaudeSessionRegistry.Descendants(s.Pid);
         process.EnableRaisingEvents = true;
         process.Exited += (_, _) => BeginInvoke(() =>
         {
             Log.State($"claude.close: {s.Name} (pid {s.Pid}) exited");
+            EndLeftovers(s.Name, tree);
             _sessionState?.Sweep();
             process.Dispose();
         });
         ClaudeSessionRegistry.SendCtrlBreak(s.Pid);
-        Log.State($"claude.close: Ctrl+Break sent to {s.Name} (pid {s.Pid}, idle since {s.StatusSinceUtc.ToLocalTime():g})");
-        return new { session = s.Name, pid = s.Pid, sent = "Ctrl+Break" };
+        Log.State($"claude.close: Ctrl+Break sent to {s.Name} (pid {s.Pid}, idle since {s.StatusSinceUtc.ToLocalTime():g}); tree: {string.Join(", ", tree.Select(t => $"{t.Name} {t.Pid}"))}");
+        return new { session = s.Name, pid = s.Pid, sent = "Ctrl+Break", tree = tree.Select(t => $"{t.Name} {t.Pid}") };
+    }
+
+    /// <summary>End each process of a closed session's tree that is still running — the same process,
+    /// by start time, not a newer one that got its pid.</summary>
+    private static void EndLeftovers(string session, List<ClaudeSessionRegistry.TreeProcess> tree)
+    {
+        var ended = new List<string>();
+        foreach (var t in tree)
+        {
+            System.Diagnostics.Process p;
+            try { p = System.Diagnostics.Process.GetProcessById(t.Pid); }
+            catch (ArgumentException) { continue; } // already gone, as it should be
+            using (p)
+            {
+                if (p.HasExited || p.StartTime.ToUniversalTime() != t.StartUtc) continue;
+                try { p.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+                {
+                    Log.State($"claude.close: {session}: could not end leftover {t.Name} {t.Pid}: {ex.Message}");
+                    ProjectSwitcher.ReportError(new InvalidOperationException($"Closed {session}, but could not end its leftover {t.Name} (pid {t.Pid}): {ex.Message}"));
+                    continue;
+                }
+                ended.Add($"{t.Name} {t.Pid}");
+            }
+        }
+        Log.State($"claude.close: {session}: leftovers ended: {(ended.Count == 0 ? "none" : string.Join(", ", ended))}");
     }
 
     /// <summary>Desktop by 1-based number from a command's "desktop" param, else the current one.</summary>
