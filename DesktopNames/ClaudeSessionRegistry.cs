@@ -377,15 +377,26 @@ internal sealed class ClaudeSessionRegistry
         using var doc = JsonDocument.Parse(line);
         var r = doc.RootElement;
         bool queued = r.TryGetProperty("attachment", out var attachment);
-        if (!queued && r.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) return null;
         var origin = queued ? attachment.GetProperty("origin") : r.GetProperty("origin");
         DateTime at = r.TryGetProperty("timestamp", out var ts) ? ts.GetDateTime().ToUniversalTime() : DateTime.MinValue;
         switch (origin.GetProperty("kind").GetString())
         {
             case "peer":
-                return new Prompt(true, origin.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
-                                  origin.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "", at, offset);
+                // The origin carries the text as body, except when the message reached an idle
+                // session: then only the content has it, inside <cross-session-message …>…</…>.
+                string body = origin.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "";
+                if (body.Length == 0)
+                {
+                    var content = queued ? attachment.GetProperty("prompt") : r.GetProperty("message").GetProperty("content");
+                    string raw = content.ValueKind == JsonValueKind.String ? content.GetString() ?? "" : HumanText(content);
+                    var inside = PeerMessage.Match(raw);
+                    body = inside.Success ? inside.Groups[1].Value.Trim() : Tag.Replace(raw, "").Trim();
+                }
+                return new Prompt(true, origin.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "", body, at, offset);
             case "human":
+                // Claude Code's own injected text is marked isMeta. A peer's message taken in
+                // mid-turn is too (Infoseite osis got Yaml's that way), so the check is for humans only.
+                if (!queued && r.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) return null;
                 break;
             default:
                 return null; // task-notification: Claude Code telling the session a background task ended
@@ -407,6 +418,9 @@ internal sealed class ClaudeSessionRegistry
                 .ToArray();
         return Tag.Replace(string.Join("\n", blocks), "");
     }
+
+    private static readonly System.Text.RegularExpressions.Regex PeerMessage = new(
+        "<cross-session-message[^>]*>([\\s\\S]*?)</cross-session-message>", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static readonly System.Text.RegularExpressions.Regex Tag = new("</?[A-Za-z_][^>\\n]*>", System.Text.RegularExpressions.RegexOptions.Compiled);
 
