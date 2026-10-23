@@ -487,7 +487,7 @@ internal sealed class AgentsView : ScrollableControl
     private static string ChildTip(SessionState.AgentChild c)
     {
         var lines = new List<string> { c.Description };
-        lines.Add(KindLabel(c.Kind) + (c.StartedUtc is { } s ? $", started {SessionState.FormatAge(s)} ago ({s.ToLocalTime():HH:mm:ss})" : ""));
+        lines.Add(KindLabel(c.Kind) + (c.StartedUtc is { } s ? $", started {SessionState.FormatAge(s)} ago" : ""));
         if (c.Activity.Length > 0) lines.Add($"now: {c.Activity}");
         if (c.Shell is { } shell)
             lines.Add(shell switch
@@ -497,7 +497,7 @@ internal sealed class AgentsView : ScrollableControl
                 { Matches: var n } => $"{n} bash processes run this command",
             });
         if (c.Kind == "shell")
-            lines.Add(c.LastOutputUtc is { } o ? $"last output {SessionState.FormatAge(o)} ago ({o.ToLocalTime():HH:mm:ss})" : "its output file is gone");
+            lines.Add(c.LastOutputUtc is { } o ? $"last output {SessionState.FormatAge(o)} ago" : "its output file is gone");
         if (c.Command is { Length: > 0 } command) { lines.Add(""); lines.Add(command); }
         return string.Join(Environment.NewLine, lines);
     }
@@ -540,7 +540,7 @@ internal sealed class AgentsView : ScrollableControl
     private Rectangle DismissZone(Rectangle message) => new(message.Right - Line - 6, message.Top + 2, Line + 4, Line + 2);
 
     private static string MessageTip(SessionState.AgentEdge e, Placed from) =>
-        $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago ({e.AtUtc.ToLocalTime():HH:mm:ss})"
+        $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago"
         + (e.Waiting ? "\nthe sender waits on a reply: it ends when the recipient's turn ends" : "")
         + (e.Summary.Length > 0 ? "\n\n" + e.Summary : "");
 
@@ -625,8 +625,8 @@ internal sealed class AgentsView : ScrollableControl
     {
         var prompt = n.Prompt!;
         var (text, images) = ClaudeSessionRegistry.PromptDetail(n.TranscriptPath, prompt);
-        string who = prompt.FromPeer ? $"from {prompt.From}" : "you";
-        var rows = new List<DetailPopup.Row> { new(prompt.FromPeer ? IconClaude : IconUser, text.Trim(), $"{who} · {prompt.AtUtc.ToLocalTime():HH:mm:ss}", null) };
+        var rows = new List<DetailPopup.Row> { new(prompt.FromPeer ? IconClaude : IconUser, (prompt.FromPeer ? $"{prompt.From}: " : "") + text.Trim(),
+            SessionState.FormatAge(prompt.AtUtc), null) };
         foreach (var bytes in images)
         {
             using var stream = new MemoryStream(bytes);
@@ -641,7 +641,7 @@ internal sealed class AgentsView : ScrollableControl
         n.Actions.Count == 0
             ? new() { new(ActivityIcon(n.HookEvent, n.ToolName), n.Doing, null, null) }
             : n.Actions.Select(a => new DetailPopup.Row(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool),
-                  TaskbarOverlay.Truncate(a.Text.Trim(), 400), a.AtUtc.ToLocalTime().ToString("HH:mm:ss"), null)).ToList();
+                  TaskbarOverlay.Truncate(a.Text.Trim(), 400), SessionState.FormatAge(a.AtUtc), null)).ToList();
 
     /// <summary>Click a session: go to its desktop, taking this window along. Right-click a session:
     /// close it. Right-click elsewhere: close the long-idle ones.</summary>
@@ -715,11 +715,13 @@ internal sealed class AgentsView : ScrollableControl
 /// </summary>
 internal sealed class DetailPopup : Form
 {
-    public sealed record Row(char? Icon, string Text, string? Note, Image? Image);
+    /// <summary><see cref="Age"/> ("2m") ends the first line in bold, the text wrapping around it;
+    /// a row with the same age as the one before it doesn't repeat it.</summary>
+    public sealed record Row(char? Icon, string Text, string? Age, Image? Image);
 
     private const int Pad = 8, RowGap = 6, MaxWidth = 520, MaxImageHeight = 420;
-    private readonly List<(Row Row, Rectangle Text, Rectangle Image)> _laid = new();
-    private readonly Font _font, _iconFont, _noteFont;
+    private readonly List<(Row Row, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder)> _laid = new();
+    private readonly Font _font, _iconFont, _ageFont;
 
     private const TextFormatFlags Wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
 
@@ -728,7 +730,7 @@ internal sealed class DetailPopup : Form
         // Its own 9 pt text, whatever the Agents tab is zoomed to.
         _font = new Font("Segoe UI", 9f);
         _iconFont = new Font("Segoe MDL2 Assets", 9f);
-        _noteFont = new Font("Segoe UI", 7.5f);
+        _ageFont = new Font("Segoe UI", 9f, FontStyle.Bold);
         var font = _font;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -739,31 +741,50 @@ internal sealed class DetailPopup : Form
 
         int iconW = font.Height + 4, textW = MaxWidth - 2 * Pad - iconW;
         int y = Pad;
+        string? previousAge = null;
         foreach (var row in rows)
         {
             if (row.Image is { } image)
             {
                 float scale = Math.Min(1f, Math.Min((float)(MaxWidth - 2 * Pad) / image.Width, (float)MaxImageHeight / image.Height));
                 var r = new Rectangle(Pad, y, (int)(image.Width * scale), (int)(image.Height * scale));
-                _laid.Add((row, Rectangle.Empty, r));
+                _laid.Add((row, Rectangle.Empty, r, null, "", ""));
                 y = r.Bottom + RowGap * 2;
                 continue;
             }
-            int noteH = row.Note != null ? _noteFont.Height : 0;
-            int textH = TextRenderer.MeasureText(row.Text, font, new Size(textW, int.MaxValue), Wrap).Height;
-            _laid.Add((row, new Rectangle(Pad + iconW, y + noteH, textW, textH), Rectangle.Empty));
-            y += noteH + textH + RowGap * 2;
+            string? age = row.Age == previousAge ? null : row.Age;
+            previousAge = row.Age ?? previousAge;
+            int ageW = age != null ? TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width : 0;
+            var (first, rest) = age != null ? SplitFirstLine(row.Text, font, textW - ageW - 6) : ("", row.Text);
+            int textH = (age != null ? font.Height : 0)
+                      + (rest.Length > 0 || age == null ? TextRenderer.MeasureText(rest, font, new Size(textW, int.MaxValue), Wrap).Height : 0);
+            _laid.Add((row, new Rectangle(Pad + iconW, y, textW, textH), Rectangle.Empty, age, first, rest));
+            y += textH + RowGap * 2;
         }
         var work = Screen.FromPoint(screenAt).WorkingArea;
         Size = new Size(MaxWidth, Math.Min(y - RowGap + Pad, work.Height - 20));
         Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
         FormClosed += (_, _) =>
         {
-            foreach (var (row, _, _) in _laid) row.Image?.Dispose();
+            foreach (var laid in _laid) laid.Row.Image?.Dispose();
             _font.Dispose();
             _iconFont.Dispose();
-            _noteFont.Dispose();
+            _ageFont.Dispose();
         };
+    }
+
+    private const TextFormatFlags Line = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+
+    /// <summary>The words of the text's first line that fit <paramref name="width"/>, and the rest.</summary>
+    private static (string First, string Remainder) SplitFirstLine(string text, Font font, int width)
+    {
+        int newline = text.IndexOf('\n');
+        string line = newline >= 0 ? text[..newline].TrimEnd('\r') : text;
+        int fit = line.Length;
+        while (fit > 0 && TextRenderer.MeasureText(line[..fit], font, Size.Empty, Line).Width > width)
+            fit = line.LastIndexOf(' ', fit - 1) is int space and > 0 ? space : fit - 1;
+        string rest = line[fit..].TrimStart() + (newline >= 0 ? "\n" + text[(newline + 1)..] : "");
+        return (line[..fit], rest.Trim());
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -785,20 +806,26 @@ internal sealed class DetailPopup : Form
         using var dotted = new Pen(TipCard.Border(false)) { DashStyle = DashStyle.Dot };
         for (int i = 0; i < _laid.Count; i++)
         {
-            var (row, text, image) = _laid[i];
+            var (row, text, image, age, first, rest) = _laid[i];
             if (i > 0)
             {
-                int top = (row.Image != null ? image.Top : text.Top - (row.Note != null ? _noteFont.Height : 0)) - RowGap;
+                int top = (row.Image != null ? image.Top : text.Top) - RowGap;
                 g.DrawLine(dotted, Pad, top, Width - Pad, top);
             }
             if (row.Image is { } img) { g.DrawImage(img, image); continue; }
-            if (row.Note is { } note)
-                TextRenderer.DrawText(g, note, _noteFont, new Point(text.Left, text.Top - _noteFont.Height), SystemColors.GrayText, TextFormatFlags.NoPrefix);
             if (row.Icon == AgentsView.IconClaude)
                 g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
             else if (row.Icon is { } icon)
                 TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, row.Text, _font, text, SystemColors.ControlText, Wrap);
+            int restTop = text.Top;
+            if (age != null)
+            {
+                int ageW = TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width;
+                TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
+                TextRenderer.DrawText(g, first, _font, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
+                restTop += _font.Height;
+            }
+            TextRenderer.DrawText(g, rest, _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
         }
     }
 }
