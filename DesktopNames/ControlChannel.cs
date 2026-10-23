@@ -61,7 +61,7 @@ internal sealed class ControlChannel
             ProjectsWindow().Agents.SetColumns(a.RequiredInt("columns"));
             return null;
         }));
-        _methods.Add(new("ui.agentsText", "Text size in the Agents tab, as Shift+wheel sets it", new[] { "step" }, "step: -5 to 10, 10% each", a =>
+        _methods.Add(new("ui.agentsText", "Text size in the Agents tab, as Shift+wheel sets it", new[] { "step" }, "step: -15 to 15, 10% each", a =>
         {
             ProjectsWindow().Agents.SetTextStep(a.RequiredInt("step"));
             return null;

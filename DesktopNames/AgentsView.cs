@@ -38,7 +38,6 @@ internal sealed class AgentsView : ScrollableControl
                                  List<(SessionState.AgentChild Child, Rectangle Box)> Children,
                                  List<(SessionState.AgentEdge Message, Rectangle Box)> Messages);
 
-    private const int MessagesShown = 3;
 
     public AgentsView(SessionState sessions, DesktopService desktops)
     {
@@ -48,7 +47,7 @@ internal sealed class AgentsView : ScrollableControl
         AutoScroll = true;
         BackColor = SystemColors.Window;
         _columns = Math.Clamp(Program.Host!.Settings.AgentsColumns, 2, 6);
-        _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -5, 10);
+        _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -15, 15);
         _sessions.Updated += OnUpdated;
         _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
         VisibleChanged += (_, _) => UpdateShimmer();
@@ -151,7 +150,7 @@ internal sealed class AgentsView : ScrollableControl
         int Order(Guid id) => desktops.FindIndex(d => d.Id == id) is int i and >= 0 ? i : int.MaxValue;
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
         // The messages each session sent: its newest few, under its agents and shells.
-        var sent = _graph.Edges.GroupBy(e => e.FromId).ToDictionary(g => g.Key, g => g.OrderBy(e => e.AtUtc).TakeLast(MessagesShown).ToList());
+        var sent = _graph.Edges.GroupBy(e => e.FromId).ToDictionary(g => g.Key, g => g.OrderBy(e => e.AtUtc).ToList());
         List<SessionState.AgentEdge> SentBy(SessionState.AgentNode n) => sent.TryGetValue(n.SessionId, out var list) ? list : new();
         int StackHeight(SessionState.AgentNode n) => BoxH + (n.Children.Count + SentBy(n).Count) * (ChildH + ChildGap);
 
@@ -217,7 +216,7 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>Text grows and shrinks with the boxes (300 px wide = the window's 9 pt).</summary>
     private void ScaleText(float scale)
     {
-        float size = Math.Clamp(9f * scale * (1 + _textStep / 10f), 6f, 24f);
+        float size = Math.Clamp(9f * scale * MathF.Pow(1.1f, _textStep), 5f, 30f);
         if (Math.Abs(Font.Size - size) < 0.1f) return;
         Font = new Font("Segoe UI", size);
         _iconFont.Dispose();
@@ -232,10 +231,10 @@ internal sealed class AgentsView : ScrollableControl
         SetColumns(_columns + (e.Delta > 0 ? -1 : 1));
     }
 
-    /// <summary>Text size steps of 10%, -5 to +10, remembered.</summary>
+    /// <summary>Text size steps of 10%, -15 to +15, remembered.</summary>
     public void SetTextStep(int step)
     {
-        step = Math.Clamp(step, -5, 10);
+        step = Math.Clamp(step, -15, 15);
         if (step == _textStep) return;
         _textStep = step;
         Program.Host!.Settings.AgentsTextStep = step;
@@ -525,7 +524,10 @@ internal sealed class AgentsView : ScrollableControl
             g.FillPath(brush, path);
             g.DrawPath(border, path);
         }
-        int lx = r.Left + 8, w = r.Width - 16, y = r.Top + 4;
+        // Top right: an X dismisses the tag.
+        TextRenderer.DrawText(g, "✕", Font, DismissZone(r), Color.FromArgb(60, 60, 60),
+            (Flags & ~TextFormatFlags.EndEllipsis) | TextFormatFlags.HorizontalCenter);
+        int lx = r.Left + 8, w = r.Width - 16 - Line, y = r.Top + 4;
         string corner = SessionState.FormatAge(e.AtUtc);
         using var bold = new Font(Font, FontStyle.Bold);
         int cornerW = TextRenderer.MeasureText(corner, bold).Width;
@@ -534,6 +536,8 @@ internal sealed class AgentsView : ScrollableControl
         string second = (e.Waiting ? "waiting for a reply · " : "") + (e.Summary.Length > 0 ? e.Summary : "message");
         TextRenderer.DrawText(g, second, Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
     }
+
+    private Rectangle DismissZone(Rectangle message) => new(message.Right - Line - 6, message.Top + 2, Line + 4, Line + 2);
 
     private static string MessageTip(SessionState.AgentEdge e, Placed from) =>
         $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago ({e.AtUtc.ToLocalTime():HH:mm:ss})"
@@ -645,6 +649,11 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseUp(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        if (e.Button == MouseButtons.Left && _placed.SelectMany(p => p.Messages).FirstOrDefault(m => DismissZone(m.Box).Contains(at)) is { Box.Width: > 0 } dismissed)
+        {
+            Run("message.dismiss", new { session = dismissed.Message.FromId, to = dismissed.Message.To });
+            return;
+        }
         if (e.Button == MouseButtons.Left && _placed.FirstOrDefault(p => p.Box.Contains(at)) is { } clicked)
         {
             try { GoTo(clicked.Node); }

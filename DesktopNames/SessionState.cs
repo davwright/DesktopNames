@@ -204,15 +204,26 @@ internal sealed class SessionState
     /// sender's own subagents (<see cref="To"/> is its agent id).</summary>
     public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc);
 
-    private static readonly TimeSpan MessageMemory = TimeSpan.FromMinutes(30);
+    // Kept until the user dismisses them; a later message on the same line replaces the earlier one.
     private readonly List<PeerMessage> _messages = new();
 
     public void RecordMessage(PeerMessage m)
     {
-        _messages.RemoveAll(x => DateTime.UtcNow - x.AtUtc > MessageMemory);
+        _messages.RemoveAll(x => x.Source == m.Source && x.FromId == m.FromId && x.To == m.To);
         _messages.Add(m);
         Updated?.Invoke();
     }
+
+    /// <summary>The user dismissed the tag of <paramref name="fromId"/>'s message to <paramref name="to"/>.</summary>
+    public void DismissMessage(string fromId, string to)
+    {
+        if (_messages.RemoveAll(m => m.FromId == fromId && m.To == to) == 0)
+            throw new ArgumentException($"no message from {fromId} to '{to}'");
+        Updated?.Invoke();
+    }
+
+    private bool Waits(PeerMessage m) =>
+        m.ToSessionId != null && _waits.TryGetValue((m.Source, m.FromId), out var w) && w.PeerId == m.ToSessionId;
 
     /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
     /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
@@ -244,12 +255,7 @@ internal sealed class SessionState
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],
                 e.RemoteControl)))
             .ToList();
-        var edges = _messages.Where(m => DateTime.UtcNow - m.AtUtc <= MessageMemory)
-            // A later message on the same line replaces the earlier one.
-            .GroupBy(m => (m.FromId, m.To)).Select(g => g.MaxBy(m => m.AtUtc)!)
-            .Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.AtUtc,
-                m.ToSessionId != null && _waits.TryGetValue((m.Source, m.FromId), out var w) && w.PeerId == m.ToSessionId))
-            .ToList();
+        var edges = _messages.Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.AtUtc, Waits(m))).ToList();
         return new AgentGraph(nodes, edges);
     }
 
@@ -587,6 +593,17 @@ internal sealed class SessionState
                 sb.Append('\n').Append(TipBg).Append(w.Kind).Append("  ").Append(TaskbarOverlay.Truncate(w.Description, 70))
                   .Append('\t').Append(w.StartedUtc is { } started ? FormatAge(started) : "");
                 if (w.Activity.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(w.Activity, 80));
+            }
+        }
+        var sent = _messages.Where(m => m.Source == e.Source && m.FromId == e.SessionId).OrderBy(m => m.AtUtc).ToList();
+        if (sent.Count > 0)
+        {
+            sb.Append('\n').Append(TipBgHead).Append($"✉ {sent.Count} message{(sent.Count == 1 ? "" : "s")} sent");
+            foreach (var m in sent)
+            {
+                sb.Append('\n').Append(TipBg).Append("to ").Append(m.To).Append(Waits(m) ? " · waiting for a reply" : "")
+                  .Append('\t').Append(FormatAge(m.AtUtc));
+                if (m.Summary.Length > 0) sb.Append('\n').Append(TipBgSub).Append(TaskbarOverlay.Truncate(m.Summary, 80));
             }
         }
         if (!string.IsNullOrEmpty(e.Cwd)) sb.Append('\n').Append(TipDim).Append(e.Cwd);

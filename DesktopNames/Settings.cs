@@ -111,7 +111,7 @@ internal sealed class Settings
     /// <summary>Session boxes per row in the Agents tab (2–6), set with Ctrl+wheel; text scales with them.</summary>
     public int AgentsColumns { get; set; } = 4;
 
-    /// <summary>Text size in the Agents tab, in steps of 10% on top of the column scaling (Shift+wheel).</summary>
+    /// <summary>Text size in the Agents tab, in steps of 10% (-15 to 15) on top of the column scaling (Shift+wheel).</summary>
     public int AgentsTextStep { get; set; }
 
     /// <summary>

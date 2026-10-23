@@ -815,6 +815,8 @@ internal sealed class HostForm : Form
         }));
         c.Add(new("claude.close", "End an idle Claude session gracefully (Ctrl+Break: it runs SessionEnd and exits); /resume brings it back",
             new[] { "session" }, "session: its name (osis-fixes-d3) or the start of its id", a => CloseClaude(ClaudeSessionRegistry.FindRegistered(a.RequiredStr("session")))));
+        c.Add(new("message.dismiss", "Dismiss the tag of a message one session sent another (Agents tab)", new[] { "session", "to" },
+            "session: the sender's id; to: the recipient as the tag names it", a => { _sessionState!.DismissMessage(a.RequiredStr("session"), a.RequiredStr("to")); return null; }));
         c.Add(new("claude.idle", "Running Claude sessions idle for at least some hours, as Claude Code reports them", new[] { "hours" }, "hours: idle at least this long", a =>
             IdleClaudes(a.RequiredInt("hours")).Select(s => new { s.Name, session = s.SessionId[..8], s.Pid, idleSince = s.StatusSinceUtc.ToLocalTime() })));
         c.Add(new("claude.closeIdle", "End every Claude session idle for at least some hours (claude.idle lists them)", new[] { "hours" }, "hours: idle at least this long", a =>
