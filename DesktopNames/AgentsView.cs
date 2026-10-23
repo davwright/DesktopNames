@@ -21,6 +21,8 @@ internal sealed class AgentsView : ScrollableControl
 
     // Boxes per row (2–6, Ctrl+wheel) set the box width; the text scales with it.
     private int _columns;
+    // Shift+wheel: the text 10% larger or smaller per step, on top of that.
+    private int _textStep;
     private int BoxW = 300;
     private int ChildW => BoxW - 20;
     private Font _iconFont = new("Segoe MDL2 Assets", 9f);
@@ -46,6 +48,7 @@ internal sealed class AgentsView : ScrollableControl
         AutoScroll = true;
         BackColor = SystemColors.Window;
         _columns = Math.Clamp(Program.Host!.Settings.AgentsColumns, 2, 6);
+        _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -5, 10);
         _sessions.Updated += OnUpdated;
         _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
         VisibleChanged += (_, _) => UpdateShimmer();
@@ -214,7 +217,7 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>Text grows and shrinks with the boxes (300 px wide = the window's 9 pt).</summary>
     private void ScaleText(float scale)
     {
-        float size = Math.Clamp(9f * scale, 7f, 15f);
+        float size = Math.Clamp(9f * scale * (1 + _textStep / 10f), 6f, 24f);
         if (Math.Abs(Font.Size - size) < 0.1f) return;
         Font = new Font("Segoe UI", size);
         _iconFont.Dispose();
@@ -224,8 +227,21 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>Ctrl+wheel: fewer, larger boxes per row, or more, smaller ones.</summary>
     protected override void OnMouseWheel(MouseEventArgs e)
     {
+        if (ModifierKeys == Keys.Shift) { SetTextStep(_textStep + (e.Delta > 0 ? 1 : -1)); return; }
         if (ModifierKeys != Keys.Control) { base.OnMouseWheel(e); return; }
         SetColumns(_columns + (e.Delta > 0 ? -1 : 1));
+    }
+
+    /// <summary>Text size steps of 10%, -5 to +10, remembered.</summary>
+    public void SetTextStep(int step)
+    {
+        step = Math.Clamp(step, -5, 10);
+        if (step == _textStep) return;
+        _textStep = step;
+        Program.Host!.Settings.AgentsTextStep = step;
+        Program.Host.Settings.Save();
+        Reflow();
+        Invalidate();
     }
 
     /// <summary>Boxes per row, 2–6, remembered.</summary>
