@@ -65,6 +65,9 @@ internal sealed class SessionEntry
     /// PreToolUse events repaint the desktop orange over a live question.</summary>
     public StateKind Activity { get; set; }
 
+    /// <summary>While compacting: the activity it returns to afterwards.</summary>
+    public StateKind? ActivityBeforeCompact { get; set; }
+
     /// <summary>Questions Claude is blocked on, oldest first. A list rather than one slot
     /// because prompts can queue: answering the second must not clear the first.</summary>
     public List<PendingAsk> Asks { get; } = new();
@@ -1030,8 +1033,15 @@ internal sealed class SessionState
             };
             list.Add(existing);
         }
+        // A compaction runs between turns (/compact) or inside one: afterwards the session is as busy as before it.
+        else if (hookEvent == "PostCompact" && existing.ActivityBeforeCompact is { } before)
+        {
+            existing.Activity = before;
+            existing.ActivityBeforeCompact = null;
+        }
         else if (activity.HasValue)
         {
+            if (hookEvent == "PreCompact") existing.ActivityBeforeCompact = existing.Activity;
             existing.Activity = activity.Value;
         }
 
@@ -1046,7 +1056,7 @@ internal sealed class SessionState
         existing.Consumed = false;
         existing.HookEvent = hookEvent;
         existing.ToolName = toolName;
-        existing.BackgroundActive = backgroundActive;
+        if (hookEvent is not ("PreCompact" or "PostCompact")) existing.BackgroundActive = backgroundActive;
         if (hookEvent == "SessionStart") existing.Background.Clear();
         if (hookEvent == "Stop") ReconcileBackground(existing, backgroundTasks);
         if (!string.IsNullOrEmpty(cwd)) existing.Cwd = cwd;

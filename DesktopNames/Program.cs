@@ -657,6 +657,7 @@ internal sealed class HostForm : Form
                 // It persists until the source sends `idle` (e.g. SessionEnd hook) or
                 // the liveness sweep reaps a dead sessionPid.
                 RefreshAllOverlays();
+                if (_projects?.Dialog is { } open && open.HasAgents) open.Agents.Invalidate();
             }
         };
         _desktopPoll.Start();

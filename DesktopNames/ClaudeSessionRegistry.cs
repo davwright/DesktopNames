@@ -789,3 +789,62 @@ internal sealed class ClaudeSessionRegistry
         return ports;
     }
 }
+
+/// <summary>
+/// The plan's usage limits as Claude Code's /usage shows them, from the endpoint it uses, with the
+/// signed-in token Claude Code keeps fresh in ~/.claude/.credentials.json. Fetched when asked (the
+/// window opens, a turn ends), at most once a minute.
+/// </summary>
+internal static class PlanUsage
+{
+    public sealed record Limits(int Session, DateTime SessionResetsUtc, int Week, DateTime WeekResetsUtc);
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
+    private static DateTime _fetchedUtc;
+    private static bool _fetching;
+
+    public static Limits? Current { get; private set; }
+    public static string? Error { get; private set; }
+    /// <summary>Raised on a worker thread.</summary>
+    public static event Action? Changed;
+
+    public static void Refresh()
+    {
+        if (_fetching || DateTime.UtcNow - _fetchedUtc < TimeSpan.FromMinutes(1)) return;
+        _fetching = true;
+        _fetchedUtc = DateTime.UtcNow;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                string credentials = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
+                using var cred = JsonDocument.Parse(File.ReadAllText(credentials));
+                string token = cred.RootElement.GetProperty("claudeAiOauth").GetProperty("accessToken").GetString()!;
+                using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.anthropic.com/api/oauth/usage");
+                request.Headers.Add("Authorization", "Bearer " + token);
+                request.Headers.Add("anthropic-beta", "oauth-2025-04-20");
+                using var response = await Http.SendAsync(request);
+                string body = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"HTTP {(int)response.StatusCode}");
+                using var doc = JsonDocument.Parse(body);
+                JsonElement five = doc.RootElement.GetProperty("five_hour"), week = doc.RootElement.GetProperty("seven_day");
+                Current = new((int)Math.Round(five.GetProperty("utilization").GetDouble()), five.GetProperty("resets_at").GetDateTime().ToUniversalTime(),
+                              (int)Math.Round(week.GetProperty("utilization").GetDouble()), week.GetProperty("resets_at").GetDateTime().ToUniversalTime());
+                Error = null;
+            }
+            catch (Exception ex)
+            {
+                Error = ex.Message;
+                Log.Pipe($"plan usage failed: {ex.Message}");
+            }
+            finally { _fetching = false; }
+            Changed?.Invoke();
+        });
+    }
+
+    /// <summary>"usage: session 11% (to 13:49) · week 24% (to Thu 11:59)".</summary>
+    public static string Text() =>
+        Current is { } c
+            ? $"usage: session {c.Session}% (to {c.SessionResetsUtc.ToLocalTime():HH:mm}) · week {c.Week}% (to {c.WeekResetsUtc.ToLocalTime():ddd HH:mm})"
+            : Error != null ? $"usage: unavailable ({Error})" : "usage: …";
+}

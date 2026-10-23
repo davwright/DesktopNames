@@ -836,6 +836,7 @@ internal sealed class ProjectsDialog : Form
     /// <summary>For the control channel: the sessions, children and message arrows the Agents tab shows.</summary>
     public void ScrollAgents(int y) => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).ScrollTo(y);
 
+    public bool HasAgents => _agents != null;
     public AgentsView Agents => _agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)");
 
     public object AgentsShown() => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).Describe();
@@ -870,7 +871,7 @@ internal sealed class ProjectsDialog : Form
         Font = new Font("Segoe UI", 9f);
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = false;
-        MaximizeBox = false;
+        MaximizeBox = true;
         ShowInTaskbar = false;
         TopMost = true;
         KeyPreview = true;
@@ -959,6 +960,9 @@ internal sealed class ProjectsDialog : Form
         Controls.Add(menu);
         MainMenuStrip = menu;
         CancelButton = cancel;
+        PlanUsage.Changed += OnPlanUsage;
+        Disposed += (_, _) => PlanUsage.Changed -= OnPlanUsage;
+        PlanUsage.Refresh();
 
         _search.TextChanged += (_, _) => Fill();
         _search.KeyDown += OnSearchKeyDown;
@@ -980,9 +984,18 @@ internal sealed class ProjectsDialog : Form
     }
 
     /// <summary>The title names the screen setup DesktopNames recognises from the monitors plugged in.</summary>
+    private void OnPlanUsage() => BeginInvoke(UpdateTitle);
+
+    /// <summary>Esc closes the window on either tab: the Cancel button sits on the Projects tab and can't be clicked from Agents.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape && _editor == null) { Finish(DialogResult.Cancel); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     private void UpdateTitle()
     {
-        string title = $"DesktopNames — {_switcher.ScreenSetupTitle}";
+        string title = $"DesktopNames — {_switcher.ScreenSetupTitle} — {PlanUsage.Text()}";
         if (Text != title) Text = title;
     }
 

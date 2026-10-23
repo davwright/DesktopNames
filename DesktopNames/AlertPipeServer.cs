@@ -194,6 +194,7 @@ internal sealed class AlertPipeServer : IDisposable
                 try
                 {
                     _host.RecordEvent(msg.SessionId ?? "", EventLabel(msg), msg.HookEvent ?? msg.State ?? "?", msg.ToolName ?? "");
+                    if (msg.HookEvent == "Stop") PlanUsage.Refresh();
                     var (target, userHint, viaSession) = ResolveDesktop(msg);
 
                     // Prefer the most specific human-readable line ClaudeHook can give us so the
@@ -347,9 +348,22 @@ internal sealed class AlertPipeServer : IDisposable
             // ClaudeHook describes it as "Message <to>: <summary>".
             string summary = msg.ToolDescription is { } d && d.IndexOf(": ", StringComparison.Ordinal) is int colon and >= 0 ? d[(colon + 2)..] : "";
             _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, DateTime.UtcNow));
+            LogPeerMessage(msg, peerId);
         }
         if (removed || msg.HookEvent is "Stop" or "StopFailure")
             _state.EndPeerWork(source, sid, gone: removed);
+    }
+
+    /// <summary>Every message one session sends another, appended to peer-messages.jsonl: what we
+    /// learn the messaging from, before DN takes part in it.</summary>
+    private static void LogPeerMessage(AlertMessage msg, string? peerId)
+    {
+        string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopNames", "peer-messages.jsonl");
+        File.AppendAllText(path, JsonSerializer.Serialize(new
+        {
+            at = DateTime.UtcNow, from = msg.SessionId, fromCwd = msg.Cwd, to = msg.SendTo, toSession = peerId, hook = msg.HookEvent,
+            tool = msg.ToolName, description = msg.ToolDescription,
+        }) + "\n");
     }
 
     /// <summary>Short, recognizable label for the tray event feed: cwd basename, else title,
@@ -470,6 +484,10 @@ internal sealed class AlertPipeServer : IDisposable
                     // carried on the entry and shown as ⏳ next to the green.
                     t = new(StateKind.Ready, AskChange.Clear);
                     return true;
+                case "PreCompact":
+                    t = new(StateKind.Busy, AskChange.None); return true;
+                case "PostCompact":
+                    t = new(null, AskChange.None); return true;
                 case "StopFailure":
                     t = new(StateKind.Error, AskChange.Clear); return true;
                 case "SessionEnd":

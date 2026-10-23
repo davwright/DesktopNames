@@ -134,7 +134,7 @@ internal sealed class AgentsView : ScrollableControl
     // InnerGap = Gap + 2 * GroupPad: boxes inside a frame sit on the same columns as single-box frames.
     private const int GroupPad = 8, InnerGap = Gap + 2 * GroupPad;
     private int GroupTitle => Font.Height + 8;
-    private List<(string Label, Rectangle Frame)> _groups = new();
+    private List<(Guid Desktop, string Label, Rectangle Frame)> _groups = new();
 
     /// <summary>
     /// One frame per desktop, in desktop order, flowing left to right and wrapping into bands. Inside
@@ -158,7 +158,7 @@ internal sealed class AgentsView : ScrollableControl
         ScaleText(BoxW / 300f);
         int x = Pad, top = Pad, bandHeight = 0;
         var placed = new List<Placed>();
-        var groups = new List<(string, Rectangle)>();
+        var groups = new List<(Guid, string, Rectangle)>();
         // Every desktop that no longer exists is one "no desktop" frame.
         Guid GroupOf(Guid id) => Order(id) == int.MaxValue ? Guid.Empty : id;
         foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Order(g.Key)))
@@ -197,16 +197,16 @@ internal sealed class AgentsView : ScrollableControl
                 rowTop += row.Max(StackHeight) + InnerGap;
             }
             var frame = new Rectangle(x, top, frameW, rowTop - InnerGap + GroupPad - top);
-            groups.Add((Label(group.Key), frame));
+            groups.Add((group.Key, Label(group.Key), frame));
             bandHeight = Math.Max(bandHeight, frame.Height);
             x += frameW + Gap;
         }
         _placed = placed;
         _groups = groups;
-        _live = placed.Where(p => p.Node.State == StateKind.Busy)
+        _live = placed.Where(p => Working(p.Node))
             .SelectMany(p => p.Children.Where(c => c.Child.Activity.Length > 0)
                 .Select(c => new Rectangle(c.Box.Left, c.Box.Top + 4 + Line, c.Box.Width, Line))
-                .Prepend(ActionZone(p.Box))).ToList();
+                .Concat(p.Node.State == StateKind.Busy ? new[] { ActionZone(p.Box) } : Array.Empty<Rectangle>())).ToList();
         UpdateShimmer();
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
     }
@@ -250,14 +250,18 @@ internal sealed class AgentsView : ScrollableControl
             TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText, Flags);
             return;
         }
+        Guid here = _desktops.GetCurrentDesktopId();
         using (var frameFill = new SolidBrush(Color.FromArgb(246, 246, 248)))
         using (var framePen = new Pen(Color.FromArgb(205, 205, 212)))
+        using (var hereFill = new SolidBrush(Color.FromArgb(225, 236, 250)))
+        using (var herePen = new Pen(Color.FromArgb(0, 120, 215), 2f))
         using (var title = new Font(Font, FontStyle.Bold))
-            foreach (var (label, frame) in _groups)
+            foreach (var (desktop, label, frame) in _groups)
             {
+                // The desktop the user is on stands out.
                 using var path = TaskbarOverlay.RoundedRect(frame, 8);
-                g.FillPath(frameFill, path);
-                g.DrawPath(framePen, path);
+                g.FillPath(desktop == here ? hereFill : frameFill, path);
+                g.DrawPath(desktop == here ? herePen : framePen, path);
                 TextRenderer.DrawText(g, label, title, new Rectangle(frame.Left + GroupPad, frame.Top + 3, frame.Width - 2 * GroupPad, Font.Height + 2),
                     SystemColors.GrayText, Flags);
             }
@@ -386,6 +390,7 @@ internal sealed class AgentsView : ScrollableControl
         "Stop" or "SubagentStop" => IconReply,
         "Notification" or "PermissionRequest" => IconAsk,
         "PreToolUse" or "PostToolUse" => ToolIcon(tool),
+        "PreCompact" or "PostCompact" => IconCompact,
         _ => IconThink,
     };
 
@@ -404,9 +409,13 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>A session's colour: its state, faded when it is a leftover.</summary>
     private static Color Fill(SessionState.AgentNode n)
     {
-        Color fill = n.State == StateKind.None ? SystemColors.Control : SessionFlyout.StateColor(n.State);
+        Color fill = n.State == StateKind.None ? SystemColors.Control : SessionFlyout.StateColor(Working(n) ? StateKind.Busy : n.State);
         return DateTime.UtcNow - n.LastActiveUtc > Stale ? Blend(fill, SystemColors.Control, 0.65f) : fill;
     }
+
+    /// <summary>Busy, or its turn ended while a subagent it started still works: it waits on that agent, not on the user.</summary>
+    private static bool Working(SessionState.AgentNode n) =>
+        n.State == StateKind.Busy || (n.State == StateKind.Ready && n.Children.Any(c => c.Kind == "agent"));
 
     private static Color Blend(Color a, Color b, float toB) => Color.FromArgb(
         (int)(a.R + (b.R - a.R) * toB), (int)(a.G + (b.G - a.G) * toB), (int)(a.B + (b.B - a.B) * toB));
@@ -478,6 +487,7 @@ internal sealed class AgentsView : ScrollableControl
         return string.Join(Environment.NewLine, lines);
     }
 
+    private const char IconCompact = '';
     private const char IconSent = '';
 
     /// <summary>Who a message went to: the session's name, or for one of the sender's own subagents, what that agent does.</summary>
@@ -613,12 +623,19 @@ internal sealed class AgentsView : ScrollableControl
             : n.Actions.Select(a => new DetailPopup.Row(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool),
                   TaskbarOverlay.Truncate(a.Text.Trim(), 400), a.AtUtc.ToLocalTime().ToString("HH:mm:ss"), null)).ToList();
 
-    /// <summary>Right-click a session: close it. Right-click elsewhere: close the long-idle ones.</summary>
+    /// <summary>Click a session: go to its desktop, taking this window along. Right-click a session:
+    /// close it. Right-click elsewhere: close the long-idle ones.</summary>
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e.Button != MouseButtons.Right) return;
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        if (e.Button == MouseButtons.Left && _placed.FirstOrDefault(p => p.Box.Contains(at)) is { } clicked)
+        {
+            try { GoTo(clicked.Node); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            return;
+        }
+        if (e.Button != MouseButtons.Right) return;
         var menu = new ContextMenuStrip();
         menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         if (_placed.FirstOrDefault(p => p.Box.Contains(at)) is { } hit)
@@ -635,6 +652,16 @@ internal sealed class AgentsView : ScrollableControl
                     () => Run("claude.closeIdle", new { hours = 24 }));
             });
         menu.Show(this, e.Location);
+    }
+
+    private void GoTo(SessionState.AgentNode n)
+    {
+        var target = _desktops.GetDesktops().FirstOrDefault(d => d.Id == n.DesktopId)
+            ?? throw new InvalidOperationException($"\"{n.Title}\" is on a desktop that no longer exists.");
+        IntPtr window = FindForm()!.Handle;
+        if (_desktops.GetDesktopForWindow(window) != target.Id && !_desktops.MoveWindowToDesktop(window, target.Id))
+            throw new InvalidOperationException($"Could not take the DesktopNames window to desktop {target.Index + 1}.");
+        Program.Host!.Commands.Execute("desktop.switch", System.Text.Json.JsonSerializer.SerializeToElement(new { n = target.Index + 1 }));
     }
 
     private void Confirm(string question, Action act)
