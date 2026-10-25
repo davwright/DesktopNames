@@ -473,12 +473,13 @@ internal sealed class AlertPipeServer : IDisposable
                     // ever arrives. Unknown subtypes raise a question (be loud, not silent).
                     if (string.Equals(msg.NotificationKind, "auth_success", StringComparison.Ordinal))
                     { t = new(null, AskChange.None); return true; }
-                    t = new(null, AskChange.Set); return true;
+                    // idle_prompt is Claude Code noticing it has sat waiting: a guess, not a question.
+                    t = new(null, msg.NotificationKind == "idle_prompt" ? AskChange.SetGuess : AskChange.Set); return true;
                 case "Stop":
                     // The turn ended, so anything pending is resolved — except a question
                     // Claude asked in its closing message, which is a new one.
                     if (msg.LastMessageEndsWithQuestion == true)
-                    { t = new(StateKind.Ready, AskChange.Set); return true; }
+                    { t = new(StateKind.Ready, AskChange.SetGuess); return true; }
                     // The turn ended, so Claude is open to input even if background work (agents,
                     // run_in_background Bash, a Monitor) still runs: Ready. BackgroundActive is
                     // carried on the entry and shown as ⏳ next to the green.

@@ -22,8 +22,11 @@ internal enum AskChange
 {
     /// <summary>Event says nothing about a pending question (ordinary tool traffic).</summary>
     None,
-    /// <summary>Claude is now blocked on the user (permission prompt, blocking tool, Stop-with-question).</summary>
+    /// <summary>Claude is now blocked on the user (permission prompt, blocking tool).</summary>
     Set,
+    /// <summary>Claude may be waiting on the user — its turn ended in "?", or the idle notice: shown as a
+    /// question, but not rung as one.</summary>
+    SetGuess,
     /// <summary>Turn boundary — whatever was pending is resolved.</summary>
     Clear,
     /// <summary>A tool finished; clears the pending question only if it's the one that was gated.</summary>
@@ -44,6 +47,8 @@ internal sealed class PendingAsk
     /// background tool traffic can update the entry's Body without losing the question.</summary>
     public string Body { get; init; } = "";
     public DateTime SinceUtc { get; init; }
+    /// <summary>Inferred (<see cref="AskChange.SetGuess"/>), not a prompt or a question tool.</summary>
+    public bool Guess { get; init; }
 
     public bool Matches(string toolName, string description) =>
         ToolName == toolName &&
@@ -922,8 +927,14 @@ internal sealed class SessionState
     /// cwd basename (recognizable workspace name), falling back to the title then the session id.
     /// </summary>
     /// <summary>A session on the desktop finished its turn with no background shells or agents still running.</summary>
+    /// A turn that ended in "?" counts as finished: only a real question rings as one.
     public bool HasDoneSession(Guid desktopId) =>
-        _byDesktop.TryGetValue(desktopId, out var list) && list.Any(e => !e.Consumed && e.State == StateKind.Ready && !e.BackgroundActive);
+        _byDesktop.TryGetValue(desktopId, out var list)
+        && list.Any(e => !e.Consumed && e.Activity == StateKind.Ready && !e.BackgroundActive && e.Asks.All(a => a.Guess));
+
+    /// <summary>A session on the desktop waits on a real question: a permission prompt, AskUserQuestion, a plan to approve.</summary>
+    public bool HasRealAsk(Guid desktopId) =>
+        _byDesktop.TryGetValue(desktopId, out var list) && list.Any(e => !e.Consumed && e.Asks.Any(a => !a.Guess));
 
     public List<SessionRef> GetSessions(Guid desktopId)
     {
@@ -1112,6 +1123,7 @@ internal sealed class SessionState
         switch (ask)
         {
             case AskChange.Set:
+            case AskChange.SetGuess:
                 // Re-notification for the same prompt is common (Claude re-emits while it
                 // waits), so only add one entry per distinct question.
                 if (!entry.Asks.Any(a => a.Matches(toolName, toolDescription)))
@@ -1121,6 +1133,7 @@ internal sealed class SessionState
                         Description = toolDescription,
                         Body = body,
                         SinceUtc = DateTime.UtcNow,
+                        Guess = ask == AskChange.SetGuess,
                     });
                 break;
 

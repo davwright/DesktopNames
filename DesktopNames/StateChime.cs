@@ -42,7 +42,7 @@ internal sealed class StateChime
     private readonly SessionState _state;
     private readonly DesktopService _desktop;
     private readonly Settings _settings;
-    private readonly Dictionary<Guid, (StateKind State, bool Done)> _prev = new();
+    private readonly Dictionary<Guid, (bool Asked, bool Done)> _prev = new();
 
     // Chimes are serialised through a single worker so two never overlap. The worker plays
     // one cue, waits a gap, then takes the next — so a burst of state changes is heard as a
@@ -64,16 +64,17 @@ internal sealed class StateChime
     private void OnStateChanged(Guid desktopId)
     {
         var (now, _, _) = _state.GetAggregate(desktopId);
-        bool done = now == StateKind.Ready && _state.HasDoneSession(desktopId);
-        var was = _prev.TryGetValue(desktopId, out var p) ? p : (State: StateKind.None, Done: false);
-        _prev[desktopId] = (now, done);
+        bool asked = _state.HasRealAsk(desktopId);
+        bool done = now is StateKind.Ready or StateKind.Asking && _state.HasDoneSession(desktopId);
+        var was = _prev.TryGetValue(desktopId, out var p) ? p : (Asked: false, Done: false);
+        _prev[desktopId] = (asked, done);
 
         if (!_settings.AlertAskingChimeEnabled) return;
-        // Ring on entry into Asking, and when a turn is done with nothing left running behind it:
-        // not at a Stop that leaves shells or agents going (⏳), but once they have finished.
-        // Busy/Error/None are silent.
+        // Ring when a real question comes up (a permission prompt, AskUserQuestion, a plan to approve:
+        // not a turn that merely ends in "?"), and when a turn is done with nothing left running behind
+        // it: not at a Stop that leaves shells or agents going (⏳), but once they have finished.
         bool ascending;
-        if (now == StateKind.Asking && was.State != StateKind.Asking) ascending = true;
+        if (asked && !was.Asked) ascending = true;
         else if (done && !was.Done) ascending = false;
         else return;
 
