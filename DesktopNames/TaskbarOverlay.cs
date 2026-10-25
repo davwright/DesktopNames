@@ -87,14 +87,19 @@ internal sealed class TaskbarOverlay : Form
 
 
         _contextMenu = new ContextMenuStrip();
-        _contextMenu.Opening += (_, _) =>
+        _contextMenu.Opening += (_, e) =>
         {
             BuildContextMenu();
+            // An empty ContextMenuStrip cancels its own opening, and it is empty until built here:
+            // without this the first right-click after every start did nothing.
+            e.Cancel = false;
+            Log.Ui($"overlay menu opening: {_contextMenu.Items.Count} items for {_rightClickedDesktop?.Name ?? "no desktop"}");
             _menuOpenForeground = NativeMethods.GetForegroundWindow();
             _menuBlurTimer.Start();
         };
-        _contextMenu.Closed += (_, _) =>
+        _contextMenu.Closed += (_, e) =>
         {
+            Log.Ui($"overlay menu closed: {e.CloseReason}");
             _menuBlurTimer.Stop();
             var after = _afterMenuClosed;
             _afterMenuClosed = null;
@@ -1194,6 +1199,19 @@ internal sealed class TaskbarOverlay : Form
         UpdateStateTooltip(i);
         return true;
     }
+
+    /// <summary>For the control channel: right-click a desktop's button, as the mouse does.</summary>
+    public bool RightClickDesktop(Guid desktopId)
+    {
+        int i = _buttons.FindIndex(b => b.Desktop.Id == desktopId);
+        if (i < 0 || !Visible) return false;
+        var at = new Point(_buttons[i].Bounds.Left + _buttons[i].Bounds.Width / 2, _buttons[i].Bounds.Top + _buttons[i].Bounds.Height / 2);
+        OnMouseDown(this, new MouseEventArgs(MouseButtons.Right, 1, at.X, at.Y, 0));
+        OnMouseUp(this, new MouseEventArgs(MouseButtons.Right, 1, at.X, at.Y, 0));
+        return true;
+    }
+
+    public IntPtr? MenuHandle => _contextMenu.Visible ? _contextMenu.Handle : null;
 
     public IntPtr? CardHandle => _card is { IsDisposed: false } c ? c.Handle : null;
 

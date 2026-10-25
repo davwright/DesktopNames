@@ -164,7 +164,11 @@ internal sealed class AgentsView : ScrollableControl
         var groups = new List<(Guid, string, Rectangle)>();
         // Every desktop that no longer exists is one "no desktop" frame.
         Guid GroupOf(Guid id) => Order(id) == int.MaxValue ? Guid.Empty : id;
-        foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Order(g.Key)))
+        // Desktops where something is happening first, then the ones open to input, the greyed ones last; desktop order within each.
+        int Tier(IEnumerable<SessionState.AgentNode> ns) =>
+            ns.Any(n => Working(n) || n.State is StateKind.Asking or StateKind.Error) ? 0
+            : ns.Any(n => n.State != StateKind.None && DateTime.UtcNow - n.LastActiveUtc <= Stale) ? 1 : 2;
+        foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
         {
             var nodes = group.OrderByDescending(n => n.LastActiveUtc).ToList();  // most recently active first
             int cols = Math.Min(nodes.Count, maxCols);
@@ -297,6 +301,13 @@ internal sealed class AgentsView : ScrollableControl
                 DrawMessage(g, message, r, p);
             }
             DrawSession(g, p);
+        }
+        // Hovering a message tag outlines the session it went to.
+        if (_placed.FirstOrDefault(p => p.Node.SessionId == _highlight) is { } to)
+        {
+            using var outline = new Pen(Color.FromArgb(0, 120, 215), 3f);
+            using var path = TaskbarOverlay.RoundedRect(Rectangle.Inflate(to.Box, 3, 3), 8);
+            g.DrawPath(outline, path);
         }
     }
 
@@ -506,9 +517,9 @@ internal sealed class AgentsView : ScrollableControl
     private const char IconCompact = '';
     private const char IconSent = '';
 
-    /// <summary>Who a message went to: the session's name, or for one of the sender's own subagents, what that agent does.</summary>
-    private static string Recipient(SessionState.AgentEdge e, Placed from) =>
-        e.ToSessionId != null ? e.To
+    /// <summary>Who a message went to: the session's title, or for one of the sender's own subagents, what that agent does.</summary>
+    private string Recipient(SessionState.AgentEdge e, Placed from) =>
+        e.ToSessionId != null ? _graph.Nodes.FirstOrDefault(n => n.SessionId == e.ToSessionId)?.Title ?? e.To
         : from.Children.FirstOrDefault(c => c.Child.Id == e.To).Child is { } agent ? $"subagent: {agent.Description}" : $"subagent {e.To}";
 
     /// <summary>
@@ -540,7 +551,7 @@ internal sealed class AgentsView : ScrollableControl
 
     private Rectangle DismissZone(Rectangle message) => new(message.Right - Line - 6, message.Top + 2, Line + 4, Line + 2);
 
-    private static string MessageTip(SessionState.AgentEdge e, Placed from) =>
+    private string MessageTip(SessionState.AgentEdge e, Placed from) =>
         $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago"
         + (e.Waiting ? "\nthe sender waits on a reply: it ends when the recipient's turn ends" : "")
         + (e.Summary.Length > 0 ? "\n\n" + e.Summary : "");
@@ -575,7 +586,7 @@ internal sealed class AgentsView : ScrollableControl
         }
         ClosePopup();
 
-        string? key2 = null, text = null;
+        string? key2 = null, text = null, highlight = null;
         foreach (var p in _placed)
         {
             if (p.Box.Contains(at))
@@ -589,8 +600,9 @@ internal sealed class AgentsView : ScrollableControl
             foreach (var (c, r) in p.Children)
                 if (r.Contains(at)) { key2 = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
             foreach (var (m, r) in p.Messages)
-                if (r.Contains(at)) { key2 = p.Node.SessionId + "/msg/" + m.To + m.AtUtc.Ticks; text = MessageTip(m, p); }
+                if (r.Contains(at)) { key2 = p.Node.SessionId + "/msg/" + m.To + m.AtUtc.Ticks; text = MessageTip(m, p); highlight = m.ToSessionId; }
         }
+        SetHighlight(highlight);
         if (key2 == _tipFor) return;
         _tipFor = key2;
         if (text == null) _tip.Hide(this);
@@ -707,6 +719,16 @@ internal sealed class AgentsView : ScrollableControl
         _tipFor = null;
         _tip.Hide(this);
         ClosePopup();
+        SetHighlight(null);
+    }
+
+    private string? _highlight;
+
+    private void SetHighlight(string? sessionId)
+    {
+        if (sessionId == _highlight) return;
+        _highlight = sessionId;
+        Invalidate();
     }
 }
 

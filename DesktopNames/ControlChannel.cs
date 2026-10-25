@@ -83,6 +83,15 @@ internal sealed class ControlChannel
                 ?? throw new InvalidOperationException("no visible overlay shows that desktop");
             return null;
         }));
+        _methods.Add(new("ui.rightClickOverlay", "Right-click a desktop's overlay button: opens its menu (screenshot window menu)", new[] { "desktop" }, "desktop: 1-based number", a =>
+        {
+            int n = a.RequiredInt("desktop");
+            var desktops = _host.DesktopService.GetDesktops();
+            if (n < 1 || n > desktops.Count) throw new ArgumentException($"no desktop {n}; there are {desktops.Count}");
+            _ = _host.Overlays.FirstOrDefault(o => o.RightClickDesktop(desktops[n - 1].Id))
+                ?? throw new InvalidOperationException("no visible overlay shows that desktop");
+            return null;
+        }));
         _methods.Add(new("ui.mapClick", "Click a screen on the screen layouts map, as the mouse does", new[] { "screen", "ctrl" }, "screen: 0-based tile, in the layout's screen order; ctrl: 1 to Ctrl+click", a =>
         {
             LayoutsWindow().SelectMapScreen(a.RequiredInt("screen"), toggle: a.Int("ctrl") == 1);
@@ -107,6 +116,8 @@ internal sealed class ControlChannel
                     "screen-popup" => ProjectsWindow().ScreenPopupHandle,
                     "detail" => ProjectsWindow().Agents.PopupHandle ?? throw new InvalidOperationException("no Agents popup is open; call ui.agentsHover first"),
                     "overlay" => _host.Overlays.FirstOrDefault()?.Handle ?? throw new InvalidOperationException("no overlay"),
+                    "menu" => _host.Overlays.Select(o => o.MenuHandle).FirstOrDefault(h => h != null)
+                              ?? throw new InvalidOperationException("no overlay menu is open; call ui.rightClickOverlay first"),
                     "card" => _host.Overlays.Select(o => o.CardHandle).FirstOrDefault(h => h != null)
                               ?? throw new InvalidOperationException("no hover card is showing; call ui.hoverOverlay first"),
                     var other => throw new ArgumentException($"unknown window \"{other}\"; expected: projects, layouts, screen-popup, overlay, card"),
