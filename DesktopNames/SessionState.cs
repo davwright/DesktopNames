@@ -921,6 +921,10 @@ internal sealed class SessionState
     /// oldest-activity first so the flyout lists stale leftovers at the top. Label prefers the
     /// cwd basename (recognizable workspace name), falling back to the title then the session id.
     /// </summary>
+    /// <summary>A session on the desktop finished its turn with no background shells or agents still running.</summary>
+    public bool HasDoneSession(Guid desktopId) =>
+        _byDesktop.TryGetValue(desktopId, out var list) && list.Any(e => !e.Consumed && e.State == StateKind.Ready && !e.BackgroundActive);
+
     public List<SessionRef> GetSessions(Guid desktopId)
     {
         var result = new List<SessionRef>();
