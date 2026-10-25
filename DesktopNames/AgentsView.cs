@@ -50,8 +50,9 @@ internal sealed class AgentsView : ScrollableControl
         _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -15, 15);
         _sessions.Updated += OnUpdated;
         _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
-        VisibleChanged += (_, _) => UpdateShimmer();
-        Disposed += (_, _) => { _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); };
+        // A popup is its own top-level window: it goes when the tab hides or the window closes, not only when the mouse leaves.
+        VisibleChanged += (_, _) => { UpdateShimmer(); if (!Visible) ClosePopup(); };
+        Disposed += (_, _) => { ClosePopup(); _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); };
         Reflow();
     }
 
@@ -613,7 +614,7 @@ internal sealed class AgentsView : ScrollableControl
 
     public IntPtr? PopupHandle => _popup is { IsDisposed: false } popup ? popup.Handle : null;
 
-    private void ClosePopup()
+    public void ClosePopup()
     {
         _popup?.Close();
         _popup = null;

@@ -953,6 +953,7 @@ internal sealed class ProjectsDialog : Form
         {
             Program.Host.Settings.ProjectsWindowTab = _tabs.SelectedIndex == 1 ? "agents" : "projects";
             _agents?.UpdateShimmer();
+            _agents?.ClosePopup();
             Program.Host.Settings.Save();
         };
         Controls.Add(_tabs);
