@@ -102,6 +102,13 @@ internal sealed class Settings
 
     public static string FolderKey(string folder) => folder.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
 
+    /// <summary>
+    /// Desktop → the folders (or .code-workspace files) its VS Code windows have had open, learned
+    /// by the tracker, kept after the windows close so "Start VS Code" can open them there again.
+    /// A folder is remembered on one desktop: it follows the window when that moves.
+    /// </summary>
+    public Dictionary<Guid, List<string>> DesktopFolders { get; set; } = new();
+
     /// <summary>Where the project switcher (Win+J) creates new project folders and lists existing ones.</summary>
     public string ProjectsRoot { get; set; } = @"C:\git\projects";
 

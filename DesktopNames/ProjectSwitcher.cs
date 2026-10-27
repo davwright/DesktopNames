@@ -454,7 +454,14 @@ internal sealed class ProjectSwitcher : IDisposable
         foreach (var folder in folders)
             if (_settings.FolderDesktops.TryGetValue(folder, out var pinned) && desktops.FirstOrDefault(d => d.Id == pinned) is { } d) return d;
 
-        string want = Simplify(p.Name);
+        return BestNamed(desktops, p.Name);
+    }
+
+    /// <summary>The desktop named most like <paramref name="name"/>: equal ignoring punctuation, one
+    /// name inside the other, or a shared start of four letters or more. Null when none fits.</summary>
+    private static DesktopInfo? BestNamed(IEnumerable<DesktopInfo> desktops, string name)
+    {
+        string want = Simplify(name);
         if (want.Length == 0) return null;
         int Score(DesktopInfo d)
         {
@@ -472,21 +479,84 @@ internal sealed class ProjectSwitcher : IDisposable
 
     private static string Simplify(string name) => new(name.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
 
-    /// <summary>Move every open VS Code window onto the desktop with exactly its workspace's name, if there is one.</summary>
-    public int AutoAssignByName()
+    /// <summary>
+    /// Put VS Code windows on the desktop named like them: the desktop with exactly the workspace's
+    /// name, else the closest name (<see cref="BestNamed"/>) among the desktops no window's exact
+    /// name claims. On the screen and in the snap position this screen setup remembers for the
+    /// workspace; without one, on the screen it remembers for another workspace of that desktop;
+    /// without that, on the screen the window is on. <paramref name="windows"/> null means every
+    /// open VS Code window.
+    /// </summary>
+    public object AssignByName(IReadOnlyCollection<IntPtr>? windows)
     {
         var desktops = _desktop.GetDesktops();
+        var all = _tracker.EnumerateOpenWorkspaceWindows();
+        var picked = windows == null ? all : all.Where(w => windows.Contains(w.Hwnd)).ToList();
+        if (windows != null && picked.Count != windows.Count)
+            throw new ArgumentException($"{windows.Count - picked.Count} of the windows are not open VS Code workspace windows");
+
+        // Exact names claim their desktop for every window, selected or not.
+        var exact = all.Select(w => (w.Hwnd, desktop: desktops.FirstOrDefault(d => d.Name.Equals(w.Workspace, StringComparison.OrdinalIgnoreCase))))
+                       .Where(x => x.desktop != null).ToDictionary(x => x.Hwnd, x => x.desktop!);
+        var claimed = exact.Values.Select(d => d.Id).ToHashSet();
+
+        var results = new List<object>();
         int moved = 0;
-        foreach (var w in _tracker.EnumerateOpenWorkspaceWindows())
+        foreach (var w in picked)
         {
-            var d = desktops.FirstOrDefault(d => d.Name.Equals(w.Workspace, StringComparison.OrdinalIgnoreCase));
-            if (d == null || d.Id == w.DesktopId) continue;
-            if (!_desktop.MoveWindowToDesktop(w.Hwnd, d.Id))
+            string match = exact.TryGetValue(w.Hwnd, out var d) ? "exact" : "fuzzy";
+            d ??= BestNamed(desktops.Where(x => !claimed.Contains(x.Id)), w.Workspace);
+            if (d == null)
+            {
+                Log.Projects($"assign by name: '{w.Workspace}' matches no desktop");
+                results.Add(new { window = w.Workspace, match = "none", desktop = (int?)null, screen = (string?)null });
+                continue;
+            }
+
+            WorkspaceLocation? loc;
+            string screen;
+            if (_settings.Workspaces.TryGetValue(w.Workspace, out var own)) { loc = own; screen = "remembered"; }
+            else if (_settings.Workspaces.Values.FirstOrDefault(l => l.DesktopId == d.Id && l.MonitorDeviceId != null) is { } other)
+            {
+                loc = other.Clone();
+                MonitorRef.CaptureWindowPlacement(w.Hwnd, loc);
+                screen = "the desktop's";
+            }
+            else { loc = null; screen = "kept"; }
+
+            bool ok = loc != null ? _desktop.PlaceWindow(w.Hwnd, loc, d.Id)
+                    : d.Id == w.DesktopId || _desktop.MoveWindowToDesktop(w.Hwnd, d.Id);
+            if (!ok || _desktop.GetDesktopForWindow(w.Hwnd) != d.Id)
                 throw new InvalidOperationException($"Could not move the '{w.Workspace}' VS Code window to desktop {d.Index + 1}.");
-            moved++;
+            if (d.Id != w.DesktopId) moved++;
+            if (w.RootPath != null) foreach (var f in VsCodeTracker.FoldersOfRootPath(w.RootPath)) FollowPin(f, d.Id);
+            Log.Projects($"assign by name: '{w.Workspace}' -> desktop {d.Index + 1} '{d.Name}' ({match}), screen {screen}");
+            results.Add(new { window = w.Workspace, match, desktop = (int?)(d.Index + 1), screen = (string?)screen });
         }
-        Log.Projects($"auto-assign by name: {moved} window(s) moved");
-        return moved;
+        return new { moved, windows = results };
+    }
+
+    /// <summary>
+    /// Start VS Code on every folder <paramref name="desktopId"/> remembers (<see cref="Settings.DesktopFolders"/>)
+    /// that no VS Code window has open, each the way <see cref="LaunchVsCode"/> does.
+    /// </summary>
+    public object StartVsCode(Guid desktopId)
+    {
+        var d = _desktop.GetDesktops().First(x => x.Id == desktopId);
+        if (!_settings.DesktopFolders.TryGetValue(desktopId, out var folders) || folders.Count == 0)
+            throw new InvalidOperationException($"Desktop '{d.Name}' remembers no VS Code folders yet; it learns them from the VS Code windows on it.");
+        var open = _tracker.EnumerateOpenWorkspaceWindows();
+        var results = new List<object>();
+        foreach (var folder in folders.ToList())
+        {
+            string status;
+            if (open.Any(w => TitleNames(w.Workspace, w.RootPath, folder))) status = "already open";
+            else if (!Directory.Exists(folder) && !File.Exists(folder)) status = "missing on disk";
+            else { LaunchVsCode(folder, desktopId); status = "launched"; }
+            results.Add(new { folder, status });
+        }
+        Log.Projects($"start VS Code on desktop {d.Index + 1} '{d.Name}': {string.Join("; ", results.Select(r => r.ToString()))}");
+        return results;
     }
 
     /// <summary>Name the current monitor arrangement ("work", "home") — its layout is remembered separately.</summary>
@@ -524,8 +594,9 @@ internal sealed class ProjectSwitcher : IDisposable
         _idleSince.Remove(d.Id);
         var pins = _settings.FolderDesktops.Where(kv => kv.Value == d.Id).Select(kv => kv.Key).ToList();
         foreach (var k in pins) _settings.FolderDesktops.Remove(k);
-        if (pins.Count > 0) _settings.Save();
-        Log.Projects($"removed desktop '{d.Name}' {d.Id} ({why}) unpinned=[{string.Join(";", pins)}]");
+        bool forgot = _settings.DesktopFolders.Remove(d.Id);
+        if (pins.Count > 0 || forgot) _settings.Save();
+        Log.Projects($"removed desktop '{d.Name}' {d.Id} ({why}) unpinned=[{string.Join(";", pins)}]{(forgot ? " forgot its folders" : "")}");
     }
 
     private string CreateFolder(string name)
@@ -592,7 +663,7 @@ internal sealed class ProjectSwitcher : IDisposable
     /// </summary>
     public void LaunchVsCode(string folder, Guid? desktopId)
     {
-        if (!Directory.Exists(folder)) throw new ArgumentException($"\"{folder}\" is not a folder");
+        if (!Directory.Exists(folder) && !File.Exists(folder)) throw new ArgumentException($"\"{folder}\" is not a folder or workspace file");
         if (_tracker.EnumerateOpenWorkspaceWindows().Any(w => TitleNames(w.Workspace, w.RootPath, folder)))
             throw new InvalidOperationException($"VS Code already has \"{folder}\" open.");
         var target = desktopId ?? CreateProjectDesktop(Path.GetFileName(folder.TrimEnd('\\', '/')));
@@ -612,9 +683,12 @@ internal sealed class ProjectSwitcher : IDisposable
         Log.Projects($"launch VS Code {folder} -> desktop {target}{(desktopId == null ? " (created)" : "")}, folder pinned");
     }
 
-    /// <summary>A VS Code title is for <paramref name="folder"/>: its root path when the title shows one, else its root name.</summary>
+    /// <summary>A VS Code title is for <paramref name="folder"/>: its root path when the title shows one, else its root name
+    /// (a folder's name; "name (Workspace)" for a .code-workspace file).</summary>
     private static bool TitleNames(string workspace, string? rootPath, string folder) =>
-        rootPath != null ? SameFolder(rootPath, folder) : workspace.Equals(Path.GetFileName(folder.TrimEnd('\\')), StringComparison.OrdinalIgnoreCase);
+        rootPath != null ? SameFolder(rootPath, folder)
+        : folder.EndsWith(".code-workspace", StringComparison.OrdinalIgnoreCase) ? workspace.Equals(Path.GetFileNameWithoutExtension(folder) + " (Workspace)", StringComparison.OrdinalIgnoreCase)
+        : workspace.Equals(Path.GetFileName(folder.TrimEnd('\\')), StringComparison.OrdinalIgnoreCase);
 
     private void OnLaunchedWindowEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
     {
@@ -1324,9 +1398,19 @@ internal sealed class ProjectsDialog : Form
             switch (target.drag.Kind)
             {
                 case Col.Screen:
+                    // Geometry before the desktop move, and never activating the window: showing a
+                    // window on another desktop switches there, and this is a drop, not a switch.
+                    var desks = Program.Host!.DesktopService;
+                    var here = desks.GetCurrentDesktopId();
                     var desk = target.desktop ?? _switcher.CreateDesktopFor(target.row);
-                    if (desk.Id != p.Desktop?.Id) _switcher.MoveVsCode(p, desk);
                     if (target.screen != null && target.screen.Handle != p.Screen?.Handle) _switcher.PlaceVsCode(p, target.screen, p.Snap);
+                    if (desk.Id != p.Desktop?.Id) _switcher.MoveVsCode(p, desk);
+                    // Maximizing still activates (SW_MAXIMIZE has no no-activate form): come back.
+                    if (desks.GetCurrentDesktopId() != here)
+                    {
+                        Log.Projects($"drop switched the desktop; switching back");
+                        desks.SwitchToDesktop(desks.GetDesktops().First(x => x.Id == here));
+                    }
                     break;
                 case Col.Number: _switcher.MoveDesktop(p.Desktop!, target.desktop!.Index); break;
                 case Col.Claude:
@@ -1531,11 +1615,15 @@ internal sealed class ProjectsDialog : Form
         };
         windows.DropDownItems.Add(moveAll);
         windows.DropDownItems.Add(restore);
-        windows.DropDownItems.Add("Put each VS Code on the desktop with its name", null, (_, _) =>
+        windows.DropDownItems.Add("Put the selected VS Code windows on the desktop with their name", null, (_, _) =>
         {
-            try { _switcher.AutoAssignByName(); }
-            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
-            RefreshState();
+            var sel = SelectedProjects().Where(r => r.VsCodeOpen && !r.IsTerminal).ToList();
+            if (sel.Count == 0)
+            {
+                ProjectSwitcher.ReportError(new InvalidOperationException("Select the VS Code rows to put on their desktops first (Ctrl+A selects all)."));
+                return;
+            }
+            foreach (var r in sel) Run("vscode.assignByName", new { window = $"0x{r.VsCodeHwnd.ToInt64():X}" });
         });
         windows.DropDownItems.Add("Rename this screen layout…", null, (_, _) =>
         {
@@ -1635,6 +1723,9 @@ internal sealed class ProjectsDialog : Form
             menu.DropDownItems.Add(Item("Notes…", () => EditNotes(d!)));
             menu.DropDownItems.Add(new ToolStripMenuItem("Open VS Code on its desktop", null, (_, _) => LaunchVsCodeForSelected())
                 { Enabled = sel.Count == 1 && sel[0].Folder != null && !sel[0].VsCodeOpen, ShortcutKeyDisplayString = "L" });
+            var remembered = d != null && settings.DesktopFolders.TryGetValue(d.Id, out var rf) ? rf : new List<string>();
+            menu.DropDownItems.Add(Item(remembered.Count > 0 ? $"Start VS Code on its folders  ({string.Join(", ", remembered.Select(Path.GetFileName))})" : "Start VS Code on its folders  (none remembered)",
+                () => { Run("desktop.startCode", At(d!.Index + 1)); Finish(DialogResult.Cancel); }, enabled: remembered.Count > 0));
             menu.DropDownItems.Add(Item("Blue highlight", () => Run("desktop.toggleBlue", At(d!.Index + 1)),
                 check: d != null && settings.IsDesktopHighlighted(d.Id), keys: "Shift+click tab"));
             menu.DropDownItems.Add(Item("Clear highlight", () => Run("desktop.clearHighlight", At(d!.Index + 1)), keys: "Ctrl+Shift+click tab"));

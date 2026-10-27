@@ -330,6 +330,13 @@ internal sealed class TaskbarOverlay : Form
                 _contextMenu.Items.Add(hideOnScreen);
             }
 
+            if (_settings.DesktopFolders.TryGetValue(d.Id, out var remembered) && remembered.Count > 0)
+                _contextMenu.Items.Add($"Start VS Code  ({string.Join(", ", remembered.Select(Path.GetFileName))})", null, (_, _) =>
+                {
+                    try { Program.Host?.Commands.Execute("desktop.startCode", System.Text.Json.JsonSerializer.SerializeToElement(new { desktop = d.Index + 1 })); }
+                    catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+                });
+
             _contextMenu.Items.Add(new ToolStripSeparator());
         }
 

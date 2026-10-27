@@ -179,7 +179,8 @@ internal static class SnapGeometry
         var wp = new NativeMethods.WINDOWPLACEMENT { length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>() };
         if (!NativeMethods.GetWindowPlacement(hwnd, ref wp)) return false;
         wp.rcNormalPosition = rc;
-        wp.showCmd = maximize ? NativeMethods.SW_MAXIMIZE : NativeMethods.SW_SHOWNORMAL;
+        // No activation: activating a window on another virtual desktop switches to it.
+        wp.showCmd = maximize ? NativeMethods.SW_MAXIMIZE : NativeMethods.SW_SHOWNOACTIVATE;
         return NativeMethods.SetWindowPlacement(hwnd, ref wp);
     }
 
@@ -397,7 +398,7 @@ internal sealed class MonitorRef
         wp.rcNormalPosition.Top    = top;
         wp.rcNormalPosition.Right  = left + loc.WindowWidth;
         wp.rcNormalPosition.Bottom = top  + loc.WindowHeight;
-        wp.showCmd = NativeMethods.SW_SHOWNORMAL;
+        wp.showCmd = NativeMethods.SW_SHOWNOACTIVATE;
 
         return NativeMethods.SetWindowPlacement(hwnd, ref wp);
     }

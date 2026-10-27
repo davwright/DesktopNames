@@ -371,6 +371,7 @@ internal static class NativeMethods
     public const uint SW_SHOWNORMAL   = 1;
     public const uint SW_SHOWMINIMIZED = 2;
     public const uint SW_MAXIMIZE     = 3;
+    public const uint SW_SHOWNOACTIVATE = 4;
     public const uint SW_MINIMIZE     = 6;
     public const uint SW_RESTORE      = 9;
 

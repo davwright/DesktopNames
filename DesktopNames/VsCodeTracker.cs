@@ -139,8 +139,7 @@ internal sealed class VsCodeTracker : IDisposable
             if (new string(clsBuf, 0, clsLen) != "Chrome_WidgetWin_1") return true;
 
             string title = GetWindowTitle(hwnd);
-            string? workspace = ExtractWorkspace(title);
-            if (workspace == null) return true;
+            if (ParseTitle(title) is not var (workspace, rootPath)) return true;
 
             seenThisScan.Add(hwnd);
 
@@ -182,6 +181,16 @@ internal sealed class VsCodeTracker : IDisposable
 
             _settings.Workspaces.TryGetValue(workspace, out var known);
 
+            Guid recordDesktop = currentDesktop;
+            if (!movedSinceLastScan && known != null && _desktop.DesktopExists(known.DesktopId))
+                recordDesktop = known.DesktopId;
+
+            // The desktop remembers what its windows have open: the title's root path, else the
+            // one folder the workspace index knows for the title (a multi-folder workspace without
+            // a path in the title can't be reopened from its folders, so it isn't remembered).
+            string? remembered = rootPath ?? (Program.Host?.FoldersForWindowTitle(workspace) is [var one] ? one : null);
+            if (remembered != null && RememberFolder(recordDesktop, remembered)) dirty = true;
+
             // An assignment made by hand (Screen picker, move-all) outranks anything observed.
             // The desktop was already protected above, but the monitor, snap and placement
             // below were not: they were rewritten from the live window every 2s, so a screen
@@ -193,10 +202,6 @@ internal sealed class VsCodeTracker : IDisposable
                 known.Pinned = false;
                 dirty = true;
             }
-
-            Guid recordDesktop = currentDesktop;
-            if (!movedSinceLastScan && known != null && _desktop.DesktopExists(known.DesktopId))
-                recordDesktop = known.DesktopId;
 
             // CRUD the observation to the now-current (desktop, monitor, placement).
             // Manual moves via the user's AHK Win+Ctrl+N flow through this path.
@@ -224,6 +229,28 @@ internal sealed class VsCodeTracker : IDisposable
         }
 
         if (dirty) _settings.Save();
+    }
+
+    /// <summary>Put <paramref name="rootPath"/> on <paramref name="desktop"/>'s list and off every
+    /// other desktop's. Returns true if anything changed.</summary>
+    private bool RememberFolder(Guid desktop, string rootPath)
+    {
+        string key = Settings.FolderKey(rootPath);
+        bool changed = false;
+        foreach (var (id, list) in _settings.DesktopFolders.ToList())
+        {
+            if (id == desktop || list.RemoveAll(f => Settings.FolderKey(f) == key) == 0) continue;
+            changed = true;
+            if (list.Count == 0) _settings.DesktopFolders.Remove(id);
+        }
+        if (!_settings.DesktopFolders.TryGetValue(desktop, out var mine)) _settings.DesktopFolders[desktop] = mine = new();
+        if (!mine.Any(f => Settings.FolderKey(f) == key))
+        {
+            mine.Add(rootPath);
+            changed = true;
+            Log.Tracker($"desktop {desktop} remembers {rootPath}");
+        }
+        return changed;
     }
 
     /// <summary>

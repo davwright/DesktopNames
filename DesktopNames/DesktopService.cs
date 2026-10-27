@@ -190,7 +190,7 @@ internal sealed class DesktopService : IDisposable
                 if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
                 {
                     wp.rcNormalPosition = new NativeMethods.RECT { Left = l, Top = t, Right = l + w, Bottom = t + h };
-                    wp.showCmd = NativeMethods.SW_SHOWNORMAL;
+                    wp.showCmd = NativeMethods.SW_SHOWNOACTIVATE;
                     any = NativeMethods.SetWindowPlacement(hwnd, ref wp);
                 }
             }

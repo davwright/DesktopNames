@@ -936,6 +936,20 @@ internal sealed class HostForm : Form
             RefreshAllOverlays();
             return null;
         }));
+        c.Add(new("vscode.assignByName", "Put VS Code windows on the desktop named like them (exact name first, then the closest), on the screen this layout remembers",
+            new[] { "window" }, "window: handle (0x1A2B) of one VS Code window, default every open one", a =>
+        {
+            var one = a.Str("window") is { } sel ? new[] { (IntPtr)Convert.ToInt64(_desktopService.FindWindow(sel).Hwnd[2..], 16) } : null;
+            var r = (_projects ?? throw new InvalidOperationException("not ready")).AssignByName(one);
+            RefreshAllOverlays();
+            return r;
+        }));
+        c.Add(new("desktop.startCode", "Start VS Code on the folders a desktop remembers from its VS Code windows, skipping those already open", desktop, desktopDoc, a =>
+        {
+            var r = (_projects ?? throw new InvalidOperationException("not ready")).StartVsCode(DesktopArg(a));
+            RefreshAllOverlays();
+            return r;
+        }));
         c.Add(new("desktop.create", "New desktop at the end", none, "", _ => { _desktopService.CreateDesktop(); RefreshAllOverlays(); return null; }));
         c.Add(new("desktop.close", "Close a desktop; its windows move to desktop 1", desktop, desktopDoc, a =>
         {
