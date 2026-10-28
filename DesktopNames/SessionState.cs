@@ -244,9 +244,28 @@ internal sealed class SessionState
     public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
 
+    /// <summary>
+    /// A shell whose bash process has ended is done; Claude only drops it from its list at the next
+    /// Stop, which may never come. Also covers shells that ended while DesktopNames was not running.
+    /// </summary>
+    private void DropEndedShells()
+    {
+        bool dropped = false;
+        foreach (var e in _byDesktop.Values.SelectMany(list => list))
+            foreach (var (id, w) in e.Background.ToList())
+                if (w.Command is { } command && e.SessionPid > 0 && ClaudeSessionRegistry.FindShell(e.SessionPid, id, command).Matches == 0)
+                {
+                    e.Background.Remove(id);
+                    Log.Pipe($"shell ended, dropped: {e.SessionId} {w.Description}");
+                    dropped = true;
+                }
+        if (dropped) SaveToDisk();
+    }
+
     /// <summary>Every tracked session with its background agents and shells, and who messaged whom.</summary>
     public AgentGraph Graph()
     {
+        DropEndedShells();
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
                 e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
                 e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
@@ -378,7 +397,7 @@ internal sealed class SessionState
         _isProcessAlive = isProcessAlive;
         LoadFromDisk();
         // A background shell's process ending changes what its session shows, though no hook fires.
-        ClaudeSessionRegistry.ShellExited += () => Updated?.Invoke();
+        ClaudeSessionRegistry.ShellExited += () => { DropEndedShells(); Updated?.Invoke(); };
         // Every aggregate change (apply / consume / sweep / move / clear) is a persistable
         // edit — one subscription covers them all. Pulse animation doesn't fire Changed, so
         // this only writes when the displayed state actually moves.
