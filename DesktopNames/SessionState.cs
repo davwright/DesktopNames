@@ -233,7 +233,8 @@ internal sealed class SessionState
     /// <summary><see cref="LastOutputUtc"/>: when its output file was last written (shells report nothing else), null when the file is gone.</summary>
     /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc,
-                                    ClaudeSessionRegistry.ShellProcess? Shell, string? Command, string ActivityTool);
+                                    ClaudeSessionRegistry.ShellProcess? Shell, string? Command, string ActivityTool,
+                                    IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
@@ -273,7 +274,9 @@ internal sealed class SessionState
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
                     e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
                     b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
-                    b.Value.Command, b.Value.ActivityTool)).ToList(),
+                    b.Value.Command, b.Value.ActivityTool,
+                    b.Value.Kind == "agent" && e.TranscriptPath.Length > 0
+                        ? ClaudeSessionRegistry.Transcript(ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, b.Key))?.Actions ?? [] : [])).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
                 e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent,
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],

@@ -479,28 +479,44 @@ internal sealed class AgentsView : ScrollableControl
         int cornerW = corner.Length > 0 ? TextRenderer.MeasureText(corner, bold).Width : 0;
         DrawCommand(g, c.Kind == "shell" ? IconShell : IconAgent, c.Description, bold, Color.Black, new Rectangle(lx, y, w - cornerW - 4, Line));
         if (corner.Length > 0) TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
-        string state = c.Activity.Length > 0 ? c.Activity : c.Shell switch
+        var last = c.Actions.Count > 0 ? c.Actions[^1] : null;
+        string state = last != null ? (last.Command is { } cmd ? Shown(cmd) : last.Text.ReplaceLineEndings(" ").Trim()) : c.Activity.Length > 0 ? c.Activity : c.Shell switch
         {
             { Pid: int pid } => $"running · pid {pid}",
             { Matches: 0 } => "ended",
             { Matches: var n } => $"{n} processes run this command",
             null => c.LastOutputUtc == null ? "output file gone" : "process not known yet",
         };
-        if (c.Activity.Length > 0)
+        if (last != null || c.Activity.Length > 0)
         {
             if (live) DrawShimmer(g, new Rectangle(r.Left, y + Line, r.Width, Line));
-            DrawCommand(g, ToolIcon(c.ActivityTool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
+            DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
         }
         else
             TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
     }
+
+    // A leading cd into the working folder: the same for every call, it hides what the command does.
+    private static readonly System.Text.RegularExpressions.Regex LeadingCd = new(@"^\s*(cd|Set-Location)\s+(""[^""]*""|'[^']*'|\S+)\s*(;|&&)\s*");
+
+    /// <summary>A command line on one line, without its leading cd.</summary>
+    private static string Shown(string command) => LeadingCd.Replace(command.ReplaceLineEndings(" ").Trim(), "");
 
     /// <summary>The child's own hover text: everything known about it, in full.</summary>
     private static string ChildTip(SessionState.AgentChild c)
     {
         var lines = new List<string> { c.Description };
         lines.Add(KindLabel(c.Kind) + (c.StartedUtc is { } s ? $", started {SessionState.FormatAge(s)} ago" : ""));
-        if (c.Activity.Length > 0) lines.Add($"now: {c.Activity}");
+        if (c.Actions.Count > 0)
+        {
+            lines.Add("");
+            foreach (var a in c.Actions)
+            {
+                lines.Add($"{SessionState.FormatAge(a.AtUtc)}  {(a.Tool.Length == 0 ? "said: " : "")}{TaskbarOverlay.Truncate(a.Command != null && a.Command == a.Text ? Shown(a.Command) : a.Text.ReplaceLineEndings(" ").Trim(), 120)}");
+                if (a.Command != null && a.Command != a.Text) lines.Add("        " + TaskbarOverlay.Truncate(Shown(a.Command), 160));
+            }
+        }
+        else if (c.Activity.Length > 0) lines.Add($"now: {c.Activity}");
         if (c.Shell is { } shell)
             lines.Add(shell switch
             {

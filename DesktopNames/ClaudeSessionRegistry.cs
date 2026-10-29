@@ -278,8 +278,9 @@ internal sealed class ClaudeSessionRegistry
     /// is where its line starts in the transcript, to read it again in full (<see cref="PromptDetail"/>).</summary>
     public sealed record Prompt(bool FromPeer, string From, string Text, DateTime AtUtc, long Offset);
 
-    /// <summary>One thing Claude did: a tool call (<see cref="Tool"/> its name) or, with Tool empty, a reply.</summary>
-    public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc);
+    /// <summary>One thing Claude did: a tool call (<see cref="Tool"/> its name) or, with Tool empty, a reply.
+    /// <see cref="Command"/>: a Bash or PowerShell call's command line.</summary>
+    public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc, string? Command);
 
     public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions);
 
@@ -288,6 +289,8 @@ internal sealed class ClaudeSessionRegistry
     private sealed class Scanned
     {
         public long Length;
+        /// <summary>A subagent's own transcript: all its records are sidechain ones.</summary>
+        public bool Sidechain;
         public string? Title;
         public Usage? Usage;
         public Prompt? Prompt;
@@ -323,7 +326,7 @@ internal sealed class ClaudeSessionRegistry
                 && (line.Contains("\"type\":\"user\"", StringComparison.Ordinal) || line.Contains("\"type\":\"queued_command\"", StringComparison.Ordinal))
                 && PromptOf(line, offset) is { } p)
                 into.Prompt = p;
-            else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && !line.Contains("\"isSidechain\":true", StringComparison.Ordinal))
+            else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && (into.Sidechain || !line.Contains("\"isSidechain\":true", StringComparison.Ordinal)))
                 into.Actions.AddRange(ActionsOf(line));
             offset += System.Text.Encoding.UTF8.GetByteCount(line) + 1;
         }
@@ -345,10 +348,12 @@ internal sealed class ClaudeSessionRegistry
             if (type == "tool_use")
             {
                 string tool = block.GetProperty("name").GetString() ?? "";
-                actions.Add(new ClaudeAction(tool, ToolSummary(tool, block.TryGetProperty("input", out var input) ? input : default), at));
+                var input = block.TryGetProperty("input", out var i) ? i : default;
+                string? command = tool is "Bash" or "PowerShell" && input.ValueKind == JsonValueKind.Object && input.TryGetProperty("command", out var c) ? c.GetString() : null;
+                actions.Add(new ClaudeAction(tool, ToolSummary(tool, input), at, command));
             }
             else if (type == "text" && block.GetProperty("text").GetString() is { Length: > 0 } reply)
-                actions.Add(new ClaudeAction("", reply, at));
+                actions.Add(new ClaudeAction("", reply, at, null));
         }
         return actions;
     }
@@ -470,14 +475,15 @@ internal sealed class ClaudeSessionRegistry
         if (!file.Exists) return null;
         if (!_transcripts.TryGetValue(path, out var seen))
         {
-            seen = new Scanned();
+            bool sidechain = Path.GetFileName(Path.GetDirectoryName(path)) == "subagents";
+            seen = new Scanned { Sidechain = sidechain };
             // First sight: the tail usually holds a title, a usage and the last prompt, so a
             // multi-megabyte file needn't be read whole (that made the window open in 3 s).
             const long Tail = 512 * 1024;
             if (file.Length > Tail)
             {
                 var (text, start, end) = CompleteLines(path, file.Length - Tail, skipPartial: true);
-                var tail = new Scanned();
+                var tail = new Scanned { Sidechain = sidechain };
                 Scan(text, start, tail);
                 if (tail.Title != null && tail.Prompt != null)
                 {
@@ -495,6 +501,10 @@ internal sealed class ClaudeSessionRegistry
         }
         return new TranscriptFacts(seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList());
     }
+
+    /// <summary>Where a subagent writes its own transcript: beside its session's, in <c>&lt;sessionId&gt;subagentsagent-&lt;agentId&gt;.jsonl</c>.</summary>
+    public static string SubagentTranscript(string sessionTranscript, string agentId) =>
+        Path.Combine(Path.ChangeExtension(sessionTranscript, null), "subagents", $"agent-{agentId}.jsonl");
 
     private static string ClaudeDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
