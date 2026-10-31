@@ -234,7 +234,7 @@ internal sealed class SessionState
     /// <see cref="Shell"/>: for a shell whose command is known, the bash process running it (or that none does any more).
     public sealed record AgentChild(string Id, string Kind, string Description, string Activity, DateTime? StartedUtc, DateTime? ListedUtc, DateTime? LastOutputUtc,
                                     ClaudeSessionRegistry.ShellProcess? Shell, string? Command, string ActivityTool,
-                                    IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions);
+                                    IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, string? Transcript, ClaudeSessionRegistry.Prompt? Prompt, string? OutputFile);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
                                    string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
@@ -263,6 +263,11 @@ internal sealed class SessionState
         if (dropped) SaveToDisk();
     }
 
+    /// <summary>What a subagent's own transcript says, null for a shell or when it has none.</summary>
+    private static ClaudeSessionRegistry.TranscriptFacts? SubagentFacts(SessionEntry e, string id) =>
+        e.Background.TryGetValue(id, out var w) && w.Kind == "agent" && e.TranscriptPath.Length > 0
+            ? ClaudeSessionRegistry.Transcript(ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, id)) : null;
+
     /// <summary>Every tracked session with its background agents and shells, and who messaged whom.</summary>
     public AgentGraph Graph()
     {
@@ -275,8 +280,10 @@ internal sealed class SessionState
                     e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
                     b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
                     b.Value.Command, b.Value.ActivityTool,
-                    b.Value.Kind == "agent" && e.TranscriptPath.Length > 0
-                        ? ClaudeSessionRegistry.Transcript(ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, b.Key))?.Actions ?? [] : [])).ToList(),
+                    SubagentFacts(e, b.Key)?.Actions ?? [],
+                    b.Value.Kind == "agent" && e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, b.Key) : null,
+                    SubagentFacts(e, b.Key)?.Prompt,
+                    b.Value.Kind == "shell" && e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskOutputFile(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
                 e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent,
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],

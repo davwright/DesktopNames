@@ -251,7 +251,11 @@ internal sealed class ClaudeSessionRegistry
     /// <c>%TEMP%\claude\&lt;project&gt;\&lt;sessionId&gt;\tasks\&lt;taskId&gt;.output</c>. Null when that file is
     /// not there (the task's session ended and Claude Code cleaned up).
     /// </summary>
-    public static DateTime? TaskLastOutputUtc(string fullSessionId, string taskId)
+    public static DateTime? TaskLastOutputUtc(string fullSessionId, string taskId) =>
+        TaskOutputFile(fullSessionId, taskId) is { } file && File.Exists(file) ? File.GetLastWriteTimeUtc(file) : null;
+
+    /// <summary>The file a background task streams its output to, null when not found.</summary>
+    public static string? TaskOutputFile(string fullSessionId, string taskId)
     {
         if (!_taskOutputs.TryGetValue(taskId, out var file))
         {
@@ -263,7 +267,7 @@ internal sealed class ClaudeSessionRegistry
             if (found == null) return null;
             _taskOutputs[taskId] = file = found;
         }
-        return File.Exists(file) ? File.GetLastWriteTimeUtc(file) : null;
+        return file;
     }
 
     /// <summary>The token usage of a session's latest API call. <see cref="Context"/> is what it sent
@@ -279,8 +283,9 @@ internal sealed class ClaudeSessionRegistry
     public sealed record Prompt(bool FromPeer, string From, string Text, DateTime AtUtc, long Offset);
 
     /// <summary>One thing Claude did: a tool call (<see cref="Tool"/> its name) or, with Tool empty, a reply.
-    /// <see cref="Command"/>: a Bash or PowerShell call's command line.</summary>
-    public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc, string? Command);
+    /// <see cref="Command"/>: a Bash or PowerShell call's command line. <see cref="Offset"/> is where its record starts in
+    /// the transcript and <see cref="ToolUseId"/> the call's id, to read its input and result again (<see cref="ActionDetail"/>).</summary>
+    public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc, string? Command, long Offset, string? ToolUseId);
 
     public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions);
 
@@ -326,15 +331,20 @@ internal sealed class ClaudeSessionRegistry
                 && (line.Contains("\"type\":\"user\"", StringComparison.Ordinal) || line.Contains("\"type\":\"queued_command\"", StringComparison.Ordinal))
                 && PromptOf(line, offset) is { } p)
                 into.Prompt = p;
+            // A subagent's task, and any message sent to it later: user records that are neither tool
+            // results nor Claude Code's own notes (isMeta: reminders, "[Image: original …]").
+            else if (into.Sidechain && line.Contains("\"type\":\"user\"", StringComparison.Ordinal) && !line.Contains("\"tool_use_id\"", StringComparison.Ordinal)
+                     && !line.Contains("\"isMeta\":true", StringComparison.Ordinal))
+                into.Prompt = SubagentPromptOf(line, offset);
             else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && (into.Sidechain || !line.Contains("\"isSidechain\":true", StringComparison.Ordinal)))
-                into.Actions.AddRange(ActionsOf(line));
+                into.Actions.AddRange(ActionsOf(line, offset));
             offset += System.Text.Encoding.UTF8.GetByteCount(line) + 1;
         }
         if (into.Actions.Count > ActionsKept) into.Actions.RemoveRange(0, into.Actions.Count - ActionsKept);
     }
 
     /// <summary>The tool calls and replies in one assistant record.</summary>
-    private static IEnumerable<ClaudeAction> ActionsOf(string line)
+    private static IEnumerable<ClaudeAction> ActionsOf(string line, long offset)
     {
         using var doc = JsonDocument.Parse(line);
         var r = doc.RootElement;
@@ -350,10 +360,10 @@ internal sealed class ClaudeSessionRegistry
                 string tool = block.GetProperty("name").GetString() ?? "";
                 var input = block.TryGetProperty("input", out var i) ? i : default;
                 string? command = tool is "Bash" or "PowerShell" && input.ValueKind == JsonValueKind.Object && input.TryGetProperty("command", out var c) ? c.GetString() : null;
-                actions.Add(new ClaudeAction(tool, ToolSummary(tool, input), at, command));
+                actions.Add(new ClaudeAction(tool, ToolSummary(tool, input), at, command, offset, block.GetProperty("id").GetString()));
             }
             else if (type == "text" && block.GetProperty("text").GetString() is { Length: > 0 } reply)
-                actions.Add(new ClaudeAction("", reply, at, null));
+                actions.Add(new ClaudeAction("", reply, at, null, offset, null));
         }
         return actions;
     }
@@ -375,6 +385,79 @@ internal sealed class ClaudeSessionRegistry
             _ => Get("description") ?? tool,
         };
     }
+
+    /// <summary>A user record of a subagent's transcript: what its parent asked of it.</summary>
+    private static Prompt SubagentPromptOf(string line, long offset)
+    {
+        using var doc = JsonDocument.Parse(line);
+        var r = doc.RootElement;
+        DateTime at = r.TryGetProperty("timestamp", out var ts) ? ts.GetDateTime().ToUniversalTime() : DateTime.MinValue;
+        return new Prompt(false, "", HumanText(r.GetProperty("message").GetProperty("content")), at, offset);
+    }
+
+    /// <summary>What one action holds in full: a reply's text, a file read (its text or image), a file
+    /// written, a command and its output, a page fetched. <see cref="Markdown"/> when it reads as markdown;
+    /// <see cref="Command"/>: a shell call's command line, <see cref="Text"/> then being its output.</summary>
+    public sealed record Detail(string Text, bool Markdown, List<byte[]> Images, string? Command = null);
+
+    private const int DetailChars = 30_000;
+
+    /// <summary>Read an action again from the transcript: its call's input and the result that answered it.</summary>
+    public static Detail ActionDetail(string path, ClaudeAction action)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        stream.Seek(action.Offset, SeekOrigin.Begin);
+        var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+        string line = reader.ReadLine() ?? throw new InvalidDataException($"{path}: no line at byte {action.Offset}");
+        if (action.ToolUseId == null) return new Detail(Cut(action.Text), true, new());
+        using var call = JsonDocument.Parse(line);
+        var input = call.RootElement.GetProperty("message").GetProperty("content").EnumerateArray()
+            .First(b => b.TryGetProperty("id", out var id) && id.GetString() == action.ToolUseId).GetProperty("input").Clone();
+        string? Get(string name) => input.ValueKind == JsonValueKind.Object && input.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+        // The result is in a later user record; a call still running has none yet.
+        string needle = "\"tool_use_id\":\"" + action.ToolUseId + "\"";
+        string resultText = "";
+        var images = new List<byte[]>();
+        bool answered = false;
+        while (reader.ReadLine() is { } next)
+        {
+            if (!next.Contains(needle, StringComparison.Ordinal)) continue;
+            using var doc = JsonDocument.Parse(next);
+            var block = doc.RootElement.GetProperty("message").GetProperty("content").EnumerateArray()
+                .First(b => b.TryGetProperty("tool_use_id", out var id) && id.GetString() == action.ToolUseId);
+            if (block.TryGetProperty("content", out var content))
+            {
+                if (content.ValueKind == JsonValueKind.String) resultText = content.GetString() ?? "";
+                else foreach (var part in content.EnumerateArray())
+                {
+                    string type = part.GetProperty("type").GetString() ?? "";
+                    if (type == "text") resultText += part.GetProperty("text").GetString();
+                    else if (type == "image" && part.GetProperty("source").TryGetProperty("data", out var data))
+                        images.Add(Convert.FromBase64String(data.GetString()!));
+                }
+            }
+            answered = true;
+            break;
+        }
+        string result = answered ? resultText : "(no result yet: still running)";
+        bool md(string? file) => file != null && file.EndsWith(".md", StringComparison.OrdinalIgnoreCase);
+        return action.Tool switch
+        {
+            "Read" => new Detail(Cut(LineNumber.Replace(result, "")), md(Get("file_path")), images),
+            "Write" => new Detail(Cut(Get("content") ?? ""), md(Get("file_path")), images),
+            "Edit" => new Detail(Cut($"{Get("file_path")}\n\n− {Get("old_string")}\n\n+ {Get("new_string")}"), false, images),
+            "Bash" or "PowerShell" => new Detail(Cut(result), false, images, Get("command")),
+            "Agent" or "Task" => new Detail(Cut($"{Get("prompt")}\n\n---\n\n{result}"), true, images),
+            "WebFetch" => new Detail(Cut($"{Get("url")}\n\n{result}"), true, images),
+            _ => new Detail(Cut(result), true, images),
+        };
+    }
+
+    // The Read tool numbers each line: "  12<tab>…".
+    private static readonly System.Text.RegularExpressions.Regex LineNumber = new(@"(?m)^ *\d+\t", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static string Cut(string text) => text.Length <= DetailChars ? text : text[..DetailChars] + "\n\n… (cut)";
 
     /// <summary>A user record with an origin: the human typing, or a peer session's message.</summary>
     private static Prompt? PromptOf(string line, long offset)

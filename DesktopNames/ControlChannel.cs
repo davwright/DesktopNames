@@ -56,6 +56,17 @@ internal sealed class ControlChannel
             ProjectsWindow().Agents.HoverZone(a.RequiredStr("session"), a.RequiredStr("zone"));
             return null;
         }));
+        _methods.Add(new("ui.agentsBrowse", "Click a chevron in the Agents tab: opens the last input and recent actions of a session, or of one of its agents or shells (screenshot window browse)",
+            new[] { "session", "child" }, "session: name or id; child: an agent's or shell's id or description, default the session itself", a =>
+        {
+            ProjectsWindow().Agents.Browse(a.RequiredStr("session"), a.Str("child"));
+            return null;
+        }));
+        _methods.Add(new("ui.agentsBrowseHover", "Hover a row of the open browse panel: opens its full preview (screenshot window preview)", new[] { "row" }, "row: 0-based", a =>
+        {
+            ProjectsWindow().Agents.BrowseHover(a.RequiredInt("row"));
+            return null;
+        }));
         _methods.Add(new("ui.agentsColumns", "Session boxes per row in the Agents tab, as Ctrl+wheel sets it", new[] { "columns" }, "columns: 2-6", a =>
         {
             ProjectsWindow().Agents.SetColumns(a.RequiredInt("columns"));
@@ -105,7 +116,7 @@ internal sealed class ControlChannel
                 return new { tooltip = w.HoverCell(a.RequiredInt("row"), a.RequiredStr("column")) };
             }));
         _methods.Add(new("ui.screenshot", "PNG of a window, captured by its handle",
-            new[] { "window", "path" }, "window: projects | layouts | screen-popup | overlay; path: absolute .png", a =>
+            new[] { "window", "path" }, "window: projects | layouts | screen-popup | detail | browse | preview | overlay | menu | card; path: absolute .png", a =>
             {
                 string path = a.RequiredStr("path");
                 if (!Path.IsPathRooted(path)) throw new ArgumentException("\"path\" must be absolute");
@@ -114,13 +125,15 @@ internal sealed class ControlChannel
                     "projects" => ProjectsWindow().Handle,
                     "layouts" => LayoutsWindow().Handle,
                     "screen-popup" => ProjectsWindow().ScreenPopupHandle,
+                    "browse" => ProjectsWindow().Agents.BrowseHandle ?? throw new InvalidOperationException("no browse panel is open; call ui.agentsBrowse first"),
+                    "preview" => ProjectsWindow().Agents.PreviewHandle ?? throw new InvalidOperationException("no preview is open; call ui.agentsBrowseHover first"),
                     "detail" => ProjectsWindow().Agents.PopupHandle ?? throw new InvalidOperationException("no Agents popup is open; call ui.agentsHover first"),
                     "overlay" => _host.Overlays.FirstOrDefault()?.Handle ?? throw new InvalidOperationException("no overlay"),
                     "menu" => _host.Overlays.Select(o => o.MenuHandle).FirstOrDefault(h => h != null)
                               ?? throw new InvalidOperationException("no overlay menu is open; call ui.rightClickOverlay first"),
                     "card" => _host.Overlays.Select(o => o.CardHandle).FirstOrDefault(h => h != null)
                               ?? throw new InvalidOperationException("no hover card is showing; call ui.hoverOverlay first"),
-                    var other => throw new ArgumentException($"unknown window \"{other}\"; expected: projects, layouts, screen-popup, overlay, card"),
+                    var other => throw new ArgumentException($"unknown window \"{other}\"; expected: projects, layouts, screen-popup, detail, browse, preview, overlay, menu, card"),
                 };
                 var size = Capture(hwnd, path);
                 return new { path, width = size.Width, height = size.Height };

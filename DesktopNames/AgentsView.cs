@@ -292,7 +292,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 int spine = p.Box.Left + (BoxW - ChildW) / 2;
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
-                DrawChild(g, child, r, Fill(p.Node), live: p.Node.State == StateKind.Busy);
+                DrawChild(g, child, r, Fill(p.Node), live: p.Node.State == StateKind.Busy, open: _browseFor == p.Node.SessionId + "/" + child.Id);
             }
             foreach (var (message, r) in p.Messages)
             {
@@ -347,7 +347,8 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
         // Line 2: the name sessions message it by (when the title isn't it) and its folder.
         string id = n.Name == n.Title ? "" : n.Name + " · ";
-        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w, Line), dim, Flags);
+        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w - Line - 6, Line), dim, Flags);
+        DrawChevron(g, SessionChevron(p.Box), _browseFor == n.SessionId);
         // Lines 3-4: the last prompt — the user's, or another session's message to it.
         if (n.Prompt is { } prompt)
             DrawCommand(g, prompt.FromPeer ? IconClaude : IconUser,
@@ -461,7 +462,7 @@ internal sealed class AgentsView : ScrollableControl
     /// what it does, and in the corner last output / started, as the session shows last active /
     /// started. Line 2: a subagent's current tool call, or a shell's process.
     /// </summary>
-    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r, Color parentFill, bool live)
+    private void DrawChild(Graphics g, SessionState.AgentChild c, Rectangle r, Color parentFill, bool live, bool open)
     {
         Color fill = Blend(parentFill, Color.White, 0.6f);
         using (var path = TaskbarOverlay.RoundedRect(r, 5))
@@ -472,6 +473,7 @@ internal sealed class AgentsView : ScrollableControl
             g.DrawPath(border, path);
         }
         int lx = r.Left + 8, w = r.Width - 16, y = r.Top + 4;
+        DrawChevron(g, ChildChevron(r), open);
         string corner = (c.LastOutputUtc is { } o ? SessionState.FormatAge(o) : "–")
                       + (c.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
         if (c.Activity.Length > 0) corner = c.StartedUtc is { } started ? SessionState.FormatAge(started) : "";
@@ -490,17 +492,17 @@ internal sealed class AgentsView : ScrollableControl
         if (last != null || c.Activity.Length > 0)
         {
             if (live) DrawShimmer(g, new Rectangle(r.Left, y + Line, r.Width, Line));
-            DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w, Line));
+            DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w - Line - 6, Line));
         }
         else
-            TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
+            TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - 2 * Line - 8, Line), Color.FromArgb(60, 60, 60), Flags);
     }
 
     // A leading cd into the working folder: the same for every call, it hides what the command does.
-    private static readonly System.Text.RegularExpressions.Regex LeadingCd = new(@"^\s*(cd|Set-Location)\s+(""[^""]*""|'[^']*'|\S+)\s*(;|&&)\s*");
+    private static readonly System.Text.RegularExpressions.Regex LeadingCd = new(@"^\s*(cd|Set-Location)\s+(""[^""]*""|'[^']*'|\S+)\s*(;|&&|\r?\n)\s*");
 
     /// <summary>A command line on one line, without its leading cd.</summary>
-    private static string Shown(string command) => LeadingCd.Replace(command.ReplaceLineEndings(" ").Trim(), "");
+    private static string Shown(string command) => LeadingCd.Replace(command.Trim(), "").ReplaceLineEndings(" ").Trim();
 
     /// <summary>The child's own hover text: everything known about it, in full.</summary>
     private static string ChildTip(SessionState.AgentChild c)
@@ -583,15 +585,17 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseMove(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        Cursor = ChevronAt(at) != null ? Cursors.Hand : Cursors.Default;
         // Over a prompt or the actions: the full message, or the recent actions, in a popup.
-        foreach (var p in _placed)
+        // Not while a browse panel is open: it shows the same and more.
+        foreach (var p in _browse == null ? _placed : [])
         {
             string? zone = PromptZone(p.Box).Contains(at) && p.Node.Prompt != null ? "prompt" : ActionZone(p.Box).Contains(at) ? "actions" : null;
             if (zone == null) continue;
             string key = zone + "/" + p.Node.SessionId;
             if (key != _popupFor)
             {
-                ClosePopup();
+                CloseHover();
                 _tipFor = null;
                 _tip.Hide(this);
                 _popupFor = key;
@@ -600,7 +604,7 @@ internal sealed class AgentsView : ScrollableControl
             }
             return;
         }
-        ClosePopup();
+        CloseHover();
 
         string? key2 = null, text = null, highlight = null;
         foreach (var p in _placed)
@@ -632,7 +636,7 @@ internal sealed class AgentsView : ScrollableControl
             ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
         if (zone is not ("prompt" or "actions")) throw new ArgumentException("zone must be prompt or actions");
         if (zone == "prompt" && p.Node.Prompt == null) throw new InvalidOperationException($"{p.Node.Name} has no prompt yet");
-        ClosePopup();
+        CloseHover();
         _popupFor = zone + "/" + p.Node.SessionId;
         var corner = PointToScreen(new Point(p.Box.Left + AutoScrollPosition.X, (zone == "prompt" ? PromptZone(p.Box) : ActionZone(p.Box)).Top + AutoScrollPosition.Y));
         _popup = new DetailPopup(zone == "prompt" ? PromptRows(p.Node) : ActionRows(p.Node), corner);
@@ -642,11 +646,162 @@ internal sealed class AgentsView : ScrollableControl
 
     public IntPtr? PopupHandle => _popup is { IsDisposed: false } popup ? popup.Handle : null;
 
+    /// <summary>Close the hover popup and the browse panel.</summary>
     public void ClosePopup()
+    {
+        CloseHover();
+        CloseBrowse();
+    }
+
+    private void CloseHover()
     {
         _popup?.Close();
         _popup = null;
         _popupFor = null;
+    }
+
+    private DetailPopup? _browse;
+    private string? _browseFor;
+
+    // The chevron at the right of a box's or card's second line: opens its input and recent actions.
+    private Rectangle SessionChevron(Rectangle box) => new(box.Right - Line - 8, box.Top + 5 + Line, Line + 4, Line);
+    private Rectangle ChildChevron(Rectangle card) => new(card.Right - Line - 8, card.Top + 4 + Line, Line + 4, Line);
+
+    private void DrawChevron(Graphics g, Rectangle r, bool open) =>
+        TextRenderer.DrawText(g, open ? "\uE70D" : "\uE76C", _iconFont, r, Color.FromArgb(60, 60, 60),
+            Flags | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+    /// <summary>The chevron under <paramref name="at"/>: the key of what it opens, where it is, and its rows.</summary>
+    private (string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)? ChevronAt(Point at)
+    {
+        foreach (var p in _placed)
+        {
+            var node = p.Node;
+            if (SessionChevron(p.Box).Contains(at)) return (node.SessionId, SessionChevron(p.Box), () => SessionBrowseRows(node));
+            foreach (var (c, r) in p.Children)
+                if (ChildChevron(r).Contains(at)) return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
+        }
+        return null;
+    }
+
+    private void OpenBrowse(string key, Rectangle zone, List<DetailPopup.Row> rows)
+    {
+        CloseBrowse();
+        CloseHover();
+        _tipFor = null;
+        _tip.Hide(this);
+        // DetailPopup sits 14, 18 right of and below the point it is given: this puts it at the chevron.
+        var popup = new DetailPopup(rows, PointToScreen(new Point(zone.Right - 14 + AutoScrollPosition.X, zone.Top - 18 + AutoScrollPosition.Y)));
+        // Showing it deactivates this window: only then is it the open panel, or that would close it mid-show.
+        popup.Show();
+        _browse = popup;
+        _browseFor = key;
+        var form = FindForm()!;
+        form.Deactivate -= OnFormDeactivate;
+        form.Deactivate += OnFormDeactivate;
+        Invalidate();
+    }
+
+    // Another app came to the front (no form of ours is active): the panel goes with this window.
+    private void OnFormDeactivate(object? sender, EventArgs e)
+    {
+        if (Form.ActiveForm == null) CloseBrowse();
+    }
+
+    private void CloseBrowse()
+    {
+        if (_browse == null) return;
+        _browse.Close();
+        _browse = null;
+        _browseFor = null;
+        Invalidate();
+    }
+
+    /// <summary>For the control channel: open a session's browse panel, or one of its agents' or shells', as its chevron does.</summary>
+    public void Browse(string session, string? child)
+    {
+        var p = _placed.FirstOrDefault(x => x.Node.SessionId == session || x.Node.Name == session)
+            ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
+        if (child == null) OpenBrowse(p.Node.SessionId, SessionChevron(p.Box), SessionBrowseRows(p.Node));
+        else
+        {
+            var (c, r) = p.Children.FirstOrDefault(x => x.Child.Id == child || x.Child.Description == child);
+            if (c == null) throw new ArgumentException($"{p.Node.Name} has no agent or shell \"{child}\"; it has: {string.Join(", ", p.Children.Select(x => x.Child.Description))}");
+            OpenBrowse(p.Node.SessionId + "/" + c.Id, ChildChevron(r), ChildBrowseRows(c));
+        }
+        _browse!.Refresh();
+    }
+
+    /// <summary>For the control channel: hover a row of the open browse panel, opening its preview.</summary>
+    public void BrowseHover(int row) =>
+        (_browse ?? throw new InvalidOperationException("no browse panel is open; call ui.agentsBrowse first")).HoverRow(row);
+
+    public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : null;
+    public IntPtr? PreviewHandle => _browse is { IsDisposed: false } b ? b.PreviewHandle : null;
+
+    /// <summary>A session's last prompt and recent actions, each previewed in full when hovered.</summary>
+    private static List<DetailPopup.Row> SessionBrowseRows(SessionState.AgentNode n)
+    {
+        var rows = new List<DetailPopup.Row>();
+        if (n.Prompt is { } p) rows.Add(PromptRow(n.TranscriptPath, p, p.FromPeer ? IconClaude : IconUser, p.FromPeer ? $"{p.From}: " : ""));
+        rows.AddRange(n.Actions.Select(a => ActionRow(n.TranscriptPath, a)));
+        return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
+    }
+
+    /// <summary>A subagent's task and recent actions; a shell's command and output.</summary>
+    private static List<DetailPopup.Row> ChildBrowseRows(SessionState.AgentChild c)
+    {
+        var rows = new List<DetailPopup.Row>();
+        if (c.Transcript is { } transcript)
+        {
+            if (c.Prompt is { } p) rows.Add(PromptRow(transcript, p, IconClaude, "task: "));
+            rows.AddRange(c.Actions.Select(a => ActionRow(transcript, a)));
+        }
+        if (c.Command is { } command)
+            rows.Add(new(IconShell, TaskbarOverlay.Truncate(Shown(command), 160), c.StartedUtc is { } s ? SessionState.FormatAge(s) : null, null,
+                () => new() { new(null, command, null, null, Shell: true) }));
+        if (c.OutputFile is { } file)
+            rows.Add(new(IconRead, "its output", c.LastOutputUtc is { } o ? SessionState.FormatAge(o) : null, null,
+                () => new() { new(null, OutputTail(file), null, null, Mono: true) }));
+        return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
+    }
+
+    private static DetailPopup.Row PromptRow(string transcript, ClaudeSessionRegistry.Prompt prompt, char icon, string from) =>
+        new(icon, TaskbarOverlay.Truncate(from + Flatten(prompt.Text), 160), SessionState.FormatAge(prompt.AtUtc), null, () =>
+        {
+            var (text, images) = ClaudeSessionRegistry.PromptDetail(transcript, prompt);
+            return DetailRows(new(text, true, images));
+        });
+
+    private static DetailPopup.Row ActionRow(string transcript, ClaudeSessionRegistry.ClaudeAction a) =>
+        new(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool), TaskbarOverlay.Truncate(a.Command is { } c ? Shown(c) : Flatten(a.Text), 160),
+            SessionState.FormatAge(a.AtUtc), null, () => DetailRows(ClaudeSessionRegistry.ActionDetail(transcript, a)));
+
+    private static List<DetailPopup.Row> DetailRows(ClaudeSessionRegistry.Detail d)
+    {
+        var rows = new List<DetailPopup.Row>();
+        if (d.Command != null) rows.Add(new(null, d.Command, null, null, Shell: true));
+        if (d.Text.Trim().Length > 0) rows.Add(new(null, d.Text.Trim(), null, null, Markdown: d.Markdown, Mono: !d.Markdown));
+        rows.AddRange(d.Images.Select(Picture));
+        return rows.Count > 0 ? rows : new() { new(null, "(empty)", null, null) };
+    }
+
+    private static DetailPopup.Row Picture(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var decoded = Image.FromStream(stream);
+        return new(null, "", null, new Bitmap(decoded));
+    }
+
+    /// <summary>The end of a shell's output file.</summary>
+    private static string OutputTail(string file)
+    {
+        if (!File.Exists(file)) return "(its output file is gone)";
+        const int Tail = 30_000;
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        bool cut = stream.Length > Tail;
+        if (cut) stream.Seek(-Tail, SeekOrigin.End);
+        return (cut ? "… (earlier output cut)\n" : "") + new StreamReader(stream).ReadToEnd();
     }
 
     /// <summary>The last prompt in full, read again from the transcript, with the images pasted into it.</summary>
@@ -678,6 +833,17 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseUp(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        if (e.Button == MouseButtons.Left && ChevronAt(at) is { } chevron)
+        {
+            if (_browseFor == chevron.Key) CloseBrowse();
+            else
+            {
+                try { OpenBrowse(chevron.Key, chevron.Zone, chevron.Rows()); }
+                catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            }
+            return;
+        }
+        if (e.Button == MouseButtons.Left) CloseBrowse();
         if (e.Button == MouseButtons.Left && _placed.SelectMany(p => p.Messages).FirstOrDefault(m => DismissZone(m.Box).Contains(at)) is { Box.Width: > 0 } dismissed)
         {
             Run("message.dismiss", new { session = dismissed.Message.FromId, to = dismissed.Message.To });
@@ -734,7 +900,7 @@ internal sealed class AgentsView : ScrollableControl
         base.OnMouseLeave(e);
         _tipFor = null;
         _tip.Hide(this);
-        ClosePopup();
+        CloseHover();
         SetHighlight(null);
     }
 
@@ -749,27 +915,46 @@ internal sealed class AgentsView : ScrollableControl
 }
 
 /// <summary>
-/// A hover popup of rows — an icon, wrapped text and a small note (who, when), or an image —
-/// divided by dotted lines. Never takes focus; images it is given are disposed with it.
+/// A popup of rows — an icon, wrapped text and a small note (who, when), or an image — divided by
+/// dotted lines. Never takes focus; images it is given are disposed with it. A row with a
+/// <see cref="Row.Preview"/> opens that preview beside the popup while the mouse is over it; the
+/// wheel scrolls the preview when one is open, else the popup.
 /// </summary>
 internal sealed class DetailPopup : Form
 {
     /// <summary><see cref="Age"/> ("2m") ends the first line in bold, the text wrapping around it;
-    /// a row with the same age as the one before it doesn't repeat it.</summary>
-    public sealed record Row(char? Icon, string Text, string? Age, Image? Image);
+    /// a row with the same age as the one before it doesn't repeat it. <see cref="Markdown"/>: the
+    /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
+    /// as a PowerShell or Bash command, highlighted.</summary>
+    public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
+                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false);
 
-    private const int Pad = 8, RowGap = 6, MaxWidth = 520, MaxImageHeight = 420;
-    private readonly List<(Row Row, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder)> _laid = new();
-    private readonly Font _font, _iconFont, _ageFont;
+    private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
+    private sealed record Run(string Text, Color Color, Point At);
+    private sealed record Laid(Row Row, Rectangle Bounds, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder, List<Block>? Blocks, List<Run>? Runs = null);
 
-    private const TextFormatFlags Wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak;
+    private const int Pad = 8, RowGap = 6;
+    private readonly int _maxImageHeight;
+    private readonly List<Laid> _laid = new();
+    private readonly Font _font, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
+    private readonly int _contentHeight;
+    private int _scroll;
+    private DetailPopup? _preview;
+    private int _previewRow = -1;
 
-    public DetailPopup(List<Row> rows, Point screenAt)
+    private const TextFormatFlags Wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
+    private const TextFormatFlags Line = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
+
+    public DetailPopup(List<Row> rows, Point screenAt, int width = 520)
     {
         // Its own 9 pt text, whatever the Agents tab is zoomed to.
         _font = new Font("Segoe UI", 9f);
         _iconFont = new Font("Segoe MDL2 Assets", 9f);
         _ageFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+        _monoFont = new Font("Consolas", 8.5f);
+        _h1Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+        _h2Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+        _maxImageHeight = width * 4 / 5;
         var font = _font;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -778,17 +963,33 @@ internal sealed class DetailPopup : Form
         BackColor = TipCard.Back(false);
         DoubleBuffered = true;
 
-        int iconW = font.Height + 4, textW = MaxWidth - 2 * Pad - iconW;
+        bool icons = rows.Any(r => r.Icon != null);
+        int iconW = icons ? font.Height + 4 : 0, textW = width - 2 * Pad - iconW;
         int y = Pad;
         string? previousAge = null;
         foreach (var row in rows)
         {
             if (row.Image is { } image)
             {
-                float scale = Math.Min(1f, Math.Min((float)(MaxWidth - 2 * Pad) / image.Width, (float)MaxImageHeight / image.Height));
+                float scale = Math.Min(1f, Math.Min((float)(width - 2 * Pad) / image.Width, (float)_maxImageHeight / image.Height));
                 var r = new Rectangle(Pad, y, (int)(image.Width * scale), (int)(image.Height * scale));
-                _laid.Add((row, Rectangle.Empty, r, null, "", ""));
+                _laid.Add(new(row, new Rectangle(0, y - RowGap, width, r.Height + 2 * RowGap), Rectangle.Empty, r, null, "", "", null));
                 y = r.Bottom + RowGap * 2;
+                continue;
+            }
+            if (row.Shell)
+            {
+                var runs = LayOutShell(row.Text, textW, out int h);
+                _laid.Add(new(row, new Rectangle(0, y - RowGap, width, h + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, h), Rectangle.Empty, null, "", "", null, runs));
+                y += h + RowGap * 2;
+                continue;
+            }
+            if (row.Markdown || row.Mono)
+            {
+                var blocks = row.Mono ? new List<Block> { Measure(row.Text, _monoFont, 0, 0, textW) } : LayOutMarkdown(row.Text, textW);
+                int h = blocks.Count == 0 ? 0 : blocks[^1].Top + blocks[^1].Height;
+                _laid.Add(new(row, new Rectangle(0, y - RowGap, width, h + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, h), Rectangle.Empty, null, "", "", blocks));
+                y += h + RowGap * 2;
                 continue;
             }
             string? age = row.Age == previousAge ? null : row.Age;
@@ -797,22 +998,138 @@ internal sealed class DetailPopup : Form
             var (first, rest) = age != null ? SplitFirstLine(row.Text, font, textW - ageW - 6) : ("", row.Text);
             int textH = (age != null ? font.Height : 0)
                       + (rest.Length > 0 || age == null ? TextRenderer.MeasureText(rest, font, new Size(textW, int.MaxValue), Wrap).Height : 0);
-            _laid.Add((row, new Rectangle(Pad + iconW, y, textW, textH), Rectangle.Empty, age, first, rest));
+            _laid.Add(new(row, new Rectangle(0, y - RowGap, width, textH + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, textH), Rectangle.Empty, age, first, rest, null));
             y += textH + RowGap * 2;
         }
+        _contentHeight = y - RowGap + Pad;
         var work = Screen.FromPoint(screenAt).WorkingArea;
-        Size = new Size(MaxWidth, Math.Min(y - RowGap + Pad, work.Height - 20));
+        Size = new Size(width, Math.Min(_contentHeight, work.Height - 20));
         Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
         FormClosed += (_, _) =>
         {
+            _preview?.Close();
             foreach (var laid in _laid) laid.Row.Image?.Dispose();
             _font.Dispose();
             _iconFont.Dispose();
             _ageFont.Dispose();
+            _monoFont.Dispose();
+            _h1Font.Dispose();
+            _h2Font.Dispose();
         };
     }
 
-    private const TextFormatFlags Line = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+    private static Block Measure(string text, Font font, int indent, int top, int width) =>
+        new(text, font, indent, top, TextRenderer.MeasureText(text.Length == 0 ? " " : text, font, new Size(width - indent, int.MaxValue), Wrap).Height);
+
+    private static readonly System.Text.RegularExpressions.Regex Link = new(@"\[([^\]]+)\]\([^)]+\)");
+
+    /// <summary>Plain markdown, line by line: headings, bullets, code blocks and tables in a fixed
+    /// font, a gap for a blank line; inline marks (**, `, links) are dropped for their text.</summary>
+    private List<Block> LayOutMarkdown(string text, int width)
+    {
+        var blocks = new List<Block>();
+        int top = 0;
+        void Add(string t, Font f, int indent)
+        {
+            var b = Measure(t, f, indent, top, width);
+            blocks.Add(b);
+            top += b.Height;
+        }
+        string Inline(string s) => Link.Replace(s, "$1").Replace("**", "").Replace("__", "").Replace("`", "");
+        var code = new List<string>();
+        bool fenced = false;
+        foreach (var raw in text.Replace("\r", "").Split('\n'))
+        {
+            if (raw.TrimStart().StartsWith("```"))
+            {
+                if (fenced) { Add(string.Join("\n", code), _monoFont, 8); top += 4; code.Clear(); }
+                fenced = !fenced;
+                continue;
+            }
+            if (fenced) { code.Add(raw); continue; }
+            string line = raw.TrimEnd();
+            string trimmed = line.TrimStart();
+            if (trimmed.Length == 0) top += 6;
+            else if (trimmed.StartsWith("# ")) { top += 4; Add(Inline(trimmed[2..]), _h1Font, 0); top += 2; }
+            else if (trimmed.StartsWith('#')) { top += 4; Add(Inline(trimmed.TrimStart('#').Trim()), _h2Font, 0); top += 2; }
+            else if (trimmed.StartsWith('|')) Add(line, _monoFont, 0);
+            else if (trimmed is "---" or "***") top += 8;
+            else if (trimmed.StartsWith("- ") || trimmed.StartsWith("* ")) Add("•  " + Inline(trimmed[2..]), _font, 12 + (line.Length - trimmed.Length) * 4);
+            else if (trimmed.StartsWith("> ")) Add(Inline(trimmed[2..]), _font, 12);
+            else Add(Inline(line), _font, 0);
+        }
+        if (code.Count > 0) Add(string.Join("\n", code), _monoFont, 8);
+        return blocks;
+    }
+
+    private const TextFormatFlags Code = Line | TextFormatFlags.NoPadding;
+
+    /// <summary>A command in the fixed-width font, token by token in its colour, wrapped at the width.</summary>
+    private List<Run> LayOutShell(string command, int width, out int height)
+    {
+        int charW = TextRenderer.MeasureText(new string('M', 20), _monoFont, Size.Empty, Code).Width / 20;
+        int cols = Math.Max(20, width / charW), lineH = _monoFont.Height;
+        var runs = new List<Run>();
+        int col = 0, row = 0;
+        foreach (var (token, color) in ShellTokens(command.Replace("\r", "").Trim()))
+        {
+            var lines = token.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (i > 0) { row++; col = 0; }
+                string rest = lines[i];
+                while (rest.Length > 0)
+                {
+                    if (col == cols) { row++; col = 0; }
+                    int take = Math.Min(rest.Length, cols - col);
+                    runs.Add(new(rest[..take], color, new Point(col * charW, row * lineH)));
+                    col += take;
+                    rest = rest[take..];
+                }
+            }
+        }
+        height = (row + 1) * lineH;
+        return runs;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ShellToken = new(
+        @"(?<comment>(?<=^|\s)#[^\n]*)|(?<string>'[^']*'|""(?:[^""\\`]|[\\`].)*"")|(?<variable>\$\{?[\w:]+\}?)|(?<op>\|\||&&|[|;&<>()={}])|(?<space>\s+)|(?<param>(?<=\s)--?[A-Za-z][\w-]*)|(?<number>\b\d+(?:\.\d+)?\b)|(?<word>[^\s'""$|;&<>()={}]+)|(?<other>.)",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    private static readonly HashSet<string> ShellKeywords = new(StringComparer.OrdinalIgnoreCase)
+        { "if", "then", "else", "elif", "fi", "for", "foreach", "in", "do", "done", "while", "until", "case", "esac", "function", "return", "try", "catch", "finally", "param" };
+
+    private static readonly Color CommandColor = Color.FromArgb(121, 94, 38), KeywordColor = Color.FromArgb(175, 0, 219),
+        ParamColor = Color.FromArgb(0, 92, 197), StringColor = Color.FromArgb(163, 21, 21), VariableColor = Color.FromArgb(0, 16, 128),
+        CommentColor = Color.FromArgb(0, 128, 0), NumberColor = Color.FromArgb(9, 134, 88), OpColor = Color.FromArgb(110, 110, 110);
+
+    /// <summary>A command's tokens with their colours: the first word of each statement is the command.</summary>
+    private static IEnumerable<(string Text, Color Color)> ShellTokens(string command)
+    {
+        bool commandNext = true;
+        foreach (System.Text.RegularExpressions.Match m in ShellToken.Matches(command))
+        {
+            string t = m.Value;
+            if (m.Groups["space"].Success)
+            {
+                if (t.Contains('\n')) commandNext = true;
+                yield return (t, SystemColors.ControlText);
+            }
+            else if (m.Groups["comment"].Success) yield return (t, CommentColor);
+            else if (m.Groups["string"].Success) { yield return (t, StringColor); commandNext = false; }
+            else if (m.Groups["variable"].Success) { yield return (t, VariableColor); commandNext = false; }
+            else if (m.Groups["op"].Success)
+            {
+                if (t is "|" or "||" or "&&" or ";" or "(" or "{" or "&") commandNext = true;
+                yield return (t, OpColor);
+            }
+            else if (m.Groups["param"].Success) yield return (t, ParamColor);
+            else if (m.Groups["number"].Success && !commandNext) yield return (t, NumberColor);
+            else if (ShellKeywords.Contains(t)) { yield return (t, KeywordColor); commandNext = t is not ("in" or "function" or "param"); }
+            else if (commandNext) { yield return (t, CommandColor); commandNext = false; }
+            else yield return (t, SystemColors.ControlText);
+        }
+    }
 
     /// <summary>The words of the text's first line that fit <paramref name="width"/>, and the rest.</summary>
     private static (string First, string Remainder) SplitFirstLine(string text, Font font, int width)
@@ -824,6 +1141,54 @@ internal sealed class DetailPopup : Form
             fit = line.LastIndexOf(' ', fit - 1) is int space and > 0 ? space : fit - 1;
         string rest = line[fit..].TrimStart() + (newline >= 0 ? "\n" + text[(newline + 1)..] : "");
         return (line[..fit], rest.Trim());
+    }
+
+    public IntPtr? PreviewHandle => _preview is { IsDisposed: false } p ? p.Handle : null;
+
+    /// <summary>Open row <paramref name="index"/>'s preview, as the mouse over it does.</summary>
+    public void HoverRow(int index)
+    {
+        if (index < 0 || index >= _laid.Count) throw new ArgumentException($"row must be 0-{_laid.Count - 1}");
+        if (_laid[index].Row.Preview == null) throw new InvalidOperationException($"row {index} has nothing to preview");
+        ShowPreview(index);
+        _preview!.Refresh();
+    }
+
+    private void ShowPreview(int index)
+    {
+        _preview?.Close();
+        _preview = null;
+        _previewRow = index;
+        Invalidate();
+        if (_laid[index].Row.Preview is not { } preview) return;
+        var work = Screen.FromControl(this).WorkingArea;
+        var popup = new DetailPopup(preview(), Location, 640);
+        int x = Right + 4 + popup.Width <= work.Right ? Right + 4 : Left - 4 - popup.Width;
+        int y = Math.Clamp(Top + _laid[index].Bounds.Top - _scroll, work.Top, work.Bottom - popup.Height);
+        popup.Location = new Point(x, y);
+        popup.Show();
+        _preview = popup;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        int y = e.Y + _scroll;
+        int index = _laid.FindIndex(l => l.Bounds.Top <= y && y < l.Bounds.Bottom);
+        if (index >= 0 && index != _previewRow && _laid[index].Row.Preview != null) ShowPreview(index);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (_preview is { IsDisposed: false } preview) preview.ScrollBy(-e.Delta);
+        else ScrollBy(-e.Delta);
+    }
+
+    public void ScrollBy(int pixels)
+    {
+        _scroll = Math.Clamp(_scroll + pixels, 0, Math.Max(0, _contentHeight - ClientSize.Height));
+        Invalidate();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -841,11 +1206,18 @@ internal sealed class DetailPopup : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
+        bool more = _scroll < _contentHeight - ClientSize.Height;
         using (var border = new Pen(TipCard.Border(false))) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        if (more)
+            TextRenderer.DrawText(g, "▼ wheel for more", _font, new Rectangle(0, Height - _font.Height - 3, Width - Pad, _font.Height), SystemColors.GrayText, TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+        g.SetClip(new Rectangle(1, 1, Width - 2, Height - 2 - (more ? _font.Height + 4 : 0)));
+        g.TranslateTransform(0, -_scroll);
         using var dotted = new Pen(TipCard.Border(false)) { DashStyle = DashStyle.Dot };
+        if (_previewRow >= 0 && _previewRow < _laid.Count)
+            using (var hover = new SolidBrush(Color.FromArgb(40, SystemColors.Highlight))) g.FillRectangle(hover, _laid[_previewRow].Bounds);
         for (int i = 0; i < _laid.Count; i++)
         {
-            var (row, text, image, age, first, rest) = _laid[i];
+            var (row, _, text, image, age, first, rest, blocks, runs) = _laid[i];
             if (i > 0)
             {
                 int top = (row.Image != null ? image.Top : text.Top) - RowGap;
@@ -855,7 +1227,19 @@ internal sealed class DetailPopup : Form
             if (row.Icon == AgentsView.IconClaude)
                 g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
             else if (row.Icon is { } icon)
-                TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, Line);
+            if (runs != null)
+            {
+                foreach (var run in runs)
+                    TextRenderer.DrawText(g, run.Text, _monoFont, new Point(text.Left + run.At.X, text.Top + run.At.Y), run.Color, Code);
+                continue;
+            }
+            if (blocks != null)
+            {
+                foreach (var b in blocks)
+                    TextRenderer.DrawText(g, b.Text, b.Font, new Rectangle(text.Left + b.Indent, text.Top + b.Top, text.Width - b.Indent, b.Height), SystemColors.ControlText, Wrap);
+                continue;
+            }
             int restTop = text.Top;
             if (age != null)
             {
@@ -868,4 +1252,3 @@ internal sealed class DetailPopup : Form
         }
     }
 }
-
