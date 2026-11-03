@@ -164,10 +164,9 @@ internal sealed class AgentsView : ScrollableControl
         var groups = new List<(Guid, string, Rectangle)>();
         // Every desktop that no longer exists is one "no desktop" frame.
         Guid GroupOf(Guid id) => Order(id) == int.MaxValue ? Guid.Empty : id;
-        // Desktops where something is happening first, then the ones open to input, the greyed ones last; desktop order within each.
-        int Tier(IEnumerable<SessionState.AgentNode> ns) =>
-            ns.Any(n => Working(n) || n.State is StateKind.Asking or StateKind.Error) ? 0
-            : ns.Any(n => n.State != StateKind.None && DateTime.UtcNow - n.LastActiveUtc <= Stale) ? 1 : 2;
+        // Desktops active in the last two hours first, then the rest; desktop order within each. Not by
+        // state: a desktop going busy or ready moved it, so frames kept changing place under the user.
+        int Tier(IEnumerable<SessionState.AgentNode> ns) => ns.Any(n => DateTime.UtcNow - n.LastActiveUtc <= Recent) ? 0 : 1;
         foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
         {
             var nodes = group.OrderByDescending(n => n.LastActiveUtc).ToList();  // most recently active first
@@ -313,6 +312,9 @@ internal sealed class AgentsView : ScrollableControl
 
     /// <summary>Idle this long, a session is a leftover rather than live work: drawn faded.</summary>
     private static readonly TimeSpan Stale = TimeSpan.FromHours(1);
+
+    /// <summary>A desktop active within this long keeps its place among the recent ones, in desktop order.</summary>
+    private static readonly TimeSpan Recent = TimeSpan.FromHours(2);
 
     private void DrawSession(Graphics g, Placed p)
     {
