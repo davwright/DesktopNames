@@ -298,7 +298,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 int spine = p.Box.Left + (BoxW - ChildW) / 2;
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
-                DrawMessage(g, message, r, p);
+                DrawMessage(g, message, r, p, open: _browseFor == MessageKey(p, message));
             }
             DrawSession(g, p);
         }
@@ -492,7 +492,12 @@ internal sealed class AgentsView : ScrollableControl
         if (last != null || c.Activity.Length > 0)
         {
             if (live) DrawShimmer(g, new Rectangle(r.Left, y + Line, r.Width, Line));
-            DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, w - Line - 6, Line));
+            // Before the chevron: how long ago its latest action was, so a quiet agent shows as one.
+            string latest = last != null ? SessionState.FormatAge(last.AtUtc) : "";
+            int latestW = latest.Length > 0 ? TextRenderer.MeasureText(latest, Font).Width : 0;
+            int lineW = w - Line - 6 - latestW;
+            DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, lineW, Line));
+            if (latestW > 0) TextRenderer.DrawText(g, latest, Font, new Rectangle(lx + lineW, y + Line, latestW, Line), Color.FromArgb(60, 60, 60), Flags);
         }
         else
             TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - 2 * Line - 8, Line), Color.FromArgb(60, 60, 60), Flags);
@@ -544,7 +549,7 @@ internal sealed class AgentsView : ScrollableControl
     /// A message the session sent, drawn like its agents and shells: line 1 the send icon and who it
     /// went to, in the corner when; line 2 its summary, and that the sender waits on a reply.
     /// </summary>
-    private void DrawMessage(Graphics g, SessionState.AgentEdge e, Rectangle r, Placed from)
+    private void DrawMessage(Graphics g, SessionState.AgentEdge e, Rectangle r, Placed from, bool open)
     {
         Color parentFill = Fill(from.Node);
         using (var path = TaskbarOverlay.RoundedRect(r, 5))
@@ -565,7 +570,17 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
         string second = (e.Waiting ? "waiting for a reply · " : "") + (e.Summary.Length > 0 ? e.Summary : "message");
         TextRenderer.DrawText(g, second, Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
+        DrawChevron(g, ChildChevron(r), open);
     }
+
+    private static string MessageKey(Placed from, SessionState.AgentEdge e) => from.Node.SessionId + "/msg/" + e.To + e.AtUtc.Ticks;
+
+    /// <summary>A sent message in full, read from the sender's transcript, rendered as markdown.</summary>
+    private List<DetailPopup.Row> MessageRows(Placed from, SessionState.AgentEdge e) => new()
+    {
+        new(IconSent, (e.Waiting ? "waiting for a reply · " : "") + "to " + Recipient(e, from), SessionState.FormatAge(e.AtUtc), null),
+        new(null, ClaudeSessionRegistry.SentMessage(from.Node.TranscriptPath, e.Summary, e.AtUtc), null, null, Markdown: true),
+    };
 
     private Rectangle DismissZone(Rectangle message) => new(message.Right - Line - 6, message.Top + 2, Line + 4, Line + 2);
 
@@ -680,6 +695,8 @@ internal sealed class AgentsView : ScrollableControl
             if (SessionChevron(p.Box).Contains(at)) return (node.SessionId, SessionChevron(p.Box), () => SessionBrowseRows(node));
             foreach (var (c, r) in p.Children)
                 if (ChildChevron(r).Contains(at)) return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
+            foreach (var (m, r) in p.Messages)
+                if (ChildChevron(r).Contains(at)) return (MessageKey(p, m), ChildChevron(r), () => MessageRows(p, m));
         }
         return null;
     }
@@ -723,6 +740,8 @@ internal sealed class AgentsView : ScrollableControl
         var p = _placed.FirstOrDefault(x => x.Node.SessionId == session || x.Node.Name == session)
             ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
         if (child == null) OpenBrowse(p.Node.SessionId, SessionChevron(p.Box), SessionBrowseRows(p.Node));
+        else if (p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
+            OpenBrowse(MessageKey(p, m.Message), ChildChevron(m.Box), MessageRows(p, m.Message));
         else
         {
             var (c, r) = p.Children.FirstOrDefault(x => x.Child.Id == child || x.Child.Description == child);

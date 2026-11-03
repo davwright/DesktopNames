@@ -57,7 +57,7 @@ internal sealed class ControlChannel
             return null;
         }));
         _methods.Add(new("ui.agentsBrowse", "Click a chevron in the Agents tab: opens the last input and recent actions of a session, or of one of its agents or shells (screenshot window browse)",
-            new[] { "session", "child" }, "session: name or id; child: an agent's or shell's id or description, default the session itself", a =>
+            new[] { "session", "child" }, "session: name or id; child: an agent's or shell's id or description, or to:<recipient> for a message it sent; default the session itself", a =>
         {
             ProjectsWindow().Agents.Browse(a.RequiredStr("session"), a.Str("child"));
             return null;
