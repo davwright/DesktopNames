@@ -83,7 +83,7 @@ Start-Sleep -Milliseconds 600
 if ($LASTEXITCODE -ne 0) { throw "publish failed (exit $LASTEXITCODE)" }
 
 # dn.exe, the command-line client, next to it and on PATH via %LOCALAPPDATA%\Programs\dn.cmd.
-& dotnet publish (Join-Path $PSScriptRoot 'dn\dn.csproj') -c Release -o $deployDir --nologo
+& dotnet publish (Join-Path $PSScriptRoot 'dn\dn.csproj') -c Release -o $deployDir --nologo -p:Version=$new -p:InformationalVersion=$stamp
 if ($LASTEXITCODE -ne 0) { throw "dn publish failed (exit $LASTEXITCODE)" }
 Set-Content -Path (Join-Path $env:LOCALAPPDATA 'Programs\dn.cmd') -Value "@`"$deployDir\dn.exe`" %*" -Encoding ASCII
 

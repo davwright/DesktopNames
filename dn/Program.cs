@@ -1,9 +1,12 @@
-// dn — drive the running DesktopNames over its pipe, print the reply, exit.
+// dn — drive DesktopNames over its pipe (starting it if it is not running), print the reply, exit.
+//   dn start                             start DesktopNames
 //   dn run <command> [key=value ...]     run one command (dn commands lists them)
 //   dn <method> [key=value ...]          any control method (commands, inspect, ui.screenshot, …)
 //   dn <method> '<params-json>'          the same with JSON (PowerShell 5.1 strips its quotes: use key=value there)
 // Exit 0 ok, 1 the request failed, 2 usage error.
+using System.Diagnostics;
 using System.IO.Pipes;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -24,11 +27,28 @@ if (args is ["--ctrl-break", var target])
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("""
-        usage: dn run <command> [key=value ...]   e.g. dn run window.place window=msedge desktop=3 screen=2 state=max
+    var version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
+    Console.WriteLine($"""
+        dn {version} - command-line client for DesktopNames (starts it if it is not running)
+        usage: dn start                           start DesktopNames
+               dn run <command> [key=value ...]   e.g. dn run window.place window=msedge desktop=3 screen=2 state=max
                dn <method> [params-json]          e.g. dn commands | dn inspect | dn run window.list
         """);
-    return 2;
+    return 0;
+}
+
+bool started = false;
+if (Process.GetProcessesByName("DesktopNames").Length == 0)
+{
+    var exe = Path.Combine(AppContext.BaseDirectory, "DesktopNames.exe");
+    Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true });
+    Console.Error.WriteLine($"started {exe}");
+    started = true;
+}
+if (args is ["start"])
+{
+    if (!started) Console.Error.WriteLine("DesktopNames is already running");
+    return 0;
 }
 
 bool run = args[0] == "run";
@@ -58,8 +78,10 @@ string method = run ? "execute" : args[0];
 JsonNode? parameters = run ? new JsonObject { ["command"] = args[1], ["params"] = p ?? new JsonObject() } : p;
 
 using var pipe = new NamedPipeClientStream(".", "DesktopNames", PipeDirection.InOut);
-try { pipe.Connect(2000); }
-catch (TimeoutException) { Console.Error.WriteLine("DesktopNames pipe: no answer in 2 s (is DesktopNames running?)"); return 1; }
+// A fresh start needs time to open its pipe; Connect returns the moment it does.
+int connectMs = started ? 20000 : 2000;
+try { pipe.Connect(connectMs); }
+catch (TimeoutException) { Console.Error.WriteLine($"DesktopNames pipe: no answer in {connectMs / 1000} s"); return 1; }
 
 var request = new JsonObject { ["type"] = "control", ["method"] = method, ["params"] = parameters };
 var bytes = Encoding.UTF8.GetBytes(request.ToJsonString() + "\n");
