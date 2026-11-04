@@ -207,7 +207,7 @@ internal sealed class SessionState
 
     /// <summary>One SendMessage: to another session (<see cref="ToSessionId"/>) or to one of the
     /// sender's own subagents (<see cref="To"/> is its agent id).</summary>
-    public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc);
+    public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc);
 
     // Kept until the user dismisses them; a later message on the same line replaces the earlier one.
     private readonly List<PeerMessage> _messages = new();
@@ -242,7 +242,7 @@ internal sealed class SessionState
                                    ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent,
                                    string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, bool RemoteControl);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
-    public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, DateTime AtUtc, bool Waiting);
+    public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc, bool Waiting);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
 
     /// <summary>
@@ -289,7 +289,7 @@ internal sealed class SessionState
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],
                 e.RemoteControl)))
             .ToList();
-        var edges = _messages.Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.AtUtc, Waits(m))).ToList();
+        var edges = _messages.Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.Body, m.AtUtc, Waits(m))).ToList();
         return new AgentGraph(nodes, edges);
     }
 

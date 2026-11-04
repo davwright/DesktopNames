@@ -577,11 +577,12 @@ internal sealed class AgentsView : ScrollableControl
 
     private static string MessageKey(Placed from, SessionState.AgentEdge e) => from.Node.SessionId + "/msg/" + e.To + e.AtUtc.Ticks;
 
-    /// <summary>A sent message in full, read from the sender's transcript, rendered as markdown.</summary>
+    /// <summary>A sent message in full, as ClaudeHook forwarded it when the call was made, rendered as markdown.</summary>
     private List<DetailPopup.Row> MessageRows(Placed from, SessionState.AgentEdge e) => new()
     {
         new(IconSent, (e.Waiting ? "waiting for a reply · " : "") + "to " + Recipient(e, from), SessionState.FormatAge(e.AtUtc), null),
-        new(null, ClaudeSessionRegistry.SentMessage(from.Node.TranscriptPath, e.Summary, e.AtUtc), null, null, Markdown: true),
+        new(null, e.Body.Length > 0 ? e.Body : throw new InvalidOperationException($"ClaudeHook sent no text for the message \"{e.Summary}\" (a ClaudeHook older than sendBody?)"),
+            null, null, Markdown: true),
     };
 
     private Rectangle DismissZone(Rectangle message) => new(message.Right - Line - 6, message.Top + 2, Line + 4, Line + 2);

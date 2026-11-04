@@ -347,7 +347,7 @@ internal sealed class AlertPipeServer : IDisposable
                 Log.State($"message from {sid} to '{to}': no live session has that name or pipe (a subagent?) — not linked");
             // ClaudeHook describes it as "Message <to>: <summary>".
             string summary = msg.ToolDescription is { } d && d.IndexOf(": ", StringComparison.Ordinal) is int colon and >= 0 ? d[(colon + 2)..] : "";
-            _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, DateTime.UtcNow));
+            _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, msg.SendBody ?? "", DateTime.UtcNow));
             LogPeerMessage(msg, peerId);
         }
         if (removed || msg.HookEvent is "Stop" or "StopFailure")
@@ -765,6 +765,8 @@ internal sealed class AlertPipeServer : IDisposable
         public string? ToolDescription { get; set; }
         // PreToolUse SendMessage only: the recipient — another session's name, or a subagent's id.
         public string? SendTo { get; set; }
+        // PreToolUse SendMessage only: the message text in full.
+        public string? SendBody { get; set; }
         public string? Message { get; set; }
         // Set when the hook fired inside a background agent (Agent tool) of this session.
         public string? AgentId { get; set; }

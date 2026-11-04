@@ -454,31 +454,6 @@ internal sealed class ClaudeSessionRegistry
         };
     }
 
-    /// <summary>The full text of the newest message the session sent with this summary, up to <paramref name="atUtc"/>
-    /// (when DN heard of it, just after the transcript recorded the call).</summary>
-    public static string SentMessage(string path, string summary, DateTime atUtc)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
-        string? found = null;
-        while (reader.ReadLine() is { } line)
-        {
-            if (!line.Contains("\"name\":\"SendMessage\"", StringComparison.Ordinal) || !line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal)) continue;
-            using var doc = JsonDocument.Parse(line);
-            var r = doc.RootElement;
-            if (r.GetProperty("timestamp").GetDateTime().ToUniversalTime() > atUtc) break;
-            foreach (var block in r.GetProperty("message").GetProperty("content").EnumerateArray())
-            {
-                if (!block.TryGetProperty("name", out var n) || n.GetString() != "SendMessage") continue;
-                var input = block.GetProperty("input");
-                if ((input.TryGetProperty("summary", out var s) ? s.GetString() ?? "" : "") != summary) continue;
-                var message = input.GetProperty("message");
-                found = message.ValueKind == JsonValueKind.String ? message.GetString() ?? "" : message.GetRawText();
-            }
-        }
-        return Cut(found ?? throw new InvalidDataException($"{path}: no SendMessage with summary \"{summary}\" before {atUtc:HH:mm:ss}"));
-    }
-
     // The Read tool numbers each line: "  12<tab>…".
     private static readonly System.Text.RegularExpressions.Regex LineNumber = new(@"(?m)^ *\d+\t", System.Text.RegularExpressions.RegexOptions.Compiled);
 
