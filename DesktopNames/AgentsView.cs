@@ -550,10 +550,11 @@ internal sealed class AgentsView : ScrollableControl
     private const char IconCompact = '';
     private const char IconSent = '';
 
-    /// <summary>Who a message went to: the session's title, or for one of the sender's own subagents, what that agent does.</summary>
+    /// <summary>Who a message went to: the session's title, or for one of the sender's own subagents, what that agent does;
+    /// else the address as sent (a name or pipe no live session has).</summary>
     private string Recipient(SessionState.AgentEdge e, Placed from) =>
         e.ToSessionId != null ? _graph.Nodes.FirstOrDefault(n => n.SessionId == e.ToSessionId)?.Title ?? e.To
-        : from.Children.FirstOrDefault(c => c.Child.Id == e.To).Child is { } agent ? $"subagent: {agent.Description}" : $"subagent {e.To}";
+        : from.Children.FirstOrDefault(c => c.Child.Id == e.To).Child is { } agent ? $"subagent: {agent.Description}" : e.To;
 
     /// <summary>
     /// A message the session sent, drawn like its agents and shells: line 1 the send icon and who it
@@ -578,8 +579,8 @@ internal sealed class AgentsView : ScrollableControl
         int cornerW = TextRenderer.MeasureText(corner, bold).Width;
         DrawCommand(g, IconSent, "to " + Recipient(e, from), bold, Color.Black, new Rectangle(lx, y, w - cornerW - 4, Line));
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), Color.Black, Flags);
-        string second = (e.Waiting ? "waiting for a reply · " : "") + (e.Summary.Length > 0 ? e.Summary : "message");
-        TextRenderer.DrawText(g, second, Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), Color.FromArgb(60, 60, 60), Flags);
+        string second = (e.Failed != null ? "not delivered · " : e.Waiting ? "waiting for a reply · " : "") + (e.Summary.Length > 0 ? e.Summary : "message");
+        TextRenderer.DrawText(g, second, Font, new Rectangle(lx + Line + 2, y + Line, w - Line - 2, Line), e.Failed != null ? Color.FromArgb(180, 0, 0) : Color.FromArgb(60, 60, 60), Flags);
         DrawChevron(g, ChildChevron(r), open);
     }
 
@@ -588,7 +589,7 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>A sent message in full, as ClaudeHook forwarded it when the call was made, rendered as markdown.</summary>
     private List<DetailPopup.Row> MessageRows(Placed from, SessionState.AgentEdge e) => new()
     {
-        new(IconSent, (e.Waiting ? "waiting for a reply · " : "") + "to " + Recipient(e, from), SessionState.FormatAge(e.AtUtc), null),
+        new(IconSent, (e.Failed != null ? "not delivered: " + e.Failed + "\n" : e.Waiting ? "waiting for a reply · " : "") + "to " + Recipient(e, from), SessionState.FormatAge(e.AtUtc), null),
         new(null, e.Body.Length > 0 ? e.Body : throw new InvalidOperationException($"ClaudeHook sent no text for the message \"{e.Summary}\" (a ClaudeHook older than sendBody?)"),
             null, null, Markdown: true),
     };
@@ -597,6 +598,7 @@ internal sealed class AgentsView : ScrollableControl
 
     private string MessageTip(SessionState.AgentEdge e, Placed from) =>
         $"to {Recipient(e, from)}, sent {SessionState.FormatAge(e.AtUtc)} ago"
+        + (e.Failed != null ? $"\nnot delivered: {e.Failed}" : "")
         + (e.Waiting ? "\nthe sender waits on a reply: it ends when the recipient's turn ends" : "")
         + (e.Summary.Length > 0 ? "\n\n" + e.Summary : "");
 

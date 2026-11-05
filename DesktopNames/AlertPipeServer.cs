@@ -347,9 +347,11 @@ internal sealed class AlertPipeServer : IDisposable
                 Log.State($"message from {sid} to '{to}': no live session has that name or pipe (a subagent?) — not linked");
             // ClaudeHook describes it as "Message <to>: <summary>".
             string summary = msg.ToolDescription is { } d && d.IndexOf(": ", StringComparison.Ordinal) is int colon and >= 0 ? d[(colon + 2)..] : "";
-            _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, msg.SendBody ?? "", DateTime.UtcNow));
+            _state.RecordMessage(new SessionState.PeerMessage(source, sid, peerId, to, summary, msg.SendBody ?? "", DateTime.UtcNow, null));
             LogPeerMessage(msg, peerId);
         }
+        if (msg.SendFailed is { } why && msg.SendFailedTo is { } failedTo && !_state.FailMessage(source, sid, failedTo, why))
+            Log.State($"message from {sid} to '{failedTo}' was not sent ({why}), but no such message is listed");
         if (removed || msg.HookEvent is "Stop" or "StopFailure")
             _state.EndPeerWork(source, sid, gone: removed);
     }
@@ -767,6 +769,9 @@ internal sealed class AlertPipeServer : IDisposable
         public string? SendTo { get; set; }
         // PreToolUse SendMessage only: the message text in full.
         public string? SendBody { get; set; }
+        // PostToolUse SendMessage that was not sent: why, and the address it went to.
+        public string? SendFailed { get; set; }
+        public string? SendFailedTo { get; set; }
         public string? Message { get; set; }
         // Set when the hook fired inside a background agent (Agent tool) of this session.
         public string? AgentId { get; set; }

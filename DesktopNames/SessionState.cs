@@ -206,8 +206,8 @@ internal sealed class SessionState
     }
 
     /// <summary>One SendMessage: to another session (<see cref="ToSessionId"/>) or to one of the
-    /// sender's own subagents (<see cref="To"/> is its agent id).</summary>
-    public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc);
+    /// sender's own subagents (<see cref="To"/> is its agent id). <see cref="Failed"/>: why it was not sent.</summary>
+    public sealed record PeerMessage(string Source, string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc, string? Failed);
 
     // Kept until the user dismisses them; a later message on the same line replaces the earlier one.
     private readonly List<PeerMessage> _messages = new();
@@ -217,6 +217,16 @@ internal sealed class SessionState
         _messages.RemoveAll(x => x.Source == m.Source && x.FromId == m.FromId && x.To == m.To);
         _messages.Add(m);
         Updated?.Invoke();
+    }
+
+    /// <summary>SendMessage said the newest message from <paramref name="fromId"/> to <paramref name="to"/> was not sent. False when there is none.</summary>
+    public bool FailMessage(string source, string fromId, string to, string why)
+    {
+        int i = _messages.FindLastIndex(m => m.Source == source && m.FromId == fromId && m.To == to);
+        if (i < 0) return false;
+        _messages[i] = _messages[i] with { Failed = why };
+        Updated?.Invoke();
+        return true;
     }
 
     /// <summary>The user dismissed the tag of <paramref name="fromId"/>'s message to <paramref name="to"/>.</summary>
@@ -242,7 +252,7 @@ internal sealed class SessionState
                                    ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent,
                                    string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, bool RemoteControl);
     /// <summary>A message of the last half hour; <see cref="Waiting"/> while the sender still waits on the recipient.</summary>
-    public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc, bool Waiting);
+    public sealed record AgentEdge(string FromId, string? ToSessionId, string To, string Summary, string Body, DateTime AtUtc, bool Waiting, string? Failed);
     public sealed record AgentGraph(IReadOnlyList<AgentNode> Nodes, IReadOnlyList<AgentEdge> Edges);
 
     /// <summary>
@@ -289,7 +299,7 @@ internal sealed class SessionState
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],
                 e.RemoteControl)))
             .ToList();
-        var edges = _messages.Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.Body, m.AtUtc, Waits(m))).ToList();
+        var edges = _messages.Select(m => new AgentEdge(m.FromId, m.ToSessionId, m.To, m.Summary, m.Body, m.AtUtc, Waits(m), m.Failed)).ToList();
         return new AgentGraph(nodes, edges);
     }
 
