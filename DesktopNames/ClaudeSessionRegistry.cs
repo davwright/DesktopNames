@@ -297,6 +297,8 @@ internal sealed class ClaudeSessionRegistry
         /// <summary>A subagent's own transcript: all its records are sidechain ones.</summary>
         public bool Sidechain;
         public string? Title;
+        /// <summary>The name the user gave it in VS Code (a custom-title record).</summary>
+        public string? CustomTitle;
         public Usage? Usage;
         public Prompt? Prompt;
         public List<ClaudeAction> Actions = new();
@@ -305,6 +307,8 @@ internal sealed class ClaudeSessionRegistry
     // path → what its scan found so far. Transcripts only grow, so each read scans what was appended —
     // up to its last complete line, so no record is read half-written.
     private static readonly Dictionary<string, Scanned> _transcripts = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex CustomTitle =
+        new("\"customTitle\":(\"(?:[^\"\\\\]|\\\\.)*\")", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex AiTitle =
         new("\"type\":\"ai-title\",\"aiTitle\":(\"(?:[^\"\\\\]|\\\\.)*\")", System.Text.RegularExpressions.RegexOptions.Compiled);
     // An assistant record: "model":"claude-…" … "usage":{"input_tokens":2,"cache_creation_input_tokens":…,"cache_read_input_tokens":…,"output_tokens":…
@@ -317,6 +321,8 @@ internal sealed class ClaudeSessionRegistry
     {
         var titles = AiTitle.Matches(text);
         if (titles.Count > 0) into.Title = JsonSerializer.Deserialize<string>(titles[^1].Groups[1].Value);
+        var custom = CustomTitle.Matches(text);
+        if (custom.Count > 0) into.CustomTitle = JsonSerializer.Deserialize<string>(custom[^1].Groups[1].Value);
         var usages = UsageRecord.Matches(text);
         if (usages.Count > 0)
         {
@@ -547,8 +553,8 @@ internal sealed class ClaudeSessionRegistry
     }
 
     /// <summary>
-    /// What a transcript says about its session: the latest <c>ai-title</c> Claude Code gave it
-    /// ("Osis dev privileges review"), the latest call's token usage, the last prompt, Claude's
+    /// What a transcript says about its session: the name the user gave it in VS Code, else the latest
+    /// <c>ai-title</c> Claude Code gave it ("Osis dev privileges review"), the latest call's token usage, the last prompt, Claude's
     /// recent actions, and when it was last written — the session's real last activity, which
     /// survives a DesktopNames restart. Null when the file is gone.
     /// </summary>
@@ -582,7 +588,7 @@ internal sealed class ClaudeSessionRegistry
             Scan(text, start, seen);
             seen.Length = end;
         }
-        return new TranscriptFacts(seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList());
+        return new TranscriptFacts(seen.CustomTitle ?? seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList());
     }
 
     /// <summary>Where a subagent writes its own transcript: beside its session's, in <c>&lt;sessionId&gt;subagentsagent-&lt;agentId&gt;.jsonl</c>.</summary>

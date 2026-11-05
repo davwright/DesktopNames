@@ -366,6 +366,8 @@ internal sealed class AgentsView : ScrollableControl
             DrawCommand(g, prompt.FromPeer ? IconClaude : IconUser,
                 (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + Line, w - promptW, 2 * Line));
         }
+        else if (n.TranscriptPath.Length > 0 && n.Actions.Count == 0)
+            DrawCommand(g, IconUser, "no prompt yet: it waits for its first command", Font, dim, new Rectangle(lx, y + Line, w, Line));
         // Lines 4-5: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
         if (n.State == StateKind.Busy) DrawShimmer(g, ActionZone(p.Box));
