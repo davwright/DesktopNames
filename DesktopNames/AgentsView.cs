@@ -49,10 +49,11 @@ internal sealed class AgentsView : ScrollableControl
         _columns = Math.Clamp(Program.Host!.Settings.AgentsColumns, 2, 6);
         _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -15, 15);
         _sessions.Updated += OnUpdated;
+        _clock.Tick += (_, _) => RefreshBrowse();
         _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
         // A popup is its own top-level window: it goes when the tab hides or the window closes, not only when the mouse leaves.
         VisibleChanged += (_, _) => { UpdateShimmer(); if (!Visible) ClosePopup(); };
-        Disposed += (_, _) => { ClosePopup(); _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); };
+        Disposed += (_, _) => { ClosePopup(); _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); _clock.Dispose(); };
         Reflow();
     }
 
@@ -90,6 +91,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         Reflow();
         Invalidate();
+        RefreshBrowse();
     }
 
     protected override void OnResize(EventArgs e)
@@ -698,16 +700,35 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>The chevron under <paramref name="at"/>: the key of what it opens, where it is, and its rows.</summary>
     private (string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)? ChevronAt(Point at)
     {
+        foreach (var chevron in Chevrons())
+            if (chevron.Zone.Contains(at)) return chevron;
+        return null;
+    }
+
+    /// <summary>Every chevron drawn: the key of what it opens, where it is, and its rows as they are now.</summary>
+    private IEnumerable<(string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)> Chevrons()
+    {
         foreach (var p in _placed)
         {
             var node = p.Node;
-            if (SessionChevron(p.Box).Contains(at)) return (node.SessionId, SessionChevron(p.Box), () => SessionBrowseRows(node));
+            yield return (node.SessionId, SessionChevron(p.Box), () => SessionBrowseRows(node));
             foreach (var (c, r) in p.Children)
-                if (ChildChevron(r).Contains(at)) return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
+                yield return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
             foreach (var (m, r) in p.Messages)
-                if (ChildChevron(r).Contains(at)) return (MessageKey(p, m), ChildChevron(r), () => MessageRows(p, m));
+                yield return (MessageKey(p, m), ChildChevron(r), () => MessageRows(p, m));
         }
-        return null;
+    }
+
+    // The open panel's ages count up while it is open: a display clock, not a wait.
+    private readonly System.Windows.Forms.Timer _clock = new() { Interval = 1000 };
+
+    /// <summary>The open panel shows its rows as they are now; it closes when what it shows is gone.</summary>
+    private void RefreshBrowse()
+    {
+        if (_browse == null) return;
+        foreach (var chevron in Chevrons())
+            if (chevron.Key == _browseFor) { _browse.SetRows(chevron.Rows()); return; }
+        CloseBrowse();
     }
 
     private void OpenBrowse(string key, Rectangle zone, List<DetailPopup.Row> rows)
@@ -722,6 +743,7 @@ internal sealed class AgentsView : ScrollableControl
         popup.Show();
         _browse = popup;
         _browseFor = key;
+        _clock.Start();
         var form = FindForm()!;
         form.Deactivate -= OnFormDeactivate;
         form.Deactivate += OnFormDeactivate;
@@ -737,6 +759,7 @@ internal sealed class AgentsView : ScrollableControl
     private void CloseBrowse()
     {
         if (_browse == null) return;
+        _clock.Stop();
         _browse.Close();
         _browse = null;
         _browseFor = null;
@@ -965,7 +988,8 @@ internal sealed class DetailPopup : Form
     private readonly int _maxImageHeight;
     private readonly List<Laid> _laid = new();
     private readonly Font _font, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
-    private readonly int _contentHeight;
+    private readonly int _width;
+    private int _contentHeight;
     private int _scroll;
     private DetailPopup? _preview;
     private int _previewRow = -1;
@@ -983,14 +1007,54 @@ internal sealed class DetailPopup : Form
         _h1Font = new Font("Segoe UI", 11f, FontStyle.Bold);
         _h2Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
         _maxImageHeight = width * 4 / 5;
-        var font = _font;
+        _width = width;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         BackColor = TipCard.Back(false);
         DoubleBuffered = true;
+        LayOut(rows, screenAt);
+        var work = Screen.FromPoint(screenAt).WorkingArea;
+        Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
+        FormClosed += (_, _) =>
+        {
+            _preview?.Close();
+            foreach (var laid in _laid) laid.Row.Image?.Dispose();
+            _font.Dispose();
+            _iconFont.Dispose();
+            _ageFont.Dispose();
+            _monoFont.Dispose();
+            _h1Font.Dispose();
+            _h2Font.Dispose();
+        };
+    }
 
+    /// <summary>Show these rows instead, in place: the ages move on, a new entry appears. A preview stays
+    /// open while the rows are the same ones.</summary>
+    public void SetRows(List<Row> rows)
+    {
+        bool same = rows.Select(r => r.Text).SequenceEqual(_laid.Select(l => l.Row.Text));
+        foreach (var laid in _laid) laid.Row.Image?.Dispose();
+        LayOut(rows, Location);
+        var work = Screen.FromControl(this).WorkingArea;
+        if (Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
+        if (!same)
+        {
+            _preview?.Close();
+            _preview = null;
+            _previewRow = -1;
+        }
+        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentHeight - ClientSize.Height));
+        Invalidate();
+    }
+
+    /// <summary>Lay the rows out and size the window to them, at most the height of the screen at <paramref name="at"/>.</summary>
+    private void LayOut(List<Row> rows, Point at)
+    {
+        var font = _font;
+        int width = _width;
+        _laid.Clear();
         bool icons = rows.Any(r => r.Icon != null);
         int iconW = icons ? font.Height + 4 : 0, textW = width - 2 * Pad - iconW;
         int y = Pad;
@@ -1030,20 +1094,7 @@ internal sealed class DetailPopup : Form
             y += textH + RowGap * 2;
         }
         _contentHeight = y - RowGap + Pad;
-        var work = Screen.FromPoint(screenAt).WorkingArea;
-        Size = new Size(width, Math.Min(_contentHeight, work.Height - 20));
-        Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
-        FormClosed += (_, _) =>
-        {
-            _preview?.Close();
-            foreach (var laid in _laid) laid.Row.Image?.Dispose();
-            _font.Dispose();
-            _iconFont.Dispose();
-            _ageFont.Dispose();
-            _monoFont.Dispose();
-            _h1Font.Dispose();
-            _h2Font.Dispose();
-        };
+        Size = new Size(width, Math.Min(_contentHeight, Screen.FromPoint(at).WorkingArea.Height - 20));
     }
 
     private static Block Measure(string text, Font font, int indent, int top, int width) =>
