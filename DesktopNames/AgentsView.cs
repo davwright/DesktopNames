@@ -842,11 +842,21 @@ internal sealed class AgentsView : ScrollableControl
             return DetailRows(new(text, true, images));
         });
 
-    // A shell call reads as its tool in bold and what it does (its description); the command line is in its preview.
-    private static DetailPopup.Row ActionRow(string transcript, ClaudeSessionRegistry.ClaudeAction a) =>
-        new(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool), TaskbarOverlay.Truncate(Flatten(a.Text), 160),
+    // A tool call reads as its verb in bold, then what it did: a shell call's description (its command line is in
+    // its preview), the file read or edited, the pattern searched. Claude's own replies are in italics.
+    private static DetailPopup.Row ActionRow(string transcript, ClaudeSessionRegistry.ClaudeAction a)
+    {
+        string? lead = null, text = Flatten(a.Text);
+        if (a.Command != null) lead = a.Tool;
+        else if (VerbFirst.Contains(a.Tool) && text.IndexOf(' ') is int space and > 0)
+            (lead, text) = (text[..space].TrimEnd(':'), text[(space + 1)..]);
+        return new(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool), TaskbarOverlay.Truncate(text, 160),
             SessionState.FormatAge(a.AtUtc), null, () => DetailRows(ClaudeSessionRegistry.ActionDetail(transcript, a)),
-            Lead: a.Command != null ? a.Tool : null);
+            Lead: lead, Italic: a.Tool.Length == 0);
+    }
+
+    // Tools whose summary starts with its verb ("Read MainPage.cs", "Agent: …"); see ClaudeSessionRegistry.ToolSummary.
+    private static readonly HashSet<string> VerbFirst = new() { "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Grep", "Glob", "WebFetch", "WebSearch", "Agent", "Task", "SendMessage", "Skill" };
 
     private static List<DetailPopup.Row> DetailRows(ClaudeSessionRegistry.Detail d)
     {
@@ -998,7 +1008,7 @@ internal sealed class DetailPopup : Form
     /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
     /// as a PowerShell or Bash command, highlighted.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
-                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null);
+                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false);
 
     private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
     private sealed record Run(string Text, Color Color, Point At);
@@ -1007,7 +1017,7 @@ internal sealed class DetailPopup : Form
     private const int Pad = 8, RowGap = 6;
     private readonly int _maxImageHeight;
     private readonly List<Laid> _laid = new();
-    private readonly Font _font, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
+    private readonly Font _font, _italicFont, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
     private readonly int _width;
     private int _contentHeight;
     private int _scroll;
@@ -1026,6 +1036,7 @@ internal sealed class DetailPopup : Form
         _monoFont = new Font("Consolas", 8.5f);
         _h1Font = new Font("Segoe UI", 11f, FontStyle.Bold);
         _h2Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+        _italicFont = new Font("Segoe UI", 9f, FontStyle.Italic);
         _maxImageHeight = width * 4 / 5;
         _width = width;
         FormBorderStyle = FormBorderStyle.None;
@@ -1047,6 +1058,7 @@ internal sealed class DetailPopup : Form
             _monoFont.Dispose();
             _h1Font.Dispose();
             _h2Font.Dispose();
+            _italicFont.Dispose();
         };
     }
 
@@ -1109,9 +1121,10 @@ internal sealed class DetailPopup : Form
             int ageW = age != null ? TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width : 0;
             int leadW = LeadWidth(row);
             bool split = age != null || row.Lead != null;
-            var (first, rest) = split ? SplitFirstLine(row.Text, font, textW - ageW - 6 - leadW) : ("", row.Text);
+            var rowFont = row.Italic ? _italicFont : font;
+            var (first, rest) = split ? SplitFirstLine(row.Text, rowFont, textW - ageW - 6 - leadW) : ("", row.Text);
             int textH = (split ? font.Height : 0)
-                      + (rest.Length > 0 || !split ? TextRenderer.MeasureText(rest, font, new Size(textW, int.MaxValue), Wrap).Height : 0);
+                      + (rest.Length > 0 || !split ? TextRenderer.MeasureText(rest, rowFont, new Size(textW, int.MaxValue), Wrap).Height : 0);
             _laid.Add(new(row, new Rectangle(0, y - RowGap, width, textH + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, textH), Rectangle.Empty, age, first, rest, null));
             y += textH + RowGap * 2;
         }
@@ -1353,10 +1366,10 @@ internal sealed class DetailPopup : Form
                     TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
                 }
                 if (row.Lead != null) TextRenderer.DrawText(g, row.Lead, _ageFont, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
-                TextRenderer.DrawText(g, first, _font, new Point(text.Left + LeadWidth(row), text.Top), SystemColors.ControlText, Line);
+                TextRenderer.DrawText(g, first, row.Italic ? _italicFont : _font, new Point(text.Left + LeadWidth(row), text.Top), SystemColors.ControlText, Line);
                 restTop += _font.Height;
             }
-            TextRenderer.DrawText(g, rest, _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
+            TextRenderer.DrawText(g, rest, row.Italic ? _italicFont : _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
         }
     }
 }
