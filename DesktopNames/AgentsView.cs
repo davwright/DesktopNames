@@ -301,11 +301,13 @@ internal sealed class AgentsView : ScrollableControl
             }
             DrawSession(g, p);
         }
-        // Hovering a message tag outlines the session it went to.
-        if (_placed.FirstOrDefault(p => p.Node.SessionId == _highlight) is { } to)
+        // Hovering a message tag outlines the session it went to, or the sender's subagent (session/agent id).
+        Rectangle? target = _placed.FirstOrDefault(p => p.Node.SessionId == _highlight)?.Box
+            ?? _placed.SelectMany(p => p.Children.Where(c => p.Node.SessionId + "/" + c.Child.Id == _highlight).Select(c => (Rectangle?)c.Box)).FirstOrDefault();
+        if (target is { } box)
         {
             using var outline = new Pen(Color.FromArgb(0, 120, 215), 3f);
-            using var path = TaskbarOverlay.RoundedRect(Rectangle.Inflate(to.Box, 3, 3), 8);
+            using var path = TaskbarOverlay.RoundedRect(Rectangle.Inflate(box, 3, 3), 8);
             g.DrawPath(outline, path);
         }
     }
@@ -638,7 +640,7 @@ internal sealed class AgentsView : ScrollableControl
             foreach (var (c, r) in p.Children)
                 if (r.Contains(at)) { key2 = p.Node.SessionId + "/" + c.Id; text = ChildTip(c); }
             foreach (var (m, r) in p.Messages)
-                if (r.Contains(at)) { key2 = p.Node.SessionId + "/msg/" + m.To + m.AtUtc.Ticks; text = MessageTip(m, p); highlight = m.ToSessionId; }
+                if (r.Contains(at)) { key2 = p.Node.SessionId + "/msg/" + m.To + m.AtUtc.Ticks; text = MessageTip(m, p); highlight = m.ToSessionId ?? p.Node.SessionId + "/" + m.To; }
         }
         SetHighlight(highlight);
         if (key2 == _tipFor) return;
