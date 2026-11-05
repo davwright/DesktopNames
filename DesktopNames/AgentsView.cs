@@ -842,9 +842,11 @@ internal sealed class AgentsView : ScrollableControl
             return DetailRows(new(text, true, images));
         });
 
+    // A shell call reads as its tool in bold and what it does (its description); the command line is in its preview.
     private static DetailPopup.Row ActionRow(string transcript, ClaudeSessionRegistry.ClaudeAction a) =>
-        new(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool), TaskbarOverlay.Truncate(a.Command is { } c ? Shown(c) : Flatten(a.Text), 160),
-            SessionState.FormatAge(a.AtUtc), null, () => DetailRows(ClaudeSessionRegistry.ActionDetail(transcript, a)));
+        new(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool), TaskbarOverlay.Truncate(Flatten(a.Text), 160),
+            SessionState.FormatAge(a.AtUtc), null, () => DetailRows(ClaudeSessionRegistry.ActionDetail(transcript, a)),
+            Lead: a.Command != null ? a.Tool : null);
 
     private static List<DetailPopup.Row> DetailRows(ClaudeSessionRegistry.Detail d)
     {
@@ -996,7 +998,7 @@ internal sealed class DetailPopup : Form
     /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
     /// as a PowerShell or Bash command, highlighted.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
-                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false);
+                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null);
 
     private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
     private sealed record Run(string Text, Color Color, Point At);
@@ -1049,19 +1051,19 @@ internal sealed class DetailPopup : Form
     }
 
     /// <summary>Show these rows instead, in place: the ages move on, a new entry appears. A preview stays
-    /// open while the rows are the same ones.</summary>
+    /// open while the row it belongs to is still listed.</summary>
     public void SetRows(List<Row> rows)
     {
-        bool same = rows.Select(r => r.Text).SequenceEqual(_laid.Select(l => l.Row.Text));
+        string? previewed = _previewRow >= 0 && _previewRow < _laid.Count ? _laid[_previewRow].Row.Text : null;
         foreach (var laid in _laid) laid.Row.Image?.Dispose();
         LayOut(rows, Location);
         var work = Screen.FromControl(this).WorkingArea;
         if (Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
-        if (!same)
+        _previewRow = previewed == null ? -1 : _laid.FindIndex(l => l.Row.Text == previewed);
+        if (_previewRow < 0)
         {
             _preview?.Close();
             _preview = null;
-            _previewRow = -1;
         }
         _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _contentHeight - ClientSize.Height));
         Invalidate();
@@ -1105,15 +1107,20 @@ internal sealed class DetailPopup : Form
             string? age = row.Age == previousAge ? null : row.Age;
             previousAge = row.Age ?? previousAge;
             int ageW = age != null ? TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width : 0;
-            var (first, rest) = age != null ? SplitFirstLine(row.Text, font, textW - ageW - 6) : ("", row.Text);
-            int textH = (age != null ? font.Height : 0)
-                      + (rest.Length > 0 || age == null ? TextRenderer.MeasureText(rest, font, new Size(textW, int.MaxValue), Wrap).Height : 0);
+            int leadW = LeadWidth(row);
+            bool split = age != null || row.Lead != null;
+            var (first, rest) = split ? SplitFirstLine(row.Text, font, textW - ageW - 6 - leadW) : ("", row.Text);
+            int textH = (split ? font.Height : 0)
+                      + (rest.Length > 0 || !split ? TextRenderer.MeasureText(rest, font, new Size(textW, int.MaxValue), Wrap).Height : 0);
             _laid.Add(new(row, new Rectangle(0, y - RowGap, width, textH + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, textH), Rectangle.Empty, age, first, rest, null));
             y += textH + RowGap * 2;
         }
         _contentHeight = y - RowGap + Pad;
         Size = new Size(width, Math.Min(_contentHeight, Screen.FromPoint(at).WorkingArea.Height - 20));
     }
+
+    /// <summary>The width of a row's bold lead ("Bash") and the space after it.</summary>
+    private int LeadWidth(Row row) => row.Lead is { } lead ? TextRenderer.MeasureText(lead + " ", _ageFont, Size.Empty, Line).Width : 0;
 
     private static Block Measure(string text, Font font, int indent, int top, int width) =>
         new(text, font, indent, top, TextRenderer.MeasureText(text.Length == 0 ? " " : text, font, new Size(width - indent, int.MaxValue), Wrap).Height);
@@ -1338,11 +1345,15 @@ internal sealed class DetailPopup : Form
                 continue;
             }
             int restTop = text.Top;
-            if (age != null)
+            if (age != null || row.Lead != null)
             {
-                int ageW = TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width;
-                TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
-                TextRenderer.DrawText(g, first, _font, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
+                if (age != null)
+                {
+                    int ageW = TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width;
+                    TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
+                }
+                if (row.Lead != null) TextRenderer.DrawText(g, row.Lead, _ageFont, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
+                TextRenderer.DrawText(g, first, _font, new Point(text.Left + LeadWidth(row), text.Top), SystemColors.ControlText, Line);
                 restTop += _font.Height;
             }
             TextRenderer.DrawText(g, rest, _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
