@@ -912,6 +912,9 @@ internal sealed class ProjectsDialog : Form
         };
         _projectsPage.Visible = _projectsItem.Checked = !agents;
         _agentsPage.Visible = _agentsItem.Checked = agents;
+        // A top-level menu item draws no check mark: the open page's item is bold instead.
+        _projectsItem.Font = new Font(_projectsItem.Font, agents ? FontStyle.Regular : FontStyle.Bold);
+        _agentsItem.Font = new Font(_agentsItem.Font, agents ? FontStyle.Bold : FontStyle.Regular);
         if (Program.Host!.Settings.ProjectsWindowTab == tab) return;
         Program.Host.Settings.ProjectsWindowTab = tab;
         Program.Host.Settings.Save();
