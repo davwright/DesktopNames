@@ -70,9 +70,6 @@ internal sealed class SessionEntry
     /// PreToolUse events repaint the desktop orange over a live question.</summary>
     public StateKind Activity { get; set; }
 
-    /// <summary>While compacting: the activity it returns to afterwards.</summary>
-    public StateKind? ActivityBeforeCompact { get; set; }
-
     /// <summary>Questions Claude is blocked on, oldest first. A list rather than one slot
     /// because prompts can queue: answering the second must not clear the first.</summary>
     public List<PendingAsk> Asks { get; } = new();
@@ -247,7 +244,7 @@ internal sealed class SessionState
                                     IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, string? Transcript, ClaudeSessionRegistry.Prompt? Prompt, string? OutputFile);
     /// <summary><see cref="Title"/> is what VS Code lists the session as: the name the user gave it, else Claude's title for it.</summary>
     public sealed record AgentNode(string Source, string SessionId, string Name, string Title, string Cwd, Guid DesktopId, StateKind State,
-                                   string Doing, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
+                                   string Doing, DateTime DoingUtc, DateTime LastActiveUtc, IReadOnlyList<AgentChild> Children,
                                    string? Topic, DateTime? StartedUtc, bool BackgroundActive, ClaudeSessionRegistry.Usage? Usage,
                                    ClaudeSessionRegistry.Prompt? Prompt, string ToolName, string HookEvent,
                                    string TranscriptPath, IReadOnlyList<ClaudeSessionRegistry.ClaudeAction> Actions, bool RemoteControl);
@@ -285,7 +282,7 @@ internal sealed class SessionState
         var nodes = _byDesktop.SelectMany(kv => kv.Value.Select(e => new AgentNode(e.Source, e.SessionId,
                 e.Name.Length > 0 ? e.Name : !string.IsNullOrEmpty(e.Cwd) ? CwdBasename(e.Cwd) : e.SessionId,
                 e.NameSource == "user" && e.Name.Length > 0 ? e.Name : Topic(e) ?? (e.Name.Length > 0 ? e.Name : CwdBasename(e.Cwd)), e.Cwd,
-                kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, LastActive(e),
+                kv.Key, e.Consumed ? StateKind.None : e.State, e.Body, e.LastSeenUtc, LastActive(e),
                 e.Background.Select(b => new AgentChild(b.Key, b.Value.Kind, b.Value.Description, b.Value.Activity, b.Value.StartedUtc, b.Value.ListedUtc,
                     e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskLastOutputUtc(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null,
                     b.Value.Command is { } command && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, b.Key, command) : null,
@@ -1104,17 +1101,7 @@ internal sealed class SessionState
             };
             list.Add(existing);
         }
-        // A compaction runs between turns (/compact) or inside one: afterwards the session is as busy as before it.
-        else if (hookEvent == "PostCompact" && existing.ActivityBeforeCompact is { } before)
-        {
-            existing.Activity = before;
-            existing.ActivityBeforeCompact = null;
-        }
-        else if (activity.HasValue)
-        {
-            if (hookEvent == "PreCompact") existing.ActivityBeforeCompact = existing.Activity;
-            existing.Activity = activity.Value;
-        }
+        else if (activity.HasValue) existing.Activity = activity.Value;
 
         ApplyAskChange(existing, ask, sessionId, toolName, toolDescription, body);
 

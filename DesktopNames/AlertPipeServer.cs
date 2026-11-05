@@ -487,8 +487,10 @@ internal sealed class AlertPipeServer : IDisposable
                     // carried on the entry and shown as ⏳ next to the green.
                     t = new(StateKind.Ready, AskChange.Clear);
                     return true;
+                // A compaction leaves the activity as it was: inside a turn the session is Busy already, and
+                // Claude Code also compacts idle sessions in the background (PreCompact after the Stop, then a
+                // SubagentStop) with PostCompact only at the next prompt or never, while the session stays Ready.
                 case "PreCompact":
-                    t = new(StateKind.Busy, AskChange.None); return true;
                 case "PostCompact":
                     t = new(null, AskChange.None); return true;
                 case "StopFailure":

@@ -371,7 +371,7 @@ internal sealed class AgentsView : ScrollableControl
         // Lines 4-5: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
         if (n.State == StateKind.Busy) DrawShimmer(g, ActionZone(p.Box));
-        int doingW = DrawAge(g, n.Actions.Count > 0 ? n.Actions[^1].AtUtc : n.LastActiveUtc, new Rectangle(lx, y + 3 * Line, w, Line), dim);
+        int doingW = DrawAge(g, n.DoingUtc, new Rectangle(lx, y + 3 * Line, w, Line), dim);
         DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 3 * Line, w - doingW, 2 * Line));
     }
 
