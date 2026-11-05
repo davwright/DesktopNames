@@ -335,9 +335,8 @@ internal sealed class AgentsView : ScrollableControl
             g.DrawPath(border, path);
         }
         int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
-        // Line 1: the title VS Code lists it under; top right, last active / started, ⏳ while background work runs.
-        string corner = (n.Usage is { } model ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + SessionState.FormatAge(n.LastActiveUtc)
-                      + (n.StartedUtc is { } s ? "/" + SessionState.FormatAge(s) : "");
+        // Line 1: the title VS Code lists it under; top right, the model, ⏳ while background work runs, and how long ago it started.
+        string corner = (n.Usage is { } model ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + (n.StartedUtc is { } s ? SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
         int cornerW = TextRenderer.MeasureText(corner, bold).Width;
         // A blue badge: Remote Control (claude.ai) can see this session.
@@ -360,13 +359,27 @@ internal sealed class AgentsView : ScrollableControl
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - cornerW, y, cornerW, Line), ink, Flags);
         DrawChevron(g, SessionChevron(p.Box), _browseFor == n.SessionId);
         // Lines 2-3: the last prompt — the user's, or another session's message to it.
+        // Each of the two ends with its age at the right of its first line, as an agent's card does.
         if (n.Prompt is { } prompt)
+        {
+            int promptW = DrawAge(g, prompt.AtUtc, new Rectangle(lx, y + Line, w, Line), dim);
             DrawCommand(g, prompt.FromPeer ? IconClaude : IconUser,
-                (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + Line, w, 2 * Line));
+                (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + Line, w - promptW, 2 * Line));
+        }
         // Lines 4-5: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
         if (n.State == StateKind.Busy) DrawShimmer(g, ActionZone(p.Box));
-        DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 3 * Line, w, 2 * Line));
+        int doingW = DrawAge(g, n.Actions.Count > 0 ? n.Actions[^1].AtUtc : n.LastActiveUtc, new Rectangle(lx, y + 3 * Line, w, Line), dim);
+        DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 3 * Line, w - doingW, 2 * Line));
+    }
+
+    /// <summary>"2m" at the right of <paramref name="line"/>; returns the width it takes, gap included.</summary>
+    private int DrawAge(Graphics g, DateTime atUtc, Rectangle line, Color color)
+    {
+        string age = SessionState.FormatAge(atUtc);
+        int ageW = TextRenderer.MeasureText(age, Font).Width;
+        TextRenderer.DrawText(g, age, Font, new Rectangle(line.Right - ageW, line.Top, ageW, Line), color, Flags);
+        return ageW + 4;
     }
 
     /// <summary>
