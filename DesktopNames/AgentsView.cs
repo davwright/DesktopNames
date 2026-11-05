@@ -11,13 +11,13 @@ internal sealed class AgentsView : ScrollableControl
 {
     // Heights follow the font, which scales with the screen: fixed pixels clipped the last line at 125%.
     private int Line => Font.Height + 1;
-    private int BoxH => 10 + 6 * Line;
+    private int BoxH => 10 + 5 * Line;
 
     // TextRenderer ignores the Graphics transform unless told to: without this the text stayed put while the boxes scrolled.
     private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis
                                           | TextFormatFlags.PreserveGraphicsTranslateTransform;
     private int ChildH => 6 + 2 * Line;
-    private const int Gap = 12, ChildGap = 6, Pad = 16, BandGap = 44;
+    private const int Gap = 12, ChildGap = 6, Pad = 16, BandGap = 12;
 
     // Boxes per row (2–6, Ctrl+wheel) set the box width; the text scales with it.
     private int _columns;
@@ -63,9 +63,9 @@ internal sealed class AgentsView : ScrollableControl
     private List<Rectangle> _live = new();
     private const int ShimmerMs = 1800;
 
-    /// <summary>Animate only while this tab is the one showing (a control in a hidden tab page still says Visible).</summary>
+    /// <summary>Animate only while this page is the one showing.</summary>
     public void UpdateShimmer() =>
-        _shimmer.Enabled = _live.Count > 0 && Visible && (Parent is not TabPage page || page.Parent is not TabControl tabs || tabs.SelectedTab == page);
+        _shimmer.Enabled = _live.Count > 0 && Visible;
 
     private void DrawShimmer(Graphics g, Rectangle r)
     {
@@ -347,20 +347,24 @@ internal sealed class AgentsView : ScrollableControl
             g.FillEllipse(blue, lx, y + (Line - d) / 2, d, d);
             badge = d + 5;
         }
-        TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx + badge, y, w - cornerW - 4 - badge, Line), ink, Flags);
-        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - cornerW, y, cornerW, Line), ink, Flags);
-        // Line 2: the name sessions message it by (when the title isn't it) and its folder.
+        // Then, after the title, the name sessions message it by (when the title isn't it) and its folder;
+        // the corner, and the chevron at the far right.
+        int room = w - Line - 6 - cornerW - 4 - badge;
+        int titleW = Math.Min(TextRenderer.MeasureText(n.Title, bold).Width, room);
+        TextRenderer.DrawText(g, n.Title, bold, new Rectangle(lx + badge, y, titleW, Line), ink, Flags);
         string id = n.Name == n.Title ? "" : n.Name + " · ";
-        TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx, y + Line, w - Line - 6, Line), dim, Flags);
+        if (room - titleW > 2 * Line)
+            TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx + badge + titleW + 4, y, room - titleW - 4, Line), dim, Flags);
+        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - cornerW, y, cornerW, Line), ink, Flags);
         DrawChevron(g, SessionChevron(p.Box), _browseFor == n.SessionId);
-        // Lines 3-4: the last prompt — the user's, or another session's message to it.
+        // Lines 2-3: the last prompt — the user's, or another session's message to it.
         if (n.Prompt is { } prompt)
             DrawCommand(g, prompt.FromPeer ? IconClaude : IconUser,
-                (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + 2 * Line, w, 2 * Line));
-        // Lines 5-6: what Claude did last, behind the icon of its kind. The state is the colour.
+                (prompt.FromPeer ? $"{prompt.From}: " : "") + Flatten(prompt.Text), Font, ink, new Rectangle(lx, y + Line, w, 2 * Line));
+        // Lines 4-5: what Claude did last, behind the icon of its kind. The state is the colour.
         using var italic = new Font(Font, FontStyle.Italic);
         if (n.State == StateKind.Busy) DrawShimmer(g, ActionZone(p.Box));
-        DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 4 * Line, w, 2 * Line));
+        DrawCommand(g, ActivityIcon(n.HookEvent, n.ToolName), Flatten(n.Doing), italic, ink, new Rectangle(lx, y + 3 * Line, w, 2 * Line));
     }
 
     /// <summary>
@@ -594,9 +598,9 @@ internal sealed class AgentsView : ScrollableControl
         + (e.Waiting ? "\nthe sender waits on a reply: it ends when the recipient's turn ends" : "")
         + (e.Summary.Length > 0 ? "\n\n" + e.Summary : "");
 
-    // The box's two prompt lines and two action lines (DrawSession's lines 3-4 and 5-6).
-    private Rectangle PromptZone(Rectangle box) => new(box.Left, box.Top + 5 + 2 * Line, box.Width, 2 * Line);
-    private Rectangle ActionZone(Rectangle box) => new(box.Left, box.Top + 5 + 4 * Line, box.Width, 2 * Line);
+    // The box's two prompt lines and two action lines (DrawSession's lines 2-3 and 4-5).
+    private Rectangle PromptZone(Rectangle box) => new(box.Left, box.Top + 5 + Line, box.Width, 2 * Line);
+    private Rectangle ActionZone(Rectangle box) => new(box.Left, box.Top + 5 + 3 * Line, box.Width, 2 * Line);
 
     private DetailPopup? _popup;
     private string? _popupFor;
@@ -684,7 +688,7 @@ internal sealed class AgentsView : ScrollableControl
     private string? _browseFor;
 
     // The chevron at the right of a box's or card's second line: opens its input and recent actions.
-    private Rectangle SessionChevron(Rectangle box) => new(box.Right - Line - 8, box.Top + 5 + Line, Line + 4, Line);
+    private Rectangle SessionChevron(Rectangle box) => new(box.Right - Line - 8, box.Top + 5, Line + 4, Line);
     private Rectangle ChildChevron(Rectangle card) => new(card.Right - Line - 8, card.Top + 4 + Line, Line + 4, Line);
 
     private void DrawChevron(Graphics g, Rectangle r, bool open) =>

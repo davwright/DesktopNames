@@ -896,16 +896,26 @@ internal sealed class ProjectsDialog : Form
     /// <summary>Set when the user asked for a new project with this folder name.</summary>
     public string? NewProjectName { get; private set; }
 
-    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
+    // The two pages, switched from the menu bar (no tab strip: it cost a row of height).
+    private readonly Panel _projectsPage = new() { Dock = DockStyle.Fill }, _agentsPage = new() { Dock = DockStyle.Fill };
+    private readonly ToolStripMenuItem _projectsItem = new("&Projects"), _agentsItem = new("&Agents");
     private AgentsView? _agents;
 
-    /// <summary>For the control channel: show a tab, as clicking it does.</summary>
-    public void ShowTab(string tab) => _tabs.SelectedIndex = tab switch
+    /// <summary>Show a page, as its menu item does; also for the control channel.</summary>
+    public void ShowTab(string tab)
     {
-        "projects" => 0,
-        "agents" => 1,
-        _ => throw new ArgumentException($"tab \"{tab}\" is not one of: projects, agents"),
-    };
+        bool agents = tab switch
+        {
+            "projects" => false,
+            "agents" => true,
+            _ => throw new ArgumentException($"tab \"{tab}\" is not one of: projects, agents"),
+        };
+        _projectsPage.Visible = _projectsItem.Checked = !agents;
+        _agentsPage.Visible = _agentsItem.Checked = agents;
+        if (Program.Host!.Settings.ProjectsWindowTab == tab) return;
+        Program.Host.Settings.ProjectsWindowTab = tab;
+        Program.Host.Settings.Save();
+    }
 
     /// <summary>For the control channel: the sessions, children and message arrows the Agents tab shows.</summary>
     public void ScrollAgents(int y) => (_agents ?? throw new InvalidOperationException("no Claude session tracking (alert listener off)")).ScrollTo(y);
@@ -1013,27 +1023,18 @@ internal sealed class ProjectsDialog : Form
         var hint = new Label { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(6, 4, 0, 0), ForeColor = SystemColors.GrayText,
             Text = $"New projects are created in {projectsRoot}" };
 
-        var projectsTab = new TabPage("Projects");
-        projectsTab.Controls.Add(_list);
-        projectsTab.Controls.Add(_search);
-        projectsTab.Controls.Add(hint);
-        projectsTab.Controls.Add(bar);
-        var agentsTab = new TabPage("Agents");
+        _projectsPage.Controls.Add(_list);
+        _projectsPage.Controls.Add(_search);
+        _projectsPage.Controls.Add(hint);
+        _projectsPage.Controls.Add(bar);
         if (switcher.Sessions != null)
-            agentsTab.Controls.Add(_agents = new AgentsView(switcher.Sessions, Program.Host!.DesktopService) { Dock = DockStyle.Fill });
-        _tabs.TabPages.AddRange(new[] { projectsTab, agentsTab });
-        ShowTab(Program.Host.Settings.ProjectsWindowTab);
-        _tabs.SelectedIndexChanged += (_, _) =>
-        {
-            Program.Host.Settings.ProjectsWindowTab = _tabs.SelectedIndex == 1 ? "agents" : "projects";
-            _agents?.UpdateShimmer();
-            _agents?.ClosePopup();
-            Program.Host.Settings.Save();
-        };
-        Controls.Add(_tabs);
+            _agentsPage.Controls.Add(_agents = new AgentsView(switcher.Sessions, Program.Host!.DesktopService) { Dock = DockStyle.Fill });
+        Controls.Add(_projectsPage);
+        Controls.Add(_agentsPage);
         var menu = BuildMenu(closeIdle);
         Controls.Add(menu);
         MainMenuStrip = menu;
+        ShowTab(Program.Host!.Settings.ProjectsWindowTab);
         CancelButton = cancel;
         PlanUsage.Changed += OnPlanUsage;
         Disposed += (_, _) => PlanUsage.Changed -= OnPlanUsage;
@@ -1663,7 +1664,9 @@ internal sealed class ProjectsDialog : Form
             $"DesktopNames {Program.GetBuildStamp()}\n\nNamed virtual desktops on the taskbar, Claude session status, and one desktop per project.",
             "About DesktopNames", MessageBoxButtons.OK, MessageBoxIcon.Information));
 
-        menu.Items.AddRange(new ToolStripItem[] { file, desktopMenu, windows, overlay, help });
+        _projectsItem.Click += (_, _) => ShowTab("projects");
+        _agentsItem.Click += (_, _) => ShowTab("agents");
+        menu.Items.AddRange(new ToolStripItem[] { file, _projectsItem, _agentsItem, desktopMenu, windows, overlay, help });
         return menu;
     }
 
