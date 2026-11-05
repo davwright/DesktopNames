@@ -377,8 +377,9 @@ internal sealed class AgentsView : ScrollableControl
     private int DrawAge(Graphics g, DateTime atUtc, Rectangle line, Color color)
     {
         string age = SessionState.FormatAge(atUtc);
-        int ageW = TextRenderer.MeasureText(age, Font).Width;
-        TextRenderer.DrawText(g, age, Font, new Rectangle(line.Right - ageW, line.Top, ageW, Line), color, Flags);
+        using var bold = new Font(Font, FontStyle.Bold);
+        int ageW = TextRenderer.MeasureText(age, bold).Width;
+        TextRenderer.DrawText(g, age, bold, new Rectangle(line.Right - ageW, line.Top, ageW, Line), color, Flags);
         return ageW + 4;
     }
 
@@ -517,10 +518,10 @@ internal sealed class AgentsView : ScrollableControl
             if (live) DrawShimmer(g, new Rectangle(r.Left, y + Line, r.Width, Line));
             // Before the chevron: how long ago its latest action was, so a quiet agent shows as one.
             string latest = last != null ? SessionState.FormatAge(last.AtUtc) : "";
-            int latestW = latest.Length > 0 ? TextRenderer.MeasureText(latest, Font).Width : 0;
+            int latestW = latest.Length > 0 ? TextRenderer.MeasureText(latest, bold).Width : 0;
             int lineW = w - Line - 6 - latestW;
             DrawCommand(g, last == null ? ToolIcon(c.ActivityTool) : last.Tool.Length == 0 ? IconReply : ToolIcon(last.Tool), state, Font, Color.FromArgb(60, 60, 60), new Rectangle(lx, y + Line, lineW, Line));
-            if (latestW > 0) TextRenderer.DrawText(g, latest, Font, new Rectangle(lx + lineW, y + Line, latestW, Line), Color.FromArgb(60, 60, 60), Flags);
+            if (latestW > 0) TextRenderer.DrawText(g, latest, bold, new Rectangle(lx + lineW, y + Line, latestW, Line), Color.FromArgb(60, 60, 60), Flags);
         }
         else
             TextRenderer.DrawText(g, $"{KindLabel(c.Kind)} · {state}", Font, new Rectangle(lx + Line + 2, y + Line, w - 2 * Line - 8, Line), Color.FromArgb(60, 60, 60), Flags);
