@@ -298,7 +298,7 @@ internal sealed class AgentsView : ScrollableControl
             {
                 int spine = p.Box.Left + (BoxW - ChildW) / 2;
                 g.DrawLines(connector, new[] { new Point(spine, p.Box.Bottom), new Point(spine, r.Top + r.Height / 2), new Point(r.Left, r.Top + r.Height / 2) });
-                DrawChild(g, child, r, Fill(p.Node), live: p.Node.State == StateKind.Busy, open: _browseFor == p.Node.SessionId + "/" + child.Id);
+                DrawChild(g, child, r, Fill(p.Node), live: p.Node.State == StateKind.Busy, open: false);
             }
             foreach (var (message, r) in p.Messages)
             {
@@ -637,7 +637,8 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseMove(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
-        Cursor = ChevronAt(at) != null || _placed.Any(p => SessionChevron(p.Box).Contains(at)) ? Cursors.Hand : Cursors.Default;
+        Cursor = ChevronAt(at) != null || _placed.Any(p => SessionChevron(p.Box).Contains(at) || p.Children.Any(c => ChildChevron(c.Box).Contains(at)))
+            ? Cursors.Hand : Cursors.Default;
         // Over a prompt or the actions: the full message, or the recent actions, in a popup.
         // Not while a browse panel is open: it shows the same and more.
         foreach (var p in _browse == null ? _placed : [])
@@ -703,7 +704,11 @@ internal sealed class AgentsView : ScrollableControl
     {
         CloseHover();
         CloseBrowse();
-        foreach (var tile in _tiles) tile.Conversation?.ClosePreview();
+        foreach (var tile in _tiles)
+        {
+            tile.Conversation?.ClosePreview();
+            tile.Expansion?.ClosePreview();
+        }
     }
 
     private void CloseHover()
@@ -727,19 +732,17 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>The chevron under <paramref name="at"/>: the key of what it opens, where it is, and its rows.</summary>
     private (string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)? ChevronAt(Point at)
     {
-        foreach (var chevron in Chevrons())
+        foreach (var chevron in Chevrons(_placed))
             if (chevron.Zone.Contains(at)) return chevron;
         return null;
     }
 
-    /// <summary>Every chevron drawn: the key of what it opens, where it is, and its rows as they are now.</summary>
-    private IEnumerable<(string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)> Chevrons()
+    /// <summary>The message chevrons of these sessions: the key of what each opens, where it is (in the grid's or its
+    /// tile's coordinates), and its rows as they are now. Agents' and shells' chevrons expand them in their tile.</summary>
+    private IEnumerable<(string Key, Rectangle Zone, Func<List<DetailPopup.Row>> Rows)> Chevrons(IEnumerable<Placed> sessions)
     {
-        foreach (var p in _placed)
+        foreach (var p in sessions)
         {
-            var node = p.Node;
-            foreach (var (c, r) in p.Children)
-                yield return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
             foreach (var (m, r) in p.Messages)
                 yield return (MessageKey(p, m), ChildChevron(r), () => MessageRows(p, m));
         }
@@ -752,19 +755,22 @@ internal sealed class AgentsView : ScrollableControl
     private void RefreshBrowse()
     {
         if (_browse == null) return;
-        foreach (var chevron in Chevrons())
+        foreach (var chevron in Chevrons(_placed.Concat(_tiles.Select(t => t.Shown).OfType<Placed>())))
             if (chevron.Key == _browseFor) { _browse.SetRows(chevron.Rows()); return; }
         CloseBrowse();
     }
 
-    private void OpenBrowse(string key, Rectangle zone, List<DetailPopup.Row> rows)
+    // DetailPopup sits 14, 18 right of and below the point it is given: these put it at the chevron.
+    private Point GridChevron(Rectangle zone) => PointToScreen(new Point(zone.Right - 14 + AutoScrollPosition.X, zone.Top - 18 + AutoScrollPosition.Y));
+    private static Point TileChevron(Tile tile, Rectangle zone) => tile.PointToScreen(new Point(zone.Right - 14, zone.Top - 18));
+
+    private void OpenBrowse(string key, Point screenAt, List<DetailPopup.Row> rows)
     {
         CloseBrowse();
         CloseHover();
         _tipFor = null;
         _tip.Hide(this);
-        // DetailPopup sits 14, 18 right of and below the point it is given: this puts it at the chevron.
-        var popup = new DetailPopup(rows, PointToScreen(new Point(zone.Right - 14 + AutoScrollPosition.X, zone.Top - 18 + AutoScrollPosition.Y)));
+        var popup = new DetailPopup(rows, screenAt);
         // Showing it deactivates this window: only then is it the open panel, or that would close it mid-show.
         popup.Show();
         _browse = popup;
@@ -781,7 +787,11 @@ internal sealed class AgentsView : ScrollableControl
     {
         if (Form.ActiveForm != null) return;
         CloseBrowse();
-        foreach (var tile in _tiles) tile.Conversation?.ClosePreview();
+        foreach (var tile in _tiles)
+        {
+            tile.Conversation?.ClosePreview();
+            tile.Expansion?.ClosePreview();
+        }
     }
 
     private void CloseBrowse()
@@ -804,26 +814,34 @@ internal sealed class AgentsView : ScrollableControl
         public readonly string SessionId;
         public Placed? Shown;
         public DetailPopup? Conversation;
+        /// <summary>The agent or shell expanded under its card, and what it shows.</summary>
+        public string? Expanded;
+        public DetailPopup? Expansion;
         public Tile(string sessionId) { SessionId = sessionId; DoubleBuffered = true; ResizeRedraw = true; Dock = DockStyle.Left; }
     }
 
     private bool IsOpen(string sessionId) => _tiles.Any(t => t.SessionId == sessionId);
 
-    /// <summary>Open a session's tile beside those already open.</summary>
-    private Tile OpenTile(string sessionId)
+    /// <summary>Open a session's tile beside those already open, with <paramref name="expand"/> (an agent's or shell's id) expanded.</summary>
+    private Tile OpenTile(string sessionId, string? expand)
     {
         CloseBrowse();
         CloseHover();
         _tipFor = null;
         _tip.Hide(this);
-        var tile = new Tile(sessionId) { BackColor = BackColor };
+        var tile = new Tile(sessionId) { BackColor = BackColor, Expanded = expand };
         tile.Paint += (_, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            if (tile.Shown != null) DrawSession(e.Graphics, tile.Shown);
+            if (tile.Shown is not { } shown) return;
+            DrawSession(e.Graphics, shown);
+            foreach (var (c, r) in shown.Children) DrawChild(e.Graphics, c, r, Fill(shown.Node), live: false, open: tile.Expanded == c.Id);
+            foreach (var (m, r) in shown.Messages) DrawMessage(e.Graphics, m, r, shown, open: _browseFor == MessageKey(shown, m));
         };
         tile.MouseUp += (_, e) => OnTileMouseUp(tile, e);
-        tile.MouseMove += (_, e) => tile.Cursor = tile.Shown != null && SessionChevron(tile.Shown.Box).Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+        tile.MouseMove += (_, e) => tile.Cursor = tile.Shown is { } shown && (SessionChevron(shown.Box).Contains(e.Location)
+            || shown.Children.Any(c => ChildChevron(c.Box).Contains(e.Location)) || shown.Messages.Any(m => ChildChevron(m.Box).Contains(e.Location)))
+            ? Cursors.Hand : Cursors.Default;
         // Sized as the page lays out, before it docks: a width set during the docking (from this view's
         // resize) went unapplied, and this view kept overlapping the column.
         var page = Parent!;
@@ -850,6 +868,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         _tiles.Remove(tile);
         tile.Conversation?.Close();
+        tile.Expansion?.Close();
         tile.Dispose();
         Parent?.PerformLayout();
     }
@@ -857,25 +876,78 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>One of the window's columns, narrower when more tiles are open than leave one for the rest.</summary>
     private int ColumnWidth() => Parent!.ClientSize.Width / Math.Max(_columns, _tiles.Count + 1);
 
-    /// <summary>Lay the open tile and its conversation in its column.</summary>
+    /// <summary>Lay the open tile in its column: its title, then its agents' and shells' cards (the expanded
+    /// one with what it did under it, half the tile high) and the messages it sent, then its conversation.</summary>
     private void PlaceTile(Tile tile, SessionState.AgentNode node)
     {
         var box = new Rectangle(Pad, Pad, tile.ClientSize.Width - Pad, tile.ClientSize.Height - 2 * Pad);
-        tile.Shown = new Placed(node, "", box, new(), new());
-        var inside = new Rectangle(box.Left + 6, box.Top + 5 + Line + 3, box.Width - 12, box.Height - 5 - Line - 3 - 6);
+        int x = box.Left + 6, w = box.Width - 12, y = box.Top + 5 + Line + 3;
+        var children = new List<(SessionState.AgentChild, Rectangle)>();
+        var expanded = node.Children.FirstOrDefault(c => c.Id == tile.Expanded);
+        Rectangle? expansion = null;
+        foreach (var child in node.Children.OrderBy(c => c.StartedUtc ?? DateTime.MaxValue))
+        {
+            children.Add((child, new Rectangle(x, y, w, ChildH)));
+            y += ChildH + ChildGap;
+            if (child != expanded) continue;
+            expansion = new Rectangle(x, y, w, box.Height / 2);
+            y += box.Height / 2 + ChildGap;
+        }
+        var messages = new List<(SessionState.AgentEdge, Rectangle)>();
+        foreach (var m in _graph.Edges.Where(e => e.FromId == node.SessionId).OrderBy(e => e.AtUtc))
+        {
+            messages.Add((m, new Rectangle(x, y, w, ChildH)));
+            y += ChildH + ChildGap;
+        }
+        tile.Shown = new Placed(node, "", box, children, messages);
+        if (expanded == null)
+        {
+            tile.Expanded = null; // it finished, or none was
+            tile.Expansion?.Close();
+            tile.Expansion = null;
+        }
+        else if (tile.Expansion == null) tile.Expansion = new DetailPopup(CardRows(expanded), tile, expansion!.Value);
+        else tile.Expansion.Place(expansion!.Value, CardRows(expanded));
+        var inside = new Rectangle(x, y, w, Math.Max(3 * Line, box.Bottom - 6 - y));
         if (tile.Conversation == null) tile.Conversation = new DetailPopup(ConversationRows(node), tile, inside);
         else tile.Conversation.Place(inside, ConversationRows(node));
         tile.Invalidate();
     }
 
+    /// <summary>What an expanded card shows: an agent's task and actions, the one running now turning; a shell's command and output.</summary>
+    private static List<DetailPopup.Row> CardRows(SessionState.AgentChild c)
+    {
+        var rows = ChildBrowseRows(c);
+        if (c.Kind == "agent" && c.Activity.Length > 0 && c.Actions.Count > 0) rows[^1] = rows[^1] with { Running = true };
+        return rows;
+    }
+
     private void OnTileMouseUp(Tile tile, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left || tile.Shown == null) return;
-        if (SessionChevron(tile.Shown.Box).Contains(e.Location))
+        if (e.Button != MouseButtons.Left || tile.Shown is not { } shown) return;
+        var at = e.Location;
+        if (SessionChevron(shown.Box).Contains(at))
         {
             CloseTile(tile);
             Reflow();
             Invalidate();
+        }
+        else if (shown.Children.FirstOrDefault(c => ChildChevron(c.Box).Contains(at)) is { Child: not null } card)
+        {
+            tile.Expanded = tile.Expanded == card.Child.Id ? null : card.Child.Id;
+            Reflow();
+        }
+        else if (shown.Messages.FirstOrDefault(m => DismissZone(m.Box).Contains(at)) is { Message: not null } dismissed)
+            Run("message.dismiss", new { session = dismissed.Message.FromId, to = dismissed.Message.To });
+        else if (Chevrons([shown]).FirstOrDefault(c => c.Zone.Contains(at)) is { Key: not null } chevron)
+        {
+            if (_browseFor == chevron.Key) CloseBrowse();
+            else
+            {
+                try { OpenBrowse(chevron.Key, TileChevron(tile, chevron.Zone), chevron.Rows()); }
+                catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            }
+            tile.Invalidate();
         }
         else if (tile.Shown.Box.Contains(e.Location))
         {
@@ -902,32 +974,34 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>For the control channel: open a session's tile, or one of its agents' or shells' browse panel, as its chevron does.</summary>
     public void Browse(string session, string? child)
     {
-        var p = _placed.FirstOrDefault(x => x.Node.SessionId == session || x.Node.Name == session)
-            ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
-        if (child == null)
+        bool Is(Placed x) => x.Node.SessionId == session || x.Node.Name == session;
+        var tile = _tiles.FirstOrDefault(t => t.Shown is { } shown && Is(shown));
+        var p = tile?.Shown ?? _placed.FirstOrDefault(Is) ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
+        if (child != null && p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
         {
-            var tile = OpenTile(p.Node.SessionId);
-            tile.Refresh();
-            tile.Conversation!.Refresh();
+            OpenBrowse(MessageKey(p, m.Message), tile != null ? TileChevron(tile, ChildChevron(m.Box)) : GridChevron(ChildChevron(m.Box)), MessageRows(p, m.Message));
+            _browse!.Refresh();
             return;
         }
-        if (p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
-            OpenBrowse(MessageKey(p, m.Message), ChildChevron(m.Box), MessageRows(p, m.Message));
-        else
+        var c = child == null ? null : p.Node.Children.FirstOrDefault(x => x.Id == child || x.Description == child)
+            ?? throw new ArgumentException($"{p.Node.Name} has no agent or shell \"{child}\"; it has: {string.Join(", ", p.Node.Children.Select(x => x.Description))}");
+        if (tile == null) tile = OpenTile(p.Node.SessionId, c?.Id);
+        else if (c != null)
         {
-            var (c, r) = p.Children.FirstOrDefault(x => x.Child.Id == child || x.Child.Description == child);
-            if (c == null) throw new ArgumentException($"{p.Node.Name} has no agent or shell \"{child}\"; it has: {string.Join(", ", p.Children.Select(x => x.Child.Description))}");
-            OpenBrowse(p.Node.SessionId + "/" + c.Id, ChildChevron(r), ChildBrowseRows(c));
+            tile.Expanded = c.Id;
+            Reflow();
         }
-        _browse!.Refresh();
+        tile.Refresh();
+        tile.Conversation!.Refresh();
+        tile.Expansion?.Refresh();
     }
 
     /// <summary>For the control channel: hover a row of the open browse panel, opening its preview.</summary>
     public void BrowseHover(int row) =>
-        (_browse ?? _tiles.LastOrDefault()?.Conversation ?? throw new InvalidOperationException("no browse panel or tile is open; call ui.agentsBrowse first")).HoverRow(row);
+        (_browse ?? _tiles.LastOrDefault()?.Expansion ?? _tiles.LastOrDefault()?.Conversation ?? throw new InvalidOperationException("no browse panel or tile is open; call ui.agentsBrowse first")).HoverRow(row);
 
     public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : _tiles.LastOrDefault()?.Handle;
-    public IntPtr? PreviewHandle => (_browse ?? _tiles.LastOrDefault()?.Conversation) is { IsDisposed: false } b ? b.PreviewHandle : null;
+    public IntPtr? PreviewHandle => (_browse ?? _tiles.LastOrDefault()?.Expansion ?? _tiles.LastOrDefault()?.Conversation) is { IsDisposed: false } b ? b.PreviewHandle : null;
 
     /// <summary>A subagent's task and recent actions; a shell's command and output.</summary>
     private static List<DetailPopup.Row> ChildBrowseRows(SessionState.AgentChild c)
@@ -1026,9 +1100,15 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseUp(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        if (e.Button == MouseButtons.Left && _placed.SelectMany(p => p.Children.Select(c => (p, c.Child, c.Box))).FirstOrDefault(x => ChildChevron(x.Box).Contains(at)) is { p: not null } card)
+        {
+            try { OpenTile(card.p.Node.SessionId, card.Child.Id); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            return;
+        }
         if (e.Button == MouseButtons.Left && _placed.FirstOrDefault(p => SessionChevron(p.Box).Contains(at)) is { } opened)
         {
-            try { OpenTile(opened.Node.SessionId); }
+            try { OpenTile(opened.Node.SessionId, null); }
             catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
             return;
         }
@@ -1037,7 +1117,7 @@ internal sealed class AgentsView : ScrollableControl
             if (_browseFor == chevron.Key) CloseBrowse();
             else
             {
-                try { OpenBrowse(chevron.Key, chevron.Zone, chevron.Rows()); }
+                try { OpenBrowse(chevron.Key, GridChevron(chevron.Zone), chevron.Rows()); }
                 catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
             }
             return;
@@ -1236,9 +1316,12 @@ internal sealed class DetailPopup : Form
     /// <summary>Embedded: move to <paramref name="bounds"/>, laying the rows out again at its width.</summary>
     public void Place(Rectangle bounds, List<Row> rows)
     {
+        // Whether it showed the newest rows is judged at its old size: shrunk, it would seem scrolled up.
+        bool atEnd = _scroll >= _contentHeight - ClientSize.Height;
         _width = bounds.Width;
         Bounds = bounds;
         SetRows(rows);
+        if (atEnd) ScrollBy(int.MaxValue / 2);
     }
 
     /// <summary>Lay the rows out and size the window to them, at most the height of the screen at <paramref name="at"/>
@@ -1582,7 +1665,7 @@ internal sealed class DetailPopup : Form
         if (row.Image is { } img) { g.DrawImage(img, image); return; }
         if (row.Running) DrawSpinning(g, SpinBox(text));
         else if (row.Icon == AgentsView.IconClaude)
-            g.DrawIcon(AgentsView.ClaudeIcon, SpinBox(text));
+            g.DrawImage(SpinImage, SpinBox(text)); // DrawIcon ignores the scroll transform: the icon went missing once scrolled
         else if (row.Icon is { } icon)
             TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, Line);
         if (runs != null)
