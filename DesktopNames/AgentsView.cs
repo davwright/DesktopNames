@@ -892,8 +892,11 @@ internal sealed class AgentsView : ScrollableControl
         var rows = facts.Prompts
             .Select(p => (p.Offset, Row: PromptRow(n.TranscriptPath, p, p.FromPeer ? IconClaude : IconUser, p.FromPeer ? $"{p.From}: " : "") with { Mine = !p.FromPeer }))
             .Concat(facts.Actions.Select(a => (a.Offset, Row: ActionRow(n.TranscriptPath, a))))
-            .OrderBy(x => x.Offset).Select(x => x.Row).ToList();
-        return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
+            .OrderBy(x => x.Offset).ToList();
+        // While the session works, its newest action is the step running now.
+        if (n.State == StateKind.Busy && rows.Count > 0 && facts.Actions.Count > 0 && rows[^1].Offset == facts.Actions[^1].Offset)
+            rows[^1] = (rows[^1].Offset, rows[^1].Row with { Running = true });
+        return rows.Count > 0 ? rows.Select(x => x.Row).ToList() : new() { new(null, "Nothing recorded yet.", null, null) };
     }
 
     /// <summary>For the control channel: open a session's tile, or one of its agents' or shells' browse panel, as its chevron does.</summary>
@@ -1122,10 +1125,11 @@ internal sealed class DetailPopup : Form
     /// a row with the same age as the one before it doesn't repeat it. <see cref="Markdown"/>: the
     /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
     /// as a PowerShell or Bash command, highlighted. <see cref="Mine"/>: the user's own message — shaded, and it stays at
-    /// the top while the rows under it scroll away, until the next one of the user's pushes it off.</summary>
+    /// the top while the rows under it scroll away, until the next one of the user's pushes it off. <see cref="Running"/>:
+    /// the step running now — a turning Claude icon in place of its own.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
                              Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false,
-                             bool Mine = false);
+                             bool Mine = false, bool Running = false);
 
     private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
     private sealed record Run(string Text, Color Color, Point At);
@@ -1185,8 +1189,17 @@ internal sealed class DetailPopup : Form
         TopMost = true;
         BackColor = TipCard.Back(false);
         DoubleBuffered = true;
+        _spin.Tick += (_, _) =>
+        {
+            foreach (var laid in _laid.Where(l => l.Row.Running))
+            {
+                var r = SpinBox(laid.Text);
+                Invalidate(new Rectangle(r.X - 3, r.Y - 3 - _scroll, r.Width + 6, r.Height + 6));
+            }
+        };
         FormClosed += (_, _) =>
         {
+            _spin.Dispose();
             _preview?.Close();
             foreach (var laid in _laid) laid.Row.Image?.Dispose();
             _font.Dispose();
@@ -1277,6 +1290,7 @@ internal sealed class DetailPopup : Form
             y += textH + RowGap * 2;
         }
         _contentHeight = y - RowGap + Pad;
+        _spin.Enabled = _laid.Any(l => l.Row.Running);
         if (!_embedded) Size = new Size(width, Math.Min(_contentHeight, Screen.FromPoint(at).WorkingArea.Height - 20));
     }
 
@@ -1540,6 +1554,23 @@ internal sealed class DetailPopup : Form
 
     private static readonly Color MineBack = Color.FromArgb(222, 234, 250);
 
+    // The running step's Claude icon turns: an animation, so a display timer, on only while a row runs.
+    private readonly System.Windows.Forms.Timer _spin = new() { Interval = 40 };
+    private const int SpinMs = 1600;
+    private static readonly Bitmap SpinImage = new Icon(AgentsView.ClaudeIcon, 32, 32).ToBitmap();
+
+    private Rectangle SpinBox(Rectangle text) => new(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2);
+
+    private static void DrawSpinning(Graphics g, Rectangle r)
+    {
+        var state = g.Save();
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.TranslateTransform(r.X + r.Width / 2f, r.Y + r.Height / 2f);
+        g.RotateTransform(360f * (Environment.TickCount64 % SpinMs) / SpinMs);
+        g.DrawImage(SpinImage, -r.Width / 2f, -r.Height / 2f, r.Width, r.Height);
+        g.Restore(state);
+    }
+
     private void DrawRow(Graphics g, int i, Pen? dotted)
     {
         var (row, _, text, image, age, first, rest, blocks, runs) = _laid[i];
@@ -1549,8 +1580,9 @@ internal sealed class DetailPopup : Form
             g.DrawLine(dotted, Pad, top, Width - Pad, top);
         }
         if (row.Image is { } img) { g.DrawImage(img, image); return; }
-        if (row.Icon == AgentsView.IconClaude)
-            g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
+        if (row.Running) DrawSpinning(g, SpinBox(text));
+        else if (row.Icon == AgentsView.IconClaude)
+            g.DrawIcon(AgentsView.ClaudeIcon, SpinBox(text));
         else if (row.Icon is { } icon)
             TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, Line);
         if (runs != null)
