@@ -968,6 +968,19 @@ internal sealed class ProjectsDialog : Form
         Size = new Size(Math.Min(work.Width - 40, _cols.Sum(c => c.Width) + 60), 640);
         StartPosition = FormStartPosition.Manual;
         Location = new Point(work.Left + (work.Width - Width) / 2, work.Top + (work.Height - Height) / 2);
+        // Where it was last on this screen setup — unless the screens were rearranged and that is now off them.
+        if (Program.Host.Settings.Layout().ProjectsWindow is { } place)
+        {
+            var bounds = new Rectangle(place.X, place.Y, place.Width, place.Height);
+            if (Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(bounds)))
+            {
+                Bounds = bounds;
+                if (place.Maximized) WindowState = FormWindowState.Maximized;
+            }
+        }
+        ResizeEnd += (_, _) => SavePlace();
+        Shown += (_, _) => SizeChanged += (_, _) => { if (WindowState != _placedState) SavePlace(); }; // maximized or restored
+        FormClosing += (_, _) => SavePlace();
 
         foreach (var c in _cols) _list.Columns.Add(c.Header, c.Width);
         // Row height comes from the small image list; 26px fits the tab-style pills.
@@ -1978,6 +1991,20 @@ internal sealed class ProjectsDialog : Form
         }
         Run("vscode.launch", row.Desktop == null ? new { folder = row.Folder } : (object)new { desktop = row.Desktop.Index + 1, folder = row.Folder });
         Finish(DialogResult.Cancel);
+    }
+
+    private FormWindowState _placedState;
+
+    /// <summary>Remember where the window is, for this screen setup: its normal bounds even while maximized.</summary>
+    private void SavePlace()
+    {
+        _placedState = WindowState;
+        var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        var place = new WindowPlace(b.X, b.Y, b.Width, b.Height, WindowState == FormWindowState.Maximized);
+        var settings = Program.Host!.Settings;
+        if (settings.Layout().ProjectsWindow == place) return;
+        settings.Layout().ProjectsWindow = place;
+        settings.Save();
     }
 
     /// <summary>The window is not modal: setting DialogResult alone does not close it.</summary>

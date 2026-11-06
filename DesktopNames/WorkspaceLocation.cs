@@ -80,8 +80,14 @@ internal sealed class ScreenLayout
     /// <summary>When this arrangement was last plugged in, so old ones can be told apart and deleted.</summary>
     public DateTime? LastUsedUtc { get; set; }
 
+    /// <summary>Where the DesktopNames window (Win+J) was last on this arrangement.</summary>
+    public WindowPlace? ProjectsWindow { get; set; }
+
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? (Describe ?? "unknown setup") : Name!;
 }
+
+/// <summary>A window's normal (not maximized) bounds, and whether it was maximized.</summary>
+internal sealed record WindowPlace(int X, int Y, int Width, int Height, bool Maximized);
 
 /// <summary>A monitor some layout remembers, as last seen.</summary>
 internal sealed record KnownScreen(string Key, ScreenInfo Latest, string? Name, bool Connected, int Layouts, DateTime? LastUsedUtc, bool OverlayHidden, int Ports);
