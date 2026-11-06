@@ -287,9 +287,10 @@ internal sealed class ClaudeSessionRegistry
     /// the transcript and <see cref="ToolUseId"/> the call's id, to read its input and result again (<see cref="ActionDetail"/>).</summary>
     public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc, string? Command, long Offset, string? ToolUseId);
 
-    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions);
+    /// <summary><see cref="Prompts"/>: the prompts from the one that started the oldest kept action on, oldest first.</summary>
+    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions, IReadOnlyList<Prompt> Prompts);
 
-    private const int ActionsKept = 15;
+    private const int ActionsKept = 40;
 
     private sealed class Scanned
     {
@@ -300,7 +301,8 @@ internal sealed class ClaudeSessionRegistry
         /// <summary>The name the user gave it in VS Code (a custom-title record).</summary>
         public string? CustomTitle;
         public Usage? Usage;
-        public Prompt? Prompt;
+        public List<Prompt> Prompts = new();
+        public Prompt? Prompt => Prompts.Count > 0 ? Prompts[^1] : null;
         public List<ClaudeAction> Actions = new();
     }
 
@@ -336,17 +338,19 @@ internal sealed class ClaudeSessionRegistry
             if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal)
                 && (line.Contains("\"type\":\"user\"", StringComparison.Ordinal) || line.Contains("\"type\":\"queued_command\"", StringComparison.Ordinal))
                 && PromptOf(line, offset) is { } p)
-                into.Prompt = p;
+                into.Prompts.Add(p);
             // A subagent's task, and any message sent to it later: user records that are neither tool
             // results nor Claude Code's own notes (isMeta: reminders, "[Image: original …]").
             else if (into.Sidechain && line.Contains("\"type\":\"user\"", StringComparison.Ordinal) && !line.Contains("\"tool_use_id\"", StringComparison.Ordinal)
                      && !line.Contains("\"isMeta\":true", StringComparison.Ordinal))
-                into.Prompt = SubagentPromptOf(line, offset);
+                into.Prompts.Add(SubagentPromptOf(line, offset));
             else if (line.Contains("\"type\":\"assistant\"", StringComparison.Ordinal) && (into.Sidechain || !line.Contains("\"isSidechain\":true", StringComparison.Ordinal)))
                 into.Actions.AddRange(ActionsOf(line, offset));
             offset += System.Text.Encoding.UTF8.GetByteCount(line) + 1;
         }
         if (into.Actions.Count > ActionsKept) into.Actions.RemoveRange(0, into.Actions.Count - ActionsKept);
+        int started = into.Actions.Count > 0 ? into.Prompts.FindLastIndex(p => p.Offset < into.Actions[0].Offset) : into.Prompts.Count - 1;
+        if (started > 0) into.Prompts.RemoveRange(0, started);
     }
 
     /// <summary>The tool calls and replies in one assistant record.</summary>
@@ -588,7 +592,7 @@ internal sealed class ClaudeSessionRegistry
             Scan(text, start, seen);
             seen.Length = end;
         }
-        return new TranscriptFacts(seen.CustomTitle ?? seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList());
+        return new TranscriptFacts(seen.CustomTitle ?? seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList(), seen.Prompts.ToList());
     }
 
     /// <summary>Where a subagent writes its own transcript: beside its session's, in <c>&lt;sessionId&gt;subagentsagent-&lt;agentId&gt;.jsonl</c>.</summary>

@@ -118,6 +118,7 @@ internal sealed class AgentsView : ScrollableControl
     public object Describe() => new
     {
         animating = _shimmer.Enabled,
+        open = _tile?.Node.Name,
         nodes = _placed.Select(p => new
         {
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
@@ -149,6 +150,8 @@ internal sealed class AgentsView : ScrollableControl
     private void Reflow()
     {
         _graph = _sessions.Graph();
+        var open = _graph.Nodes.FirstOrDefault(n => n.SessionId == _open);
+        if (_open != null && open == null) CloseTile(); // its session ended
         var desktops = _desktops.GetDesktops();
         int Order(Guid id) => desktops.FindIndex(d => d.Id == id) is int i and >= 0 ? i : int.MaxValue;
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
@@ -158,8 +161,9 @@ internal sealed class AgentsView : ScrollableControl
         int StackHeight(SessionState.AgentNode n) => BoxH + (n.Children.Count + SentBy(n).Count) * (ChildH + ChildGap);
 
         int width = Math.Max(ClientSize.Width, 400);
-        int maxCols = _columns;
-        BoxW = (width - 2 * Pad - (_columns - 1) * Gap) / _columns - 2 * GroupPad;
+        // An open tile takes one column of the window: the rest flow in the others.
+        int maxCols = open != null ? Math.Max(1, _columns - 1) : _columns;
+        BoxW = (width - 2 * Pad - (maxCols - 1) * Gap) / maxCols - 2 * GroupPad;
         ScaleText(BoxW / 300f);
         int x = Pad, top = Pad, bandHeight = 0;
         var placed = new List<Placed>();
@@ -169,7 +173,7 @@ internal sealed class AgentsView : ScrollableControl
         // Desktops active in the last two hours first, then the rest; desktop order within each. Not by
         // state: a desktop going busy or ready moved it, so frames kept changing place under the user.
         int Tier(IEnumerable<SessionState.AgentNode> ns) => ns.Any(n => DateTime.UtcNow - n.LastActiveUtc <= Recent) ? 0 : 1;
-        foreach (var group in _graph.Nodes.GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
+        foreach (var group in _graph.Nodes.Where(n => n != open).GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
         {
             var nodes = group.OrderByDescending(n => n.LastActiveUtc).ToList();  // most recently active first
             int cols = Math.Min(nodes.Count, maxCols);
@@ -217,6 +221,7 @@ internal sealed class AgentsView : ScrollableControl
                 .Concat(p.Node.State == StateKind.Busy ? new[] { ActionZone(p.Box) } : Array.Empty<Rectangle>())).ToList();
         UpdateShimmer();
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
+        if (open != null) PlaceTile(open);
     }
 
     /// <summary>Text grows and shrinks with the boxes (300 px wide = the window's 9 pt).</summary>
@@ -257,6 +262,7 @@ internal sealed class AgentsView : ScrollableControl
         _columns = columns;
         Program.Host!.Settings.AgentsColumns = columns;
         Program.Host.Settings.Save();
+        _column?.Parent!.PerformLayout(); // the open tile's column follows the column width
         Reflow();
         Invalidate();
     }
@@ -266,7 +272,7 @@ internal sealed class AgentsView : ScrollableControl
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
-        if (_placed.Count == 0)
+        if (_placed.Count == 0 && _open == null)
         {
             TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText, Flags);
             return;
@@ -334,7 +340,7 @@ internal sealed class AgentsView : ScrollableControl
             if (n.Usage is { } u) DrawContext(g, path, p.Box, fill, u);
             g.DrawPath(border, path);
         }
-        int lx = p.Box.Left + 8, w = BoxW - 16, y = p.Box.Top + 5;
+        int lx = p.Box.Left + 8, w = p.Box.Width - 16, y = p.Box.Top + 5;
         // Line 1: the title VS Code lists it under; top right, the model, ⏳ while background work runs, and how long ago it started.
         string corner = (n.Usage is { } model ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + (n.StartedUtc is { } s ? SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
@@ -357,7 +363,9 @@ internal sealed class AgentsView : ScrollableControl
         if (room - titleW > 2 * Line)
             TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx + badge + titleW + 4, y, room - titleW - 4, Line), dim, Flags);
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - cornerW, y, cornerW, Line), ink, Flags);
-        DrawChevron(g, SessionChevron(p.Box), _browseFor == n.SessionId);
+        DrawChevron(g, SessionChevron(p.Box), _open == n.SessionId);
+        // Open, the conversation below its title takes the place of its last prompt and action.
+        if (_open == n.SessionId) return;
         // Lines 2-3: the last prompt — the user's, or another session's message to it.
         // Each of the two ends with its age at the right of its first line, as an agent's card does.
         if (n.Prompt is { } prompt)
@@ -629,7 +637,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseMove(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
-        Cursor = ChevronAt(at) != null ? Cursors.Hand : Cursors.Default;
+        Cursor = ChevronAt(at) != null || _placed.Any(p => SessionChevron(p.Box).Contains(at)) ? Cursors.Hand : Cursors.Default;
         // Over a prompt or the actions: the full message, or the recent actions, in a popup.
         // Not while a browse panel is open: it shows the same and more.
         foreach (var p in _browse == null ? _placed : [])
@@ -695,6 +703,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         CloseHover();
         CloseBrowse();
+        _conversation?.ClosePreview();
     }
 
     private void CloseHover()
@@ -729,7 +738,6 @@ internal sealed class AgentsView : ScrollableControl
         foreach (var p in _placed)
         {
             var node = p.Node;
-            yield return (node.SessionId, SessionChevron(p.Box), () => SessionBrowseRows(node));
             foreach (var (c, r) in p.Children)
                 yield return (node.SessionId + "/" + c.Id, ChildChevron(r), () => ChildBrowseRows(c));
             foreach (var (m, r) in p.Messages)
@@ -771,7 +779,9 @@ internal sealed class AgentsView : ScrollableControl
     // Another app came to the front (no form of ours is active): the panel goes with this window.
     private void OnFormDeactivate(object? sender, EventArgs e)
     {
-        if (Form.ActiveForm == null) CloseBrowse();
+        if (Form.ActiveForm != null) return;
+        CloseBrowse();
+        _conversation?.ClosePreview();
     }
 
     private void CloseBrowse()
@@ -784,13 +794,119 @@ internal sealed class AgentsView : ScrollableControl
         Invalidate();
     }
 
-    /// <summary>For the control channel: open a session's browse panel, or one of its agents' or shells', as its chevron does.</summary>
+    // The open tile: the session whose chevron was clicked, in a column at the left of the tab, the
+    // height of the window, its conversation inside it. It stays put while the other tiles scroll.
+    private string? _open;
+    private TileColumn? _column;
+    private Placed? _tile;
+    private DetailPopup? _conversation;
+
+    private sealed class TileColumn : Panel
+    {
+        public TileColumn() { DoubleBuffered = true; ResizeRedraw = true; }
+    }
+
+    /// <summary>Open a session's tile, or close it (null).</summary>
+    private void OpenTile(string? sessionId)
+    {
+        CloseBrowse();
+        CloseHover();
+        _tipFor = null;
+        _tip.Hide(this);
+        CloseTile();
+        _open = sessionId;
+        if (sessionId != null)
+        {
+            var form = FindForm()!;
+            form.Deactivate -= OnFormDeactivate;
+            form.Deactivate += OnFormDeactivate;
+        }
+        Reflow();
+        Invalidate();
+    }
+
+    private void CloseTile()
+    {
+        _open = null;
+        _tile = null;
+        _conversation?.Close();
+        _conversation = null;
+        _column?.Dispose();
+        _column = null;
+    }
+
+    /// <summary>Size the column to one of the window's columns and lay the open tile and its conversation in it.</summary>
+    private void PlaceTile(SessionState.AgentNode node)
+    {
+        if (_column == null)
+        {
+            _column = new TileColumn { Dock = DockStyle.Left, BackColor = BackColor };
+            _column.Paint += (_, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                if (_tile != null) DrawSession(e.Graphics, _tile);
+            };
+            _column.MouseUp += OnTileMouseUp;
+            _column.MouseMove += (_, e) => _column.Cursor = _tile != null && SessionChevron(_tile.Box).Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+            SizeColumn(this, new LayoutEventArgs(_column, null));
+            // Sized as the page lays out, before it docks: a width set during the docking (from this view's
+            // resize) went unapplied, and this view kept overlapping the column.
+            var page = Parent!;
+            page.Layout += SizeColumn;
+            _column.Disposed += (_, _) => page.Layout -= SizeColumn;
+            page.Controls.Add(_column);
+            BringToFront(); // docking runs back to front: the column takes the left, this the rest
+        }
+        var box = new Rectangle(Pad, Pad, _column.ClientSize.Width - Pad, _column.ClientSize.Height - 2 * Pad);
+        _tile = new Placed(node, "", box, new(), new());
+        var inside = new Rectangle(box.Left + 6, box.Top + 5 + Line + 3, box.Width - 12, box.Height - 5 - Line - 3 - 6);
+        if (_conversation == null) _conversation = new DetailPopup(ConversationRows(node), _column, inside);
+        else _conversation.Place(inside, ConversationRows(node));
+        _column.Invalidate();
+    }
+
+    /// <summary>The open tile's column is one of the window's columns wide.</summary>
+    private void SizeColumn(object? sender, LayoutEventArgs e)
+    {
+        if (_column != null) _column.Width = Parent!.ClientSize.Width / _columns;
+    }
+
+    private void OnTileMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || _tile == null) return;
+        if (SessionChevron(_tile.Box).Contains(e.Location)) OpenTile(null);
+        else if (_tile.Box.Contains(e.Location))
+        {
+            try { GoTo(_tile.Node); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+        }
+    }
+
+    /// <summary>What the session was told and did, in order: each prompt (the user's shaded), then Claude's actions and replies under it.</summary>
+    private static List<DetailPopup.Row> ConversationRows(SessionState.AgentNode n)
+    {
+        var facts = n.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(n.TranscriptPath) : null;
+        if (facts == null) return new() { new(null, "No transcript yet.", null, null) };
+        var rows = facts.Prompts
+            .Select(p => (p.Offset, Row: PromptRow(n.TranscriptPath, p, p.FromPeer ? IconClaude : IconUser, p.FromPeer ? $"{p.From}: " : "") with { Mine = !p.FromPeer }))
+            .Concat(facts.Actions.Select(a => (a.Offset, Row: ActionRow(n.TranscriptPath, a))))
+            .OrderBy(x => x.Offset).Select(x => x.Row).ToList();
+        return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
+    }
+
+    /// <summary>For the control channel: open a session's tile, or one of its agents' or shells' browse panel, as its chevron does.</summary>
     public void Browse(string session, string? child)
     {
         var p = _placed.FirstOrDefault(x => x.Node.SessionId == session || x.Node.Name == session)
             ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
-        if (child == null) OpenBrowse(p.Node.SessionId, SessionChevron(p.Box), SessionBrowseRows(p.Node));
-        else if (p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
+        if (child == null)
+        {
+            OpenTile(p.Node.SessionId);
+            _column!.Refresh();
+            _conversation!.Refresh();
+            return;
+        }
+        if (p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
             OpenBrowse(MessageKey(p, m.Message), ChildChevron(m.Box), MessageRows(p, m.Message));
         else
         {
@@ -803,19 +919,10 @@ internal sealed class AgentsView : ScrollableControl
 
     /// <summary>For the control channel: hover a row of the open browse panel, opening its preview.</summary>
     public void BrowseHover(int row) =>
-        (_browse ?? throw new InvalidOperationException("no browse panel is open; call ui.agentsBrowse first")).HoverRow(row);
+        (_browse ?? _conversation ?? throw new InvalidOperationException("no browse panel or tile is open; call ui.agentsBrowse first")).HoverRow(row);
 
-    public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : null;
-    public IntPtr? PreviewHandle => _browse is { IsDisposed: false } b ? b.PreviewHandle : null;
-
-    /// <summary>A session's last prompt and recent actions, each previewed in full when hovered.</summary>
-    private static List<DetailPopup.Row> SessionBrowseRows(SessionState.AgentNode n)
-    {
-        var rows = new List<DetailPopup.Row>();
-        if (n.Prompt is { } p) rows.Add(PromptRow(n.TranscriptPath, p, p.FromPeer ? IconClaude : IconUser, p.FromPeer ? $"{p.From}: " : ""));
-        rows.AddRange(n.Actions.Select(a => ActionRow(n.TranscriptPath, a)));
-        return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
-    }
+    public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : _column?.Handle;
+    public IntPtr? PreviewHandle => (_browse ?? _conversation) is { IsDisposed: false } b ? b.PreviewHandle : null;
 
     /// <summary>A subagent's task and recent actions; a shell's command and output.</summary>
     private static List<DetailPopup.Row> ChildBrowseRows(SessionState.AgentChild c)
@@ -905,7 +1012,7 @@ internal sealed class AgentsView : ScrollableControl
     private static List<DetailPopup.Row> ActionRows(SessionState.AgentNode n) =>
         n.Actions.Count == 0
             ? new() { new(ActivityIcon(n.HookEvent, n.ToolName), n.Doing, null, null) }
-            : n.Actions.Select(a => new DetailPopup.Row(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool),
+            : n.Actions.TakeLast(15).Select(a => new DetailPopup.Row(a.Tool.Length == 0 ? IconReply : ToolIcon(a.Tool),
                   TaskbarOverlay.Truncate(a.Text.Trim(), 400), SessionState.FormatAge(a.AtUtc), null)).ToList();
 
     /// <summary>Click a session: go to its desktop, taking this window along. Right-click a session:
@@ -914,6 +1021,12 @@ internal sealed class AgentsView : ScrollableControl
     {
         base.OnMouseUp(e);
         var at = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
+        if (e.Button == MouseButtons.Left && _placed.FirstOrDefault(p => SessionChevron(p.Box).Contains(at)) is { } opened)
+        {
+            try { OpenTile(opened.Node.SessionId); }
+            catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
+            return;
+        }
         if (e.Button == MouseButtons.Left && ChevronAt(at) is { } chevron)
         {
             if (_browseFor == chevron.Key) CloseBrowse();
@@ -1006,9 +1119,11 @@ internal sealed class DetailPopup : Form
     /// <summary><see cref="Age"/> ("2m") ends the first line in bold, the text wrapping around it;
     /// a row with the same age as the one before it doesn't repeat it. <see cref="Markdown"/>: the
     /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
-    /// as a PowerShell or Bash command, highlighted.</summary>
+    /// as a PowerShell or Bash command, highlighted. <see cref="Mine"/>: the user's own message — shaded, and it stays at
+    /// the top while the rows under it scroll away, until the next one of the user's pushes it off.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
-                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false);
+                             Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false,
+                             bool Mine = false);
 
     private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
     private sealed record Run(string Text, Color Color, Point At);
@@ -1018,7 +1133,10 @@ internal sealed class DetailPopup : Form
     private readonly int _maxImageHeight;
     private readonly List<Laid> _laid = new();
     private readonly Font _font, _italicFont, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
-    private readonly int _width;
+    private int _width;
+    // Embedded in an open Agents tile, not a popup of its own: the tile sizes it, the wheel scrolls it,
+    // and a click (not a hover) opens a row's preview, so scrolling doesn't flip previews open.
+    private readonly bool _embedded;
     private int _contentHeight;
     private int _scroll;
     private DetailPopup? _preview;
@@ -1027,7 +1145,27 @@ internal sealed class DetailPopup : Form
     private const TextFormatFlags Wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
     private const TextFormatFlags Line = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
 
-    public DetailPopup(List<Row> rows, Point screenAt, int width = 520)
+    public DetailPopup(List<Row> rows, Point screenAt, int width = 520) : this(width)
+    {
+        StartPosition = FormStartPosition.Manual;
+        LayOut(rows, screenAt);
+        var work = Screen.FromPoint(screenAt).WorkingArea;
+        Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
+    }
+
+    /// <summary>Rows inside <paramref name="host"/> at <paramref name="bounds"/>, scrolled to the newest.</summary>
+    public DetailPopup(List<Row> rows, Control host, Rectangle bounds) : this(bounds.Width)
+    {
+        _embedded = true;
+        TopLevel = false;
+        Bounds = bounds;
+        host.Controls.Add(this);
+        LayOut(rows, host.PointToScreen(bounds.Location));
+        _scroll = Math.Max(0, _contentHeight - ClientSize.Height);
+        Show();
+    }
+
+    private DetailPopup(int width)
     {
         // Its own 9 pt text, whatever the Agents tab is zoomed to.
         _font = new Font("Segoe UI", 9f);
@@ -1042,12 +1180,8 @@ internal sealed class DetailPopup : Form
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
-        StartPosition = FormStartPosition.Manual;
         BackColor = TipCard.Back(false);
         DoubleBuffered = true;
-        LayOut(rows, screenAt);
-        var work = Screen.FromPoint(screenAt).WorkingArea;
-        Location = new Point(Math.Clamp(screenAt.X + 14, work.Left, work.Right - Width), Math.Clamp(screenAt.Y + 18, work.Top, work.Bottom - Height));
         FormClosed += (_, _) =>
         {
             _preview?.Close();
@@ -1067,10 +1201,12 @@ internal sealed class DetailPopup : Form
     public void SetRows(List<Row> rows)
     {
         string? previewed = _previewRow >= 0 && _previewRow < _laid.Count ? _laid[_previewRow].Row.Text : null;
+        bool atEnd = _scroll >= _contentHeight - ClientSize.Height;
         foreach (var laid in _laid) laid.Row.Image?.Dispose();
-        LayOut(rows, Location);
+        LayOut(rows, PointToScreen(Point.Empty));
         var work = Screen.FromControl(this).WorkingArea;
-        if (Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
+        if (!_embedded && Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
+        if (atEnd) _scroll = int.MaxValue;
         _previewRow = previewed == null ? -1 : _laid.FindIndex(l => l.Row.Text == previewed);
         if (_previewRow < 0)
         {
@@ -1081,7 +1217,16 @@ internal sealed class DetailPopup : Form
         Invalidate();
     }
 
-    /// <summary>Lay the rows out and size the window to them, at most the height of the screen at <paramref name="at"/>.</summary>
+    /// <summary>Embedded: move to <paramref name="bounds"/>, laying the rows out again at its width.</summary>
+    public void Place(Rectangle bounds, List<Row> rows)
+    {
+        _width = bounds.Width;
+        Bounds = bounds;
+        SetRows(rows);
+    }
+
+    /// <summary>Lay the rows out and size the window to them, at most the height of the screen at <paramref name="at"/>
+    /// (embedded: only the rows; its tile sets its size).</summary>
     private void LayOut(List<Row> rows, Point at)
     {
         var font = _font;
@@ -1129,7 +1274,7 @@ internal sealed class DetailPopup : Form
             y += textH + RowGap * 2;
         }
         _contentHeight = y - RowGap + Pad;
-        Size = new Size(width, Math.Min(_contentHeight, Screen.FromPoint(at).WorkingArea.Height - 20));
+        if (!_embedded) Size = new Size(width, Math.Min(_contentHeight, Screen.FromPoint(at).WorkingArea.Height - 20));
     }
 
     /// <summary>The width of a row's bold lead ("Bash") and the space after it.</summary>
@@ -1279,28 +1424,65 @@ internal sealed class DetailPopup : Form
         Invalidate();
         if (_laid[index].Row.Preview is not { } preview) return;
         var work = Screen.FromControl(this).WorkingArea;
-        var popup = new DetailPopup(preview(), Location, 640);
-        int x = Right + 4 + popup.Width <= work.Right ? Right + 4 : Left - 4 - popup.Width;
-        int y = Math.Clamp(Top + _laid[index].Bounds.Top - _scroll, work.Top, work.Bottom - popup.Height);
+        var on = RectangleToScreen(ClientRectangle);
+        var popup = new DetailPopup(preview(), on.Location, 640);
+        int x = on.Right + 4 + popup.Width <= work.Right ? on.Right + 4 : on.Left - 4 - popup.Width;
+        int y = Math.Clamp(on.Top + _laid[index].Bounds.Top - _scroll, work.Top, work.Bottom - popup.Height);
         popup.Location = new Point(x, y);
         popup.Show();
         _preview = popup;
     }
 
+    private int RowAt(int y) => _laid.FindIndex(l => l.Bounds.Top <= y + _scroll && y + _scroll < l.Bounds.Bottom);
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        int y = e.Y + _scroll;
-        int index = _laid.FindIndex(l => l.Bounds.Top <= y && y < l.Bounds.Bottom);
+        if (_embedded) return;
+        int index = RowAt(e.Y);
         if (index >= 0 && index != _previewRow && _laid[index].Row.Preview != null) ShowPreview(index);
+    }
+
+    /// <summary>Embedded: a click opens the row's preview beside the tile; a second click closes it.</summary>
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        base.OnMouseClick(e);
+        if (!_embedded || e.Button != MouseButtons.Left) return;
+        int index = StickyAt(e.Y) ?? RowAt(e.Y);
+        if (index < 0 || _laid[index].Row.Preview == null) return;
+        if (index == _previewRow) ClosePreview();
+        else ShowPreview(index);
+    }
+
+    public void ClosePreview()
+    {
+        _preview?.Close();
+        _preview = null;
+        _previewRow = -1;
+        Invalidate();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
-        if (_preview is { IsDisposed: false } preview) preview.ScrollBy(-e.Delta);
+        if (!_embedded && _preview is { IsDisposed: false } preview) preview.ScrollBy(-e.Delta);
         else ScrollBy(-e.Delta);
     }
+
+    // The user's message the top of the view is in, held there, a few lines at most; their next one pushes it up.
+    private const int StickyLines = 4;
+
+    private (int Index, int Top, int Height)? Sticky()
+    {
+        int index = _laid.FindLastIndex(l => l.Row.Mine && l.Bounds.Top < _scroll);
+        if (index < 0) return null;
+        int height = Math.Min(_laid[index].Bounds.Height, StickyLines * _font.Height + 2 * RowGap);
+        int next = _laid.FindIndex(index + 1, l => l.Row.Mine);
+        int top = next >= 0 ? Math.Min(0, _laid[next].Bounds.Top - _scroll - height) : 0;
+        return top + height > 0 ? (index, top, height) : null;
+    }
+
+    private int? StickyAt(int y) => Sticky() is { } s && y >= s.Top && y < s.Top + s.Height ? s.Index : null;
 
     public void ScrollBy(int pixels)
     {
@@ -1330,46 +1512,66 @@ internal sealed class DetailPopup : Form
         g.SetClip(new Rectangle(1, 1, Width - 2, Height - 2 - (more ? _font.Height + 4 : 0)));
         g.TranslateTransform(0, -_scroll);
         using var dotted = new Pen(TipCard.Border(false)) { DashStyle = DashStyle.Dot };
+        using (var mine = new SolidBrush(MineBack))
+            foreach (var laid in _laid.Where(l => l.Row.Mine)) g.FillRectangle(mine, laid.Bounds);
         if (_previewRow >= 0 && _previewRow < _laid.Count)
             using (var hover = new SolidBrush(Color.FromArgb(40, SystemColors.Highlight))) g.FillRectangle(hover, _laid[_previewRow].Bounds);
-        for (int i = 0; i < _laid.Count; i++)
+        for (int i = 0; i < _laid.Count; i++) DrawRow(g, i, dotted);
+        if (Sticky() is { } sticky)
         {
-            var (row, _, text, image, age, first, rest, blocks, runs) = _laid[i];
-            if (i > 0)
-            {
-                int top = (row.Image != null ? image.Top : text.Top) - RowGap;
-                g.DrawLine(dotted, Pad, top, Width - Pad, top);
-            }
-            if (row.Image is { } img) { g.DrawImage(img, image); continue; }
-            if (row.Icon == AgentsView.IconClaude)
-                g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
-            else if (row.Icon is { } icon)
-                TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, Line);
-            if (runs != null)
-            {
-                foreach (var run in runs)
-                    TextRenderer.DrawText(g, run.Text, _monoFont, new Point(text.Left + run.At.X, text.Top + run.At.Y), run.Color, Code);
-                continue;
-            }
-            if (blocks != null)
-            {
-                foreach (var b in blocks)
-                    TextRenderer.DrawText(g, b.Text, b.Font, new Rectangle(text.Left + b.Indent, text.Top + b.Top, text.Width - b.Indent, b.Height), SystemColors.ControlText, Wrap);
-                continue;
-            }
-            int restTop = text.Top;
-            if (age != null || row.Lead != null)
-            {
-                if (age != null)
-                {
-                    int ageW = TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width;
-                    TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
-                }
-                if (row.Lead != null) TextRenderer.DrawText(g, row.Lead, _ageFont, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
-                TextRenderer.DrawText(g, first, row.Italic ? _italicFont : _font, new Point(text.Left + LeadWidth(row), text.Top), SystemColors.ControlText, Line);
-                restTop += _font.Height;
-            }
-            TextRenderer.DrawText(g, rest, row.Italic ? _italicFont : _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
+            // The same row again over the others, at the top, cut to its few lines, a line under it.
+            var bounds = _laid[sticky.Index].Bounds;
+            g.ResetTransform();
+            g.SetClip(new Rectangle(1, Math.Max(1, sticky.Top), Width - 2, sticky.Height + Math.Min(0, sticky.Top - 1)));
+            g.TranslateTransform(0, sticky.Top - bounds.Top);
+            using (var mine = new SolidBrush(MineBack)) g.FillRectangle(mine, bounds);
+            DrawRow(g, sticky.Index, null);
+            g.ResetTransform();
+            g.ResetClip();
+            using var edge = new Pen(TipCard.Border(false));
+            g.DrawLine(edge, 1, sticky.Top + sticky.Height - 1, Width - 2, sticky.Top + sticky.Height - 1);
         }
+    }
+
+    private static readonly Color MineBack = Color.FromArgb(222, 234, 250);
+
+    private void DrawRow(Graphics g, int i, Pen? dotted)
+    {
+        var (row, _, text, image, age, first, rest, blocks, runs) = _laid[i];
+        if (i > 0 && dotted != null)
+        {
+            int top = (row.Image != null ? image.Top : text.Top) - RowGap;
+            g.DrawLine(dotted, Pad, top, Width - Pad, top);
+        }
+        if (row.Image is { } img) { g.DrawImage(img, image); return; }
+        if (row.Icon == AgentsView.IconClaude)
+            g.DrawIcon(AgentsView.ClaudeIcon, new Rectangle(Pad, text.Top + 1, _font.Height - 2, _font.Height - 2));
+        else if (row.Icon is { } icon)
+            TextRenderer.DrawText(g, icon.ToString(), _iconFont, new Point(Pad, text.Top + 1), SystemColors.ControlText, Line);
+        if (runs != null)
+        {
+            foreach (var run in runs)
+                TextRenderer.DrawText(g, run.Text, _monoFont, new Point(text.Left + run.At.X, text.Top + run.At.Y), run.Color, Code);
+            return;
+        }
+        if (blocks != null)
+        {
+            foreach (var b in blocks)
+                TextRenderer.DrawText(g, b.Text, b.Font, new Rectangle(text.Left + b.Indent, text.Top + b.Top, text.Width - b.Indent, b.Height), SystemColors.ControlText, Wrap);
+            return;
+        }
+        int restTop = text.Top;
+        if (age != null || row.Lead != null)
+        {
+            if (age != null)
+            {
+                int ageW = TextRenderer.MeasureText(age, _ageFont, Size.Empty, Line).Width;
+                TextRenderer.DrawText(g, age, _ageFont, new Point(text.Right - ageW, text.Top), SystemColors.ControlText, Line);
+            }
+            if (row.Lead != null) TextRenderer.DrawText(g, row.Lead, _ageFont, new Point(text.Left, text.Top), SystemColors.ControlText, Line);
+            TextRenderer.DrawText(g, first, row.Italic ? _italicFont : _font, new Point(text.Left + LeadWidth(row), text.Top), SystemColors.ControlText, Line);
+            restTop += _font.Height;
+        }
+        TextRenderer.DrawText(g, rest, row.Italic ? _italicFont : _font, new Rectangle(text.Left, restTop, text.Width, text.Bottom - restTop), SystemColors.ControlText, Wrap);
     }
 }

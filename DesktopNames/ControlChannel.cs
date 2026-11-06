@@ -56,7 +56,7 @@ internal sealed class ControlChannel
             ProjectsWindow().Agents.HoverZone(a.RequiredStr("session"), a.RequiredStr("zone"));
             return null;
         }));
-        _methods.Add(new("ui.agentsBrowse", "Click a chevron in the Agents tab: opens the last input and recent actions of a session, or of one of its agents or shells (screenshot window browse)",
+        _methods.Add(new("ui.agentsBrowse", "Click a chevron in the Agents tab: opens a session's tile in the left column, its conversation inside; or an agent's or shell's input and recent actions (screenshot window browse)",
             new[] { "session", "child" }, "session: name or id; child: an agent's or shell's id or description, or to:<recipient> for a message it sent; default the session itself", a =>
         {
             ProjectsWindow().Agents.Browse(a.RequiredStr("session"), a.Str("child"));
