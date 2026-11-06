@@ -118,7 +118,7 @@ internal sealed class AgentsView : ScrollableControl
     public object Describe() => new
     {
         animating = _shimmer.Enabled,
-        open = _tile?.Node.Name,
+        open = _tiles.Select(t => t.Shown?.Node.Name),
         nodes = _placed.Select(p => new
         {
             name = p.Node.Name, session = p.Node.SessionId, desktop = p.Desktop,
@@ -150,8 +150,7 @@ internal sealed class AgentsView : ScrollableControl
     private void Reflow()
     {
         _graph = _sessions.Graph();
-        var open = _graph.Nodes.FirstOrDefault(n => n.SessionId == _open);
-        if (_open != null && open == null) CloseTile(); // its session ended
+        foreach (var ended in _tiles.Where(t => _graph.Nodes.All(n => n.SessionId != t.SessionId)).ToList()) CloseTile(ended);
         var desktops = _desktops.GetDesktops();
         int Order(Guid id) => desktops.FindIndex(d => d.Id == id) is int i and >= 0 ? i : int.MaxValue;
         string Label(Guid id) => desktops.FirstOrDefault(d => d.Id == id) is { } d ? $"{d.Index + 1} · {d.Name}" : "? · no desktop";
@@ -161,8 +160,8 @@ internal sealed class AgentsView : ScrollableControl
         int StackHeight(SessionState.AgentNode n) => BoxH + (n.Children.Count + SentBy(n).Count) * (ChildH + ChildGap);
 
         int width = Math.Max(ClientSize.Width, 400);
-        // An open tile takes one column of the window: the rest flow in the others.
-        int maxCols = open != null ? Math.Max(1, _columns - 1) : _columns;
+        // Each open tile takes one column of the window: the rest flow in the others.
+        int maxCols = Math.Max(1, _columns - _tiles.Count);
         BoxW = (width - 2 * Pad - (maxCols - 1) * Gap) / maxCols - 2 * GroupPad;
         ScaleText(BoxW / 300f);
         int x = Pad, top = Pad, bandHeight = 0;
@@ -173,7 +172,7 @@ internal sealed class AgentsView : ScrollableControl
         // Desktops active in the last two hours first, then the rest; desktop order within each. Not by
         // state: a desktop going busy or ready moved it, so frames kept changing place under the user.
         int Tier(IEnumerable<SessionState.AgentNode> ns) => ns.Any(n => DateTime.UtcNow - n.LastActiveUtc <= Recent) ? 0 : 1;
-        foreach (var group in _graph.Nodes.Where(n => n != open).GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
+        foreach (var group in _graph.Nodes.Where(n => !IsOpen(n.SessionId)).GroupBy(n => GroupOf(n.DesktopId)).OrderBy(g => Tier(g)).ThenBy(g => Order(g.Key)))
         {
             var nodes = group.OrderByDescending(n => n.LastActiveUtc).ToList();  // most recently active first
             int cols = Math.Min(nodes.Count, maxCols);
@@ -221,7 +220,7 @@ internal sealed class AgentsView : ScrollableControl
                 .Concat(p.Node.State == StateKind.Busy ? new[] { ActionZone(p.Box) } : Array.Empty<Rectangle>())).ToList();
         UpdateShimmer();
         AutoScrollMinSize = new Size(0, top + bandHeight + Pad);
-        if (open != null) PlaceTile(open);
+        foreach (var tile in _tiles) PlaceTile(tile, _graph.Nodes.First(n => n.SessionId == tile.SessionId));
     }
 
     /// <summary>Text grows and shrinks with the boxes (300 px wide = the window's 9 pt).</summary>
@@ -262,7 +261,7 @@ internal sealed class AgentsView : ScrollableControl
         _columns = columns;
         Program.Host!.Settings.AgentsColumns = columns;
         Program.Host.Settings.Save();
-        _column?.Parent!.PerformLayout(); // the open tile's column follows the column width
+        if (_tiles.Count > 0) Parent!.PerformLayout(); // the open tiles' columns follow the column width
         Reflow();
         Invalidate();
     }
@@ -272,7 +271,7 @@ internal sealed class AgentsView : ScrollableControl
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
-        if (_placed.Count == 0 && _open == null)
+        if (_placed.Count == 0 && _tiles.Count == 0)
         {
             TextRenderer.DrawText(g, "No Claude sessions are running.", Font, new Point(Pad, Pad), SystemColors.GrayText, Flags);
             return;
@@ -363,9 +362,10 @@ internal sealed class AgentsView : ScrollableControl
         if (room - titleW > 2 * Line)
             TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx + badge + titleW + 4, y, room - titleW - 4, Line), dim, Flags);
         TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - cornerW, y, cornerW, Line), ink, Flags);
-        DrawChevron(g, SessionChevron(p.Box), _open == n.SessionId);
+        bool open = IsOpen(n.SessionId);
+        DrawChevron(g, SessionChevron(p.Box), open);
         // Open, the conversation below its title takes the place of its last prompt and action.
-        if (_open == n.SessionId) return;
+        if (open) return;
         // Lines 2-3: the last prompt — the user's, or another session's message to it.
         // Each of the two ends with its age at the right of its first line, as an agent's card does.
         if (n.Prompt is { } prompt)
@@ -703,7 +703,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         CloseHover();
         CloseBrowse();
-        _conversation?.ClosePreview();
+        foreach (var tile in _tiles) tile.Conversation?.ClosePreview();
     }
 
     private void CloseHover()
@@ -781,7 +781,7 @@ internal sealed class AgentsView : ScrollableControl
     {
         if (Form.ActiveForm != null) return;
         CloseBrowse();
-        _conversation?.ClosePreview();
+        foreach (var tile in _tiles) tile.Conversation?.ClosePreview();
     }
 
     private void CloseBrowse()
@@ -794,90 +794,92 @@ internal sealed class AgentsView : ScrollableControl
         Invalidate();
     }
 
-    // The open tile: the session whose chevron was clicked, in a column at the left of the tab, the
-    // height of the window, its conversation inside it. It stays put while the other tiles scroll.
-    private string? _open;
-    private TileColumn? _column;
-    private Placed? _tile;
-    private DetailPopup? _conversation;
+    // The open tiles: each session whose chevron was clicked, in a column of its own at the left of the
+    // tab, left to right in the order opened, the height of the window, its conversation inside it.
+    // They stay put while the other tiles scroll.
+    private readonly List<Tile> _tiles = new();
 
-    private sealed class TileColumn : Panel
+    private sealed class Tile : Panel
     {
-        public TileColumn() { DoubleBuffered = true; ResizeRedraw = true; }
+        public readonly string SessionId;
+        public Placed? Shown;
+        public DetailPopup? Conversation;
+        public Tile(string sessionId) { SessionId = sessionId; DoubleBuffered = true; ResizeRedraw = true; Dock = DockStyle.Left; }
     }
 
-    /// <summary>Open a session's tile, or close it (null).</summary>
-    private void OpenTile(string? sessionId)
+    private bool IsOpen(string sessionId) => _tiles.Any(t => t.SessionId == sessionId);
+
+    /// <summary>Open a session's tile beside those already open.</summary>
+    private Tile OpenTile(string sessionId)
     {
         CloseBrowse();
         CloseHover();
         _tipFor = null;
         _tip.Hide(this);
-        CloseTile();
-        _open = sessionId;
-        if (sessionId != null)
+        var tile = new Tile(sessionId) { BackColor = BackColor };
+        tile.Paint += (_, e) =>
         {
-            var form = FindForm()!;
-            form.Deactivate -= OnFormDeactivate;
-            form.Deactivate += OnFormDeactivate;
-        }
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            if (tile.Shown != null) DrawSession(e.Graphics, tile.Shown);
+        };
+        tile.MouseUp += (_, e) => OnTileMouseUp(tile, e);
+        tile.MouseMove += (_, e) => tile.Cursor = tile.Shown != null && SessionChevron(tile.Shown.Box).Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+        // Sized as the page lays out, before it docks: a width set during the docking (from this view's
+        // resize) went unapplied, and this view kept overlapping the column.
+        var page = Parent!;
+        LayoutEventHandler size = (_, _) => tile.Width = ColumnWidth();
+        page.Layout += size;
+        tile.Disposed += (_, _) => page.Layout -= size;
+        tile.Width = ColumnWidth();
+        _tiles.Add(tile);
+        page.Controls.Add(tile);
+        // Docking runs back to front: this view (in front) takes what the tiles leave, and the newest
+        // tile, just behind it, docks after the others, so to their right.
+        page.Controls.SetChildIndex(tile, 0);
+        BringToFront();
+        page.PerformLayout();
+        var form = FindForm()!;
+        form.Deactivate -= OnFormDeactivate;
+        form.Deactivate += OnFormDeactivate;
         Reflow();
         Invalidate();
+        return tile;
     }
 
-    private void CloseTile()
+    private void CloseTile(Tile tile)
     {
-        _open = null;
-        _tile = null;
-        _conversation?.Close();
-        _conversation = null;
-        _column?.Dispose();
-        _column = null;
+        _tiles.Remove(tile);
+        tile.Conversation?.Close();
+        tile.Dispose();
+        Parent?.PerformLayout();
     }
 
-    /// <summary>Size the column to one of the window's columns and lay the open tile and its conversation in it.</summary>
-    private void PlaceTile(SessionState.AgentNode node)
+    /// <summary>One of the window's columns, narrower when more tiles are open than leave one for the rest.</summary>
+    private int ColumnWidth() => Parent!.ClientSize.Width / Math.Max(_columns, _tiles.Count + 1);
+
+    /// <summary>Lay the open tile and its conversation in its column.</summary>
+    private void PlaceTile(Tile tile, SessionState.AgentNode node)
     {
-        if (_column == null)
-        {
-            _column = new TileColumn { Dock = DockStyle.Left, BackColor = BackColor };
-            _column.Paint += (_, e) =>
-            {
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                if (_tile != null) DrawSession(e.Graphics, _tile);
-            };
-            _column.MouseUp += OnTileMouseUp;
-            _column.MouseMove += (_, e) => _column.Cursor = _tile != null && SessionChevron(_tile.Box).Contains(e.Location) ? Cursors.Hand : Cursors.Default;
-            SizeColumn(this, new LayoutEventArgs(_column, null));
-            // Sized as the page lays out, before it docks: a width set during the docking (from this view's
-            // resize) went unapplied, and this view kept overlapping the column.
-            var page = Parent!;
-            page.Layout += SizeColumn;
-            _column.Disposed += (_, _) => page.Layout -= SizeColumn;
-            page.Controls.Add(_column);
-            BringToFront(); // docking runs back to front: the column takes the left, this the rest
-        }
-        var box = new Rectangle(Pad, Pad, _column.ClientSize.Width - Pad, _column.ClientSize.Height - 2 * Pad);
-        _tile = new Placed(node, "", box, new(), new());
+        var box = new Rectangle(Pad, Pad, tile.ClientSize.Width - Pad, tile.ClientSize.Height - 2 * Pad);
+        tile.Shown = new Placed(node, "", box, new(), new());
         var inside = new Rectangle(box.Left + 6, box.Top + 5 + Line + 3, box.Width - 12, box.Height - 5 - Line - 3 - 6);
-        if (_conversation == null) _conversation = new DetailPopup(ConversationRows(node), _column, inside);
-        else _conversation.Place(inside, ConversationRows(node));
-        _column.Invalidate();
+        if (tile.Conversation == null) tile.Conversation = new DetailPopup(ConversationRows(node), tile, inside);
+        else tile.Conversation.Place(inside, ConversationRows(node));
+        tile.Invalidate();
     }
 
-    /// <summary>The open tile's column is one of the window's columns wide.</summary>
-    private void SizeColumn(object? sender, LayoutEventArgs e)
+    private void OnTileMouseUp(Tile tile, MouseEventArgs e)
     {
-        if (_column != null) _column.Width = Parent!.ClientSize.Width / _columns;
-    }
-
-    private void OnTileMouseUp(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left || _tile == null) return;
-        if (SessionChevron(_tile.Box).Contains(e.Location)) OpenTile(null);
-        else if (_tile.Box.Contains(e.Location))
+        if (e.Button != MouseButtons.Left || tile.Shown == null) return;
+        if (SessionChevron(tile.Shown.Box).Contains(e.Location))
         {
-            try { GoTo(_tile.Node); }
+            CloseTile(tile);
+            Reflow();
+            Invalidate();
+        }
+        else if (tile.Shown.Box.Contains(e.Location))
+        {
+            try { GoTo(tile.Shown.Node); }
             catch (Exception ex) { ProjectSwitcher.ReportError(ex); }
         }
     }
@@ -901,9 +903,9 @@ internal sealed class AgentsView : ScrollableControl
             ?? throw new ArgumentException($"no session \"{session}\" in the Agents tab");
         if (child == null)
         {
-            OpenTile(p.Node.SessionId);
-            _column!.Refresh();
-            _conversation!.Refresh();
+            var tile = OpenTile(p.Node.SessionId);
+            tile.Refresh();
+            tile.Conversation!.Refresh();
             return;
         }
         if (p.Messages.FirstOrDefault(x => child == "to:" + x.Message.To) is { Box.Width: > 0 } m)
@@ -919,10 +921,10 @@ internal sealed class AgentsView : ScrollableControl
 
     /// <summary>For the control channel: hover a row of the open browse panel, opening its preview.</summary>
     public void BrowseHover(int row) =>
-        (_browse ?? _conversation ?? throw new InvalidOperationException("no browse panel or tile is open; call ui.agentsBrowse first")).HoverRow(row);
+        (_browse ?? _tiles.LastOrDefault()?.Conversation ?? throw new InvalidOperationException("no browse panel or tile is open; call ui.agentsBrowse first")).HoverRow(row);
 
-    public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : _column?.Handle;
-    public IntPtr? PreviewHandle => (_browse ?? _conversation) is { IsDisposed: false } b ? b.PreviewHandle : null;
+    public IntPtr? BrowseHandle => _browse is { IsDisposed: false } b ? b.Handle : _tiles.LastOrDefault()?.Handle;
+    public IntPtr? PreviewHandle => (_browse ?? _tiles.LastOrDefault()?.Conversation) is { IsDisposed: false } b ? b.PreviewHandle : null;
 
     /// <summary>A subagent's task and recent actions; a shell's command and output.</summary>
     private static List<DetailPopup.Row> ChildBrowseRows(SessionState.AgentChild c)
@@ -1129,13 +1131,14 @@ internal sealed class DetailPopup : Form
     private sealed record Run(string Text, Color Color, Point At);
     private sealed record Laid(Row Row, Rectangle Bounds, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder, List<Block>? Blocks, List<Run>? Runs = null);
 
-    private const int Pad = 8, RowGap = 6;
+    // Rows sit 2 px above and below their dividers: vertical space is what the open tiles are short of.
+    private const int Pad = 8, RowGap = 2;
     private readonly int _maxImageHeight;
     private readonly List<Laid> _laid = new();
     private readonly Font _font, _italicFont, _iconFont, _ageFont, _monoFont, _h1Font, _h2Font;
     private int _width;
-    // Embedded in an open Agents tile, not a popup of its own: the tile sizes it, the wheel scrolls it,
-    // and a click (not a hover) opens a row's preview, so scrolling doesn't flip previews open.
+    // Embedded in an open Agents tile, not a popup of its own: the tile sizes it, and the wheel scrolls
+    // its rows, not the open preview (the preview scrolls under the mouse).
     private readonly bool _embedded;
     private int _contentHeight;
     private int _scroll;
@@ -1429,6 +1432,7 @@ internal sealed class DetailPopup : Form
         int x = on.Right + 4 + popup.Width <= work.Right ? on.Right + 4 : on.Left - 4 - popup.Width;
         int y = Math.Clamp(on.Top + _laid[index].Bounds.Top - _scroll, work.Top, work.Bottom - popup.Height);
         popup.Location = new Point(x, y);
+        if (_embedded) popup.MouseLeave += OnPreviewMouseLeave;
         popup.Show();
         _preview = popup;
     }
@@ -1438,20 +1442,21 @@ internal sealed class DetailPopup : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (_embedded) return;
-        int index = RowAt(e.Y);
+        int index = StickyAt(e.Y) ?? RowAt(e.Y);
         if (index >= 0 && index != _previewRow && _laid[index].Row.Preview != null) ShowPreview(index);
     }
 
-    /// <summary>Embedded: a click opens the row's preview beside the tile; a second click closes it.</summary>
-    protected override void OnMouseClick(MouseEventArgs e)
+    // Embedded, the preview goes when the mouse leaves the tile, except into the preview (to scroll it),
+    // and when it leaves the preview, except back into the tile.
+    protected override void OnMouseLeave(EventArgs e)
     {
-        base.OnMouseClick(e);
-        if (!_embedded || e.Button != MouseButtons.Left) return;
-        int index = StickyAt(e.Y) ?? RowAt(e.Y);
-        if (index < 0 || _laid[index].Row.Preview == null) return;
-        if (index == _previewRow) ClosePreview();
-        else ShowPreview(index);
+        base.OnMouseLeave(e);
+        if (_embedded && _preview is { IsDisposed: false } preview && !preview.Bounds.Contains(Cursor.Position)) ClosePreview();
+    }
+
+    private void OnPreviewMouseLeave(object? sender, EventArgs e)
+    {
+        if (!RectangleToScreen(ClientRectangle).Contains(Cursor.Position)) ClosePreview();
     }
 
     public void ClosePreview()
