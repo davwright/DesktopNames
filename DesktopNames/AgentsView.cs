@@ -817,6 +817,8 @@ internal sealed class AgentsView : ScrollableControl
         /// <summary>The agent or shell expanded under its card, and what it shows.</summary>
         public string? Expanded;
         public DetailPopup? Expansion;
+        /// <summary>The expanded shell's output file, followed as it is written.</summary>
+        public FileSystemWatcher? Tail;
         public Tile(string sessionId) { SessionId = sessionId; DoubleBuffered = true; ResizeRedraw = true; Dock = DockStyle.Left; }
     }
 
@@ -869,6 +871,7 @@ internal sealed class AgentsView : ScrollableControl
         _tiles.Remove(tile);
         tile.Conversation?.Close();
         tile.Expansion?.Close();
+        tile.Tail?.Dispose();
         tile.Dispose();
         Parent?.PerformLayout();
     }
@@ -908,10 +911,29 @@ internal sealed class AgentsView : ScrollableControl
         }
         else if (tile.Expansion == null) tile.Expansion = new DetailPopup(CardRows(expanded), tile, expansion!.Value);
         else tile.Expansion.Place(expansion!.Value, CardRows(expanded));
+        Follow(tile, expanded is { Kind: "shell", OutputFile: { } file } ? file : null);
         var inside = new Rectangle(x, y, w, Math.Max(3 * Line, box.Bottom - 6 - y));
         if (tile.Conversation == null) tile.Conversation = new DetailPopup(ConversationRows(node), tile, inside);
         else tile.Conversation.Place(inside, ConversationRows(node));
         tile.Invalidate();
+    }
+
+    /// <summary>An expanded shell's output shows what it writes as it writes it: its file's changes are
+    /// watched, and each one shows the file's end again.</summary>
+    private static void Follow(Tile tile, string? file)
+    {
+        if (tile.Tail is { } tail && file != null && Path.Combine(tail.Path, tail.Filter) == file) return;
+        tile.Tail?.Dispose();
+        tile.Tail = null;
+        if (file == null) return;
+        tile.Tail = new FileSystemWatcher(Path.GetDirectoryName(file)!, Path.GetFileName(file))
+            { NotifyFilter = NotifyFilters.Size | NotifyFilters.LastWrite, SynchronizingObject = tile };
+        tile.Tail.Changed += (_, _) =>
+        {
+            if (tile.Expansion != null && tile.Shown?.Children.FirstOrDefault(c => c.Child.Id == tile.Expanded).Child is { } shell)
+                tile.Expansion.SetRows(CardRows(shell));
+        };
+        tile.Tail.EnableRaisingEvents = true;
     }
 
     /// <summary>What an expanded card shows: an agent's task and actions, the one running now turning; a shell's command and output.</summary>
@@ -1016,8 +1038,7 @@ internal sealed class AgentsView : ScrollableControl
             rows.Add(new(IconShell, TaskbarOverlay.Truncate(Shown(command), 160), c.StartedUtc is { } s ? SessionState.FormatAge(s) : null, null,
                 () => new() { new(null, command, null, null, Shell: true) }));
         if (c.OutputFile is { } file)
-            rows.Add(new(IconRead, "its output", c.LastOutputUtc is { } o ? SessionState.FormatAge(o) : null, null,
-                () => new() { new(null, OutputTail(file), null, null, Mono: true) }));
+            rows.Add(new(null, OutputTail(file), null, null, Mono: true));
         return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
     }
 
@@ -1643,6 +1664,8 @@ internal sealed class DetailPopup : Form
         using var dotted = new Pen(TipCard.Border(false)) { DashStyle = DashStyle.Dot };
         using (var mine = new SolidBrush(MineBack))
             foreach (var laid in _laid.Where(l => l.Row.Mine)) g.FillRectangle(mine, laid.Bounds);
+        using (var running = new SolidBrush(RunningBack))
+            foreach (var laid in _laid.Where(l => l.Row.Running)) g.FillRectangle(running, laid.Bounds);
         if (_previewRow >= 0 && _previewRow < _laid.Count)
             using (var hover = new SolidBrush(Color.FromArgb(40, SystemColors.Highlight))) g.FillRectangle(hover, _laid[_previewRow].Bounds);
         for (int i = 0; i < _laid.Count; i++) DrawRow(g, i, dotted);
@@ -1662,7 +1685,7 @@ internal sealed class DetailPopup : Form
         }
     }
 
-    private static readonly Color MineBack = Color.FromArgb(222, 234, 250);
+    private static readonly Color MineBack = Color.FromArgb(222, 234, 250), RunningBack = Color.FromArgb(255, 238, 200);
 
     // The running step's Claude icon turns: an animation, so a display timer, on only while a row runs.
     private readonly System.Windows.Forms.Timer _spin = new() { Interval = 40 };

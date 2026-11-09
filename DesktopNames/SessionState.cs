@@ -275,6 +275,18 @@ internal sealed class SessionState
         e.Background.TryGetValue(id, out var w) && w.Kind == "agent" && e.TranscriptPath.Length > 0
             ? ClaudeSessionRegistry.Transcript(ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, id)) : null;
 
+    /// <summary>Commands the transcript says went to the background that no Stop has listed yet: a Stop
+    /// comes at the end of the turn, they show from the moment they go there.</summary>
+    private static IEnumerable<AgentChild> TranscriptShells(SessionEntry e)
+    {
+        if (e.TranscriptPath.Length == 0 || ClaudeSessionRegistry.Transcript(e.TranscriptPath) is not { } facts) return [];
+        string session = Path.GetFileNameWithoutExtension(e.TranscriptPath);
+        return facts.Shells.Where(s => !e.Background.ContainsKey(s.Id)).Select(s => new AgentChild(s.Id, "shell", s.Description, "", s.AtUtc, null,
+            ClaudeSessionRegistry.TaskLastOutputUtc(session, s.Id),
+            s.Tool == "Bash" && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, s.Id, s.Command) : null,
+            s.Command, s.Tool, [], null, null, ClaudeSessionRegistry.TaskOutputFile(session, s.Id)));
+    }
+
     /// <summary>Every tracked session with its background agents and shells, and who messaged whom.</summary>
     public AgentGraph Graph()
     {
@@ -290,7 +302,8 @@ internal sealed class SessionState
                     SubagentFacts(e, b.Key)?.Actions ?? [],
                     b.Value.Kind == "agent" && e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.SubagentTranscript(e.TranscriptPath, b.Key) : null,
                     SubagentFacts(e, b.Key)?.Prompt,
-                    b.Value.Kind == "shell" && e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskOutputFile(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null)).ToList(),
+                    b.Value.Kind == "shell" && e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.TaskOutputFile(Path.GetFileNameWithoutExtension(e.TranscriptPath), b.Key) : null))
+                    .Concat(TranscriptShells(e)).ToList(),
                 Topic(e), ProcessStartedUtc(e.SessionPid), e.BackgroundActive, Usage(e),
                 e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Prompt : null, e.ToolName, e.HookEvent,
                 e.TranscriptPath, e.TranscriptPath.Length > 0 ? ClaudeSessionRegistry.Transcript(e.TranscriptPath)?.Actions ?? [] : [],

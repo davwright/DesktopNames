@@ -287,8 +287,14 @@ internal sealed class ClaudeSessionRegistry
     /// the transcript and <see cref="ToolUseId"/> the call's id, to read its input and result again (<see cref="ActionDetail"/>).</summary>
     public sealed record ClaudeAction(string Tool, string Text, DateTime AtUtc, string? Command, long Offset, string? ToolUseId);
 
-    /// <summary><see cref="Prompts"/>: the prompts from the one that started the oldest kept action on, oldest first.</summary>
-    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions, IReadOnlyList<Prompt> Prompts);
+    /// <summary><see cref="Prompts"/>: the prompts from the one that started the oldest kept action on, oldest first.
+    /// <see cref="Shells"/>: the commands running in the background now.</summary>
+    public sealed record TranscriptFacts(string? Title, DateTime LastWriteUtc, Usage? Usage, Prompt? Prompt, IReadOnlyList<ClaudeAction> Actions, IReadOnlyList<Prompt> Prompts,
+                                         IReadOnlyList<BackgroundShell> Shells);
+
+    /// <summary>A command running in the background: started so, or moved there when it ran past its timeout.
+    /// <see cref="Id"/> is its task id; <see cref="Tool"/> Bash or PowerShell.</summary>
+    public sealed record BackgroundShell(string Id, string Description, string Command, string Tool, DateTime AtUtc);
 
     private const int ActionsKept = 40;
 
@@ -304,7 +310,16 @@ internal sealed class ClaudeSessionRegistry
         public List<Prompt> Prompts = new();
         public Prompt? Prompt => Prompts.Count > 0 ? Prompts[^1] : null;
         public List<ClaudeAction> Actions = new();
+        public Dictionary<string, BackgroundShell> Shells = new(StringComparer.Ordinal);
     }
+
+    // A shell call's result when the command went to the background, as the content's first words — so the
+    // same words inside some other output (a grep of a transcript) don't count.
+    private static readonly System.Text.RegularExpressions.Regex MovedToBackground = new(
+        "\"tool_use_id\":\"([^\"]+)\",\"type\":\"tool_result\",\"content\":\"(?:Command did not complete within its \\d+s timeout and was moved to the background \\(ID: |Command running in background with ID: )(\\w+)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex NotifiedTask = new("<task-id>(\\w+)</task-id>", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex StoppedTask = new("\"toolUseResult\":\\{\"message\":\"Successfully stopped task: (\\w+)", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     // path → what its scan found so far. Transcripts only grow, so each read scans what was appended —
     // up to its last complete line, so no record is read half-written.
@@ -333,6 +348,18 @@ internal sealed class ClaudeSessionRegistry
         }
         foreach (var line in text.Split('\n'))
         {
+            if (!into.Sidechain && line.Contains("\"type\":\"user\"", StringComparison.Ordinal))
+            {
+                if (MovedToBackground.Match(line) is { Success: true } moved)
+                {
+                    // The call precedes its result, and nothing runs between a call and its result, so it is still kept.
+                    var call = into.Actions.Last(a => a.ToolUseId == moved.Groups[1].Value);
+                    into.Shells[moved.Groups[2].Value] = new BackgroundShell(moved.Groups[2].Value, call.Text, call.Command!, call.Tool, call.AtUtc);
+                }
+                if (line.Contains("\"origin\":{\"kind\":\"task-notification\"", StringComparison.Ordinal))
+                    foreach (System.Text.RegularExpressions.Match ended in NotifiedTask.Matches(line)) into.Shells.Remove(ended.Groups[1].Value);
+                if (StoppedTask.Match(line) is { Success: true } stopped) into.Shells.Remove(stopped.Groups[1].Value);
+            }
             // A user record with an origin, or a queued_command: a message (the user's, or a peer
             // session's) that arrived while the session was busy and was taken in mid-turn.
             if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal)
@@ -407,8 +434,8 @@ internal sealed class ClaudeSessionRegistry
 
     /// <summary>What one action holds in full: a reply's text, a file read (its text or image), a file
     /// written, a command and its output, a page fetched. <see cref="Markdown"/> when it reads as markdown;
-    /// <see cref="Command"/>: a shell call's command line, <see cref="Text"/> then being its output.</summary>
-    /// <summary><see cref="Diff"/>: an edit as lines marked "  " kept, "- " removed, "+ " added.</summary>
+    /// <see cref="Command"/>: a shell call's command line, <see cref="Text"/> then being its output.
+    /// <see cref="Diff"/>: an edit as lines marked "  " kept, "- " removed, "+ " added.</summary>
     public sealed record Detail(string Text, bool Markdown, List<byte[]> Images, string? Command = null, string? Diff = null);
 
     private const int DetailChars = 30_000;
@@ -612,7 +639,7 @@ internal sealed class ClaudeSessionRegistry
             Scan(text, start, seen);
             seen.Length = end;
         }
-        return new TranscriptFacts(seen.CustomTitle ?? seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList(), seen.Prompts.ToList());
+        return new TranscriptFacts(seen.CustomTitle ?? seen.Title, file.LastWriteTimeUtc, seen.Usage, seen.Prompt, seen.Actions.ToList(), seen.Prompts.ToList(), seen.Shells.Values.ToList());
     }
 
     /// <summary>Where a subagent writes its own transcript: beside its session's, in <c>&lt;sessionId&gt;subagentsagent-&lt;agentId&gt;.jsonl</c>.</summary>
