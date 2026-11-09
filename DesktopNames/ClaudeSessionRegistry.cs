@@ -487,6 +487,7 @@ internal sealed class ClaudeSessionRegistry
             "Edit" => new Detail(Get("file_path") ?? "", false, images, Diff: Cut(LineDiff(Get("old_string") ?? "", Get("new_string") ?? ""))),
             "Bash" or "PowerShell" => new Detail(Cut(result), false, images, Get("command")),
             "Agent" or "Task" => new Detail(Cut($"{Get("prompt")}\n\n---\n\n{result}"), true, images),
+            "SendMessage" => new Detail(Cut($"## To {Get("to")}\n\n{Get("message")}\n\n> {Delivery(result)}"), true, images),
             "WebFetch" => new Detail(Cut($"{Get("url")}\n\n{result}"), true, images),
             _ => new Detail(Cut(result), true, images),
         };
@@ -494,6 +495,16 @@ internal sealed class ClaudeSessionRegistry
 
     // The Read tool numbers each line: "  12<tab>…".
     private static readonly System.Text.RegularExpressions.Regex LineNumber = new(@"(?m)^ *\d+\t", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>What SendMessage answered, as a sentence: it answers {"success":…,"message":…,"msg_id":…}, or plain text (an error, a call still running).</summary>
+    private static string Delivery(string result)
+    {
+        if (!result.TrimStart().StartsWith('{')) return result;
+        using var doc = JsonDocument.Parse(result);
+        var r = doc.RootElement;
+        string said = r.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
+        return (r.GetProperty("success").GetBoolean() ? "✓ Sent. " : "✗ Not sent. ") + said;
+    }
 
     /// <summary>A line diff over the longest common subsequence, removals before additions, as git shows them.</summary>
     private static string LineDiff(string before, string after)
