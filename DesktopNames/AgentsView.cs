@@ -333,7 +333,7 @@ internal sealed class AgentsView : ScrollableControl
         Color ink = stale ? SystemColors.GrayText : Color.Black, dim = stale ? SystemColors.GrayText : Color.FromArgb(60, 60, 60);
         using (var path = TaskbarOverlay.RoundedRect(p.Box, 6))
         using (var brush = new SolidBrush(fill))
-        using (var border = new Pen(ControlPaint.Dark(fill, 0.1f), 1.2f))
+        using (var border = n.Usage is { } on && on.Model.Contains("fable", StringComparison.Ordinal) ? new Pen(FableBack, 3f) : new Pen(ControlPaint.Dark(fill, 0.1f), 1.2f))
         {
             g.FillPath(brush, path);
             if (n.Usage is { } u) DrawContext(g, path, p.Box, fill, u);
@@ -341,9 +341,14 @@ internal sealed class AgentsView : ScrollableControl
         }
         int lx = p.Box.Left + 8, w = p.Box.Width - 16, y = p.Box.Top + 5;
         // Line 1: the title VS Code lists it under; top right, the model, ⏳ while background work runs, and how long ago it started.
-        string corner = (n.Usage is { } model ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + (n.StartedUtc is { } s ? SessionState.FormatAge(s) : "");
+        // Fable's name is a white-on-purple badge: it is for the hard decisions, and easy to forget to switch back from.
+        bool fable = n.Usage is { } used && used.Model.Contains("fable", StringComparison.Ordinal);
+        string corner = (n.Usage is { } model && !fable ? ModelName(model.Model) + " · " : "") + (n.BackgroundActive ? "⏳ " : "") + (n.StartedUtc is { } s ? SessionState.FormatAge(s) : "");
         using var bold = new Font(Font, FontStyle.Bold);
-        int cornerW = TextRenderer.MeasureText(corner, bold).Width;
+        int textW = TextRenderer.MeasureText(corner, bold).Width;
+        string fableName = fable ? ModelName(n.Usage!.Model) : "";
+        int fableW = fable ? TextRenderer.MeasureText(fableName, bold).Width + 10 : 0;
+        int cornerW = textW + (fable ? fableW + 4 : 0);
         // A blue badge: Remote Control (claude.ai) can see this session.
         int badge = 0;
         if (n.RemoteControl)
@@ -361,7 +366,14 @@ internal sealed class AgentsView : ScrollableControl
         string id = n.Name == n.Title ? "" : n.Name + " · ";
         if (room - titleW > 2 * Line)
             TextRenderer.DrawText(g, id + ShortFolder(n.Cwd), Font, new Rectangle(lx + badge + titleW + 4, y, room - titleW - 4, Line), dim, Flags);
-        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - cornerW, y, cornerW, Line), ink, Flags);
+        if (fable)
+        {
+            var pill = new Rectangle(lx + w - Line - 6 - cornerW, y, fableW, Line);
+            using (var path = TaskbarOverlay.RoundedRect(pill, Line / 2))
+            using (var purple = new SolidBrush(FableBack)) g.FillPath(purple, path);
+            TextRenderer.DrawText(g, fableName, bold, pill, Color.White, Flags | TextFormatFlags.HorizontalCenter);
+        }
+        TextRenderer.DrawText(g, corner, bold, new Rectangle(lx + w - Line - 6 - textW, y, textW, Line), ink, Flags);
         bool open = IsOpen(n.SessionId);
         DrawChevron(g, SessionChevron(p.Box), open);
         // Open, the conversation below its title takes the place of its last prompt and action.
@@ -414,6 +426,8 @@ internal sealed class AgentsView : ScrollableControl
     /// <summary>Tokens a model holds before Claude Code compacts. 1M for Opus, Sonnet and Fable as run
     /// here (contexts of 914k are in the transcripts); Haiku has 200k.</summary>
     private static long ContextWindow(string model) => model.Contains("haiku", StringComparison.Ordinal) ? 200_000 : 1_000_000;
+
+    private static readonly Color FableBack = Color.FromArgb(124, 30, 200);
 
     /// <summary>"claude-opus-5-5" → "Opus 5.5", "claude-fable-5-1" → "Fable 5.1"; anything else as it is.</summary>
     private static string ModelName(string model)
