@@ -281,10 +281,15 @@ internal sealed class SessionState
     {
         if (e.TranscriptPath.Length == 0 || ClaudeSessionRegistry.Transcript(e.TranscriptPath) is not { } facts) return [];
         string session = Path.GetFileNameWithoutExtension(e.TranscriptPath);
-        return facts.Shells.Where(s => !e.Background.ContainsKey(s.Id)).Select(s => new AgentChild(s.Id, "shell", s.Description, "", s.AtUtc, null,
-            ClaudeSessionRegistry.TaskLastOutputUtc(session, s.Id),
-            s.Tool == "Bash" && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, s.Id, s.Command) : null,
-            s.Command, s.Tool, [], null, null, ClaudeSessionRegistry.TaskOutputFile(session, s.Id)));
+        // A shell is a child of the Claude process: one started before it (the session was resumed) died with the
+        // one before, and no notification says so. A Bash shell whose process is gone has ended.
+        var since = ProcessStartedUtc(e.SessionPid);
+        return facts.Shells.Where(s => !e.Background.ContainsKey(s.Id) && (since == null || s.AtUtc >= since))
+            .Select(s => (Shell: s, Process: s.Tool == "Bash" && e.SessionPid > 0 ? ClaudeSessionRegistry.FindShell(e.SessionPid, s.Id, s.Command) : null))
+            .Where(x => x.Process is not { Matches: 0 })
+            .Select(x => new AgentChild(x.Shell.Id, "shell", x.Shell.Description, "", x.Shell.AtUtc, null,
+                ClaudeSessionRegistry.TaskLastOutputUtc(session, x.Shell.Id), x.Process,
+                x.Shell.Command, x.Shell.Tool, [], null, null, ClaudeSessionRegistry.TaskOutputFile(session, x.Shell.Id)));
     }
 
     /// <summary>Every tracked session with its background agents and shells, and who messaged whom.</summary>
