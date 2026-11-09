@@ -50,10 +50,11 @@ internal sealed class AgentsView : ScrollableControl
         _textStep = Math.Clamp(Program.Host.Settings.AgentsTextStep, -15, 15);
         _sessions.Updated += OnUpdated;
         _clock.Tick += (_, _) => RefreshBrowse();
+        _follow.Tick += (_, _) => FollowTick();
         _shimmer.Tick += (_, _) => { foreach (var live in _live) Invalidate(new Rectangle(live.X + AutoScrollPosition.X, live.Y + AutoScrollPosition.Y, live.Width, live.Height)); };
         // A popup is its own top-level window: it goes when the tab hides or the window closes, not only when the mouse leaves.
         VisibleChanged += (_, _) => { UpdateShimmer(); if (!Visible) ClosePopup(); };
-        Disposed += (_, _) => { ClosePopup(); _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); _clock.Dispose(); };
+        Disposed += (_, _) => { ClosePopup(); _sessions.Updated -= OnUpdated; _tip.Dispose(); _iconFont.Dispose(); _shimmer.Dispose(); _clock.Dispose(); _follow.Dispose(); };
         Reflow();
     }
 
@@ -831,8 +832,9 @@ internal sealed class AgentsView : ScrollableControl
         /// <summary>The agent or shell expanded under its card, and what it shows.</summary>
         public string? Expanded;
         public DetailPopup? Expansion;
-        /// <summary>The expanded shell's output file, followed as it is written.</summary>
-        public FileSystemWatcher? Tail;
+        /// <summary>The expanded shell's output or log file, followed as it is written, and its length when last shown.</summary>
+        public string? Tail;
+        public long TailLength;
         public Tile(string sessionId) { SessionId = sessionId; DoubleBuffered = true; ResizeRedraw = true; Dock = DockStyle.Left; }
     }
 
@@ -885,8 +887,8 @@ internal sealed class AgentsView : ScrollableControl
         _tiles.Remove(tile);
         tile.Conversation?.Close();
         tile.Expansion?.Close();
-        tile.Tail?.Dispose();
         tile.Dispose();
+        _follow.Enabled = _tiles.Any(t => t.Tail != null);
         Parent?.PerformLayout();
     }
 
@@ -932,22 +934,37 @@ internal sealed class AgentsView : ScrollableControl
         tile.Invalidate();
     }
 
-    /// <summary>An expanded shell's output shows what it writes as it writes it: its file's changes are
-    /// watched, and each one shows the file's end again.</summary>
-    private static void Follow(Tile tile, string? file)
+    // An expanded shell's output shows what it writes as it writes it. Windows sends no change event while
+    // the writer holds the file open (a FileSystemWatcher saw 2 of 10 appends by node), so its length is read
+    // once a second — opened, as the directory's size lags too — and only a new length reads its end again.
+    // On only while a shell is expanded and this tab shows.
+    private readonly System.Windows.Forms.Timer _follow = new() { Interval = 1000 };
+
+    private void Follow(Tile tile, string? file)
     {
-        if (tile.Tail is { } tail && file != null && Path.Combine(tail.Path, tail.Filter) == file) return;
-        tile.Tail?.Dispose();
-        tile.Tail = null;
-        if (file == null) return;
-        tile.Tail = new FileSystemWatcher(Path.GetDirectoryName(file)!, Path.GetFileName(file))
-            { NotifyFilter = NotifyFilters.Size | NotifyFilters.LastWrite, SynchronizingObject = tile };
-        tile.Tail.Changed += (_, _) =>
+        if (tile.Tail != file) (tile.Tail, tile.TailLength) = (file, file != null ? OpenLength(file) : 0);
+        _follow.Enabled = _tiles.Any(t => t.Tail != null);
+    }
+
+    private void FollowTick()
+    {
+        if (!Visible) return;
+        foreach (var tile in _tiles)
         {
+            if (tile.Tail is not { } file) continue;
+            long length = OpenLength(file);
+            if (length == tile.TailLength) continue;
+            tile.TailLength = length;
             if (tile.Expansion != null && tile.Shown?.Children.FirstOrDefault(c => c.Child.Id == tile.Expanded).Child is { } shell)
                 tile.Expansion.SetRows(CardRows(shell));
-        };
-        tile.Tail.EnableRaisingEvents = true;
+        }
+    }
+
+    private static long OpenLength(string file)
+    {
+        if (!File.Exists(file)) return -1;
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return stream.Length;
     }
 
     /// <summary>What an expanded card shows: an agent's task and actions, the one running now turning; a shell's command and output.</summary>
@@ -1108,7 +1125,7 @@ internal sealed class AgentsView : ScrollableControl
     private static string OutputTail(string file)
     {
         if (!File.Exists(file)) return "(its output file is gone)";
-        const int Tail = 30_000;
+        const int Tail = 16_000;
         using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var mark = new byte[3];
         int got = stream.Read(mark, 0, 3);

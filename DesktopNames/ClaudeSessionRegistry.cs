@@ -356,10 +356,12 @@ internal sealed class ClaudeSessionRegistry
                     var call = into.Actions.Last(a => a.ToolUseId == moved.Groups[1].Value);
                     into.Shells[moved.Groups[2].Value] = new BackgroundShell(moved.Groups[2].Value, call.Text, call.Command!, call.Tool, call.AtUtc);
                 }
-                if (line.Contains("\"origin\":{\"kind\":\"task-notification\"", StringComparison.Ordinal))
-                    foreach (System.Text.RegularExpressions.Match ended in NotifiedTask.Matches(line)) into.Shells.Remove(ended.Groups[1].Value);
                 if (StoppedTask.Match(line) is { Success: true } stopped) into.Shells.Remove(stopped.Groups[1].Value);
             }
+            // The notice that a task ended: a user record when the session was idle, an attachment (a queued
+            // command) when it came mid-turn.
+            if (!into.Sidechain && line.Contains("\"origin\":{\"kind\":\"task-notification\"", StringComparison.Ordinal))
+                foreach (System.Text.RegularExpressions.Match ended in NotifiedTask.Matches(line)) into.Shells.Remove(ended.Groups[1].Value);
             // A user record with an origin, or a queued_command: a message (the user's, or a peer
             // session's) that arrived while the session was busy and was taken in mid-turn.
             if (line.Contains("\"origin\":{\"kind\":\"", StringComparison.Ordinal)
