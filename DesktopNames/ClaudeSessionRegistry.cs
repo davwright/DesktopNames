@@ -408,7 +408,8 @@ internal sealed class ClaudeSessionRegistry
     /// <summary>What one action holds in full: a reply's text, a file read (its text or image), a file
     /// written, a command and its output, a page fetched. <see cref="Markdown"/> when it reads as markdown;
     /// <see cref="Command"/>: a shell call's command line, <see cref="Text"/> then being its output.</summary>
-    public sealed record Detail(string Text, bool Markdown, List<byte[]> Images, string? Command = null);
+    /// <summary><see cref="Diff"/>: an edit as lines marked "  " kept, "- " removed, "+ " added.</summary>
+    public sealed record Detail(string Text, bool Markdown, List<byte[]> Images, string? Command = null, string? Diff = null);
 
     private const int DetailChars = 30_000;
 
@@ -456,7 +457,7 @@ internal sealed class ClaudeSessionRegistry
         {
             "Read" => new Detail(Cut(LineNumber.Replace(result, "")), md(Get("file_path")), images),
             "Write" => new Detail(Cut(Get("content") ?? ""), md(Get("file_path")), images),
-            "Edit" => new Detail(Cut($"{Get("file_path")}\n\n− {Get("old_string")}\n\n+ {Get("new_string")}"), false, images),
+            "Edit" => new Detail(Get("file_path") ?? "", false, images, Diff: Cut(LineDiff(Get("old_string") ?? "", Get("new_string") ?? ""))),
             "Bash" or "PowerShell" => new Detail(Cut(result), false, images, Get("command")),
             "Agent" or "Task" => new Detail(Cut($"{Get("prompt")}\n\n---\n\n{result}"), true, images),
             "WebFetch" => new Detail(Cut($"{Get("url")}\n\n{result}"), true, images),
@@ -466,6 +467,25 @@ internal sealed class ClaudeSessionRegistry
 
     // The Read tool numbers each line: "  12<tab>…".
     private static readonly System.Text.RegularExpressions.Regex LineNumber = new(@"(?m)^ *\d+\t", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>A line diff over the longest common subsequence, removals before additions, as git shows them.</summary>
+    private static string LineDiff(string before, string after)
+    {
+        var a = before.Replace("\r", "").Split('\n');
+        var b = after.Replace("\r", "").Split('\n');
+        int n = a.Length, m = b.Length;
+        var lcs = new int[n + 1, m + 1];
+        for (int i = n - 1; i >= 0; i--)
+            for (int j = m - 1; j >= 0; j--)
+                lcs[i, j] = a[i] == b[j] ? lcs[i + 1, j + 1] + 1 : Math.Max(lcs[i + 1, j], lcs[i, j + 1]);
+        var lines = new List<string>();
+        int x = 0, y = 0;
+        while (x < n || y < m)
+            if (x < n && y < m && a[x] == b[y]) { lines.Add("  " + a[x++]); y++; }
+            else if (x < n && (y == m || lcs[x + 1, y] >= lcs[x, y + 1])) lines.Add("- " + a[x++]);
+            else lines.Add("+ " + b[y++]);
+        return string.Join('\n', lines);
+    }
 
     private static string Cut(string text) => text.Length <= DetailChars ? text : text[..DetailChars] + "\n\n… (cut)";
 

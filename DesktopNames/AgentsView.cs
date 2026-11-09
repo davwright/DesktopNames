@@ -1049,6 +1049,7 @@ internal sealed class AgentsView : ScrollableControl
         var rows = new List<DetailPopup.Row>();
         if (d.Command != null) rows.Add(new(null, d.Command, null, null, Shell: true));
         if (d.Text.Trim().Length > 0) rows.Add(new(null, d.Text.Trim(), null, null, Markdown: d.Markdown, Mono: !d.Markdown));
+        if (d.Diff != null) rows.Add(new(null, d.Diff, null, null, Diff: true));
         rows.AddRange(d.Images.Select(Picture));
         return rows.Count > 0 ? rows : new() { new(null, "(empty)", null, null) };
     }
@@ -1206,12 +1207,17 @@ internal sealed class DetailPopup : Form
     /// text is drawn as markdown; <see cref="Mono"/>: as plain text in a fixed-width font; <see cref="Shell"/>:
     /// as a PowerShell or Bash command, highlighted. <see cref="Mine"/>: the user's own message — shaded, and it stays at
     /// the top while the rows under it scroll away, until the next one of the user's pushes it off. <see cref="Running"/>:
-    /// the step running now — a turning Claude icon in place of its own.</summary>
+    /// the step running now — a turning Claude icon in place of its own. <see cref="Diff"/>: the text is a line diff
+    /// ("- " removed, "+ " added, "  " kept), drawn in red and green as git shows it.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
                              Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false,
-                             bool Mine = false, bool Running = false);
+                             bool Mine = false, bool Running = false, bool Diff = false);
 
-    private sealed record Block(string Text, Font Font, int Indent, int Top, int Height);
+    private sealed record Block(string Text, Font Font, int Indent, int Top, int Height, Color? Back = null, Color? Fore = null);
+
+    private static readonly Color RemovedBack = Color.FromArgb(255, 215, 213), RemovedFore = Color.FromArgb(150, 0, 20),
+                                  AddedBack = Color.FromArgb(204, 255, 212), AddedFore = Color.FromArgb(0, 110, 30),
+                                  KeptFore = Color.FromArgb(110, 110, 110);
     private sealed record Run(string Text, Color Color, Point At);
     private sealed record Laid(Row Row, Rectangle Bounds, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder, List<Block>? Blocks, List<Run>? Runs = null);
 
@@ -1352,9 +1358,9 @@ internal sealed class DetailPopup : Form
                 y += h + RowGap * 2;
                 continue;
             }
-            if (row.Markdown || row.Mono)
+            if (row.Markdown || row.Mono || row.Diff)
             {
-                var blocks = row.Mono ? new List<Block> { Measure(row.Text, _monoFont, 0, 0, textW) } : LayOutMarkdown(row.Text, textW);
+                var blocks = row.Diff ? LayOutDiff(row.Text, textW) : row.Mono ? new List<Block> { Measure(row.Text, _monoFont, 0, 0, textW) } : LayOutMarkdown(row.Text, textW);
                 int h = blocks.Count == 0 ? 0 : blocks[^1].Top + blocks[^1].Height;
                 _laid.Add(new(row, new Rectangle(0, y - RowGap, width, h + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, h), Rectangle.Empty, null, "", "", blocks));
                 y += h + RowGap * 2;
@@ -1382,6 +1388,20 @@ internal sealed class DetailPopup : Form
 
     private static Block Measure(string text, Font font, int indent, int top, int width) =>
         new(text, font, indent, top, TextRenderer.MeasureText(text.Length == 0 ? " " : text, font, new Size(width - indent, int.MaxValue), Wrap).Height);
+
+    private List<Block> LayOutDiff(string diff, int width)
+    {
+        var blocks = new List<Block>();
+        int top = 0;
+        foreach (var line in diff.Split('\n'))
+        {
+            var (back, fore) = line.StartsWith("- ") ? (RemovedBack, RemovedFore) : line.StartsWith("+ ") ? (AddedBack, AddedFore) : ((Color?)null, KeptFore);
+            var b = Measure(line, _monoFont, 0, top, width) with { Back = back, Fore = fore };
+            blocks.Add(b);
+            top += b.Height;
+        }
+        return blocks;
+    }
 
     private static readonly System.Text.RegularExpressions.Regex Link = new(@"\[([^\]]+)\]\([^)]+\)");
 
@@ -1556,6 +1576,13 @@ internal sealed class DetailPopup : Form
         if (!RectangleToScreen(ClientRectangle).Contains(Cursor.Position)) ClosePreview();
     }
 
+    // A tile's popup goes with the tile; the preview it opened is a window of its own and stayed on screen.
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        _preview?.Close();
+        base.OnHandleDestroyed(e);
+    }
+
     public void ClosePreview()
     {
         _preview?.Close();
@@ -1677,7 +1704,11 @@ internal sealed class DetailPopup : Form
         if (blocks != null)
         {
             foreach (var b in blocks)
-                TextRenderer.DrawText(g, b.Text, b.Font, new Rectangle(text.Left + b.Indent, text.Top + b.Top, text.Width - b.Indent, b.Height), SystemColors.ControlText, Wrap);
+            {
+                var r = new Rectangle(text.Left + b.Indent, text.Top + b.Top, text.Width - b.Indent, b.Height);
+                if (b.Back is { } back) { using var fill = new SolidBrush(back); g.FillRectangle(fill, r); }
+                TextRenderer.DrawText(g, b.Text, b.Font, r, b.Fore ?? SystemColors.ControlText, Wrap);
+            }
             return;
         }
         int restTop = text.Top;
