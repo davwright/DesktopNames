@@ -925,7 +925,7 @@ internal sealed class AgentsView : ScrollableControl
         }
         else if (tile.Expansion == null) tile.Expansion = new DetailPopup(CardRows(expanded), tile, expansion!.Value);
         else tile.Expansion.Place(expansion!.Value, CardRows(expanded));
-        Follow(tile, expanded is { Kind: "shell", OutputFile: { } file } ? file : null);
+        Follow(tile, expanded is { Kind: "shell" } shell ? (shell.Command is { } run ? LogTarget(run) : null) ?? shell.OutputFile : null);
         var inside = new Rectangle(x, y, w, Math.Max(3 * Line, box.Bottom - 6 - y));
         if (tile.Conversation == null) tile.Conversation = new DetailPopup(ConversationRows(node), tile, inside);
         else tile.Conversation.Place(inside, ConversationRows(node));
@@ -1051,8 +1051,13 @@ internal sealed class AgentsView : ScrollableControl
         if (c.Command is { } command)
             rows.Add(new(IconShell, TaskbarOverlay.Truncate(Shown(command), 160), c.StartedUtc is { } s ? SessionState.FormatAge(s) : null, null,
                 () => new() { new(null, command, null, null, Shell: true) }));
-        if (c.OutputFile is { } file)
-            rows.Add(new(null, OutputTail(file), null, null, Mono: true));
+        if (c.OutputFile is { } file && OutputTail(file) is { Length: > 0 } output)
+            rows.Add(new(null, output, null, null, Log: true));
+        if (c.Command is { } run && LogTarget(run) is { } log)
+        {
+            rows.Add(new(IconRead, log, null, null));
+            rows.Add(new(null, OutputTail(log), null, null, Log: true));
+        }
         return rows.Count > 0 ? rows : new() { new(null, "Nothing recorded yet.", null, null) };
     }
 
@@ -1097,15 +1102,40 @@ internal sealed class AgentsView : ScrollableControl
     }
 
     /// <summary>The end of a shell's output file.</summary>
+    /// <summary>The end of an output or log file, read while it is being written: shared, from the last 30 KB,
+    /// starting at a whole line, in the encoding its byte-order mark names (PowerShell 5.1's *> writes UTF-16),
+    /// without terminal colour codes.</summary>
     private static string OutputTail(string file)
     {
         if (!File.Exists(file)) return "(its output file is gone)";
         const int Tail = 30_000;
         using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        bool cut = stream.Length > Tail;
-        if (cut) stream.Seek(-Tail, SeekOrigin.End);
-        return (cut ? "… (earlier output cut)\n" : "") + new StreamReader(stream).ReadToEnd();
+        var mark = new byte[3];
+        int got = stream.Read(mark, 0, 3);
+        var (encoding, preamble) = got >= 2 && mark[0] == 0xFF && mark[1] == 0xFE ? (System.Text.Encoding.Unicode, 2)
+                                 : got >= 2 && mark[0] == 0xFE && mark[1] == 0xFF ? (System.Text.Encoding.BigEndianUnicode, 2)
+                                 : got == 3 && mark[0] == 0xEF && mark[1] == 0xBB && mark[2] == 0xBF ? (System.Text.Encoding.UTF8, 3)
+                                 : (System.Text.Encoding.UTF8, 0);
+        long start = Math.Max(preamble, stream.Length - Tail);
+        if (preamble == 2 && start % 2 != 0) start++;
+        stream.Seek(start, SeekOrigin.Begin);
+        string text = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: false).ReadToEnd();
+        if (start > preamble) text = "… (earlier output cut)\n" + text[(text.IndexOf('\n') + 1)..];
+        return Ansi.Replace(text, "").Replace("\r", "").TrimEnd();
     }
+
+    private static readonly System.Text.RegularExpressions.Regex Ansi = new(@"\x1b\[[0-9;?]*[A-Za-z]");
+
+    // A redirect or tee to a file: > >> *> 2> … or Tee-Object / tee. Its target, quoted or not.
+    private static readonly System.Text.RegularExpressions.Regex Redirect = new(
+        @"(?:(?<![\w&])(?:\*|[1-6])?>>?|\b(?:Tee-Object(?:\s+-(?:FilePath|Append))*|tee(?:\s+-a)?))\s*(?:""([^""]+)""|'([^']+)'|([^\s;|&""']+))",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>The file a command writes its output to, when it redirects or tees it to one that exists at an absolute path:
+    /// then the task's own output file stays empty, and this one is what to follow.</summary>
+    private static string? LogTarget(string command) =>
+        Redirect.Matches(command).Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value)
+            .LastOrDefault(path => Path.IsPathRooted(path) && !path.Contains('$') && File.Exists(path));
 
     /// <summary>The last prompt in full, read again from the transcript, with the images pasted into it.</summary>
     private static List<DetailPopup.Row> PromptRows(SessionState.AgentNode n)
@@ -1243,16 +1273,18 @@ internal sealed class DetailPopup : Form
     /// as a PowerShell or Bash command, highlighted. <see cref="Mine"/>: the user's own message — shaded, and it stays at
     /// the top while the rows under it scroll away, until the next one of the user's pushes it off. <see cref="Running"/>:
     /// the step running now — a turning Claude icon in place of its own. <see cref="Diff"/>: the text is a line diff
-    /// ("- " removed, "+ " added, "  " kept), drawn in red and green as git shows it.</summary>
+    /// ("- " removed, "+ " added, "  " kept), drawn in red and green as git shows it. <see cref="Log"/>: command output,
+    /// its error lines on red and its warnings on amber.</summary>
     public sealed record Row(char? Icon, string Text, string? Age, Image? Image,
                              Func<List<Row>>? Preview = null, bool Markdown = false, bool Mono = false, bool Shell = false, string? Lead = null, bool Italic = false,
-                             bool Mine = false, bool Running = false, bool Diff = false);
+                             bool Mine = false, bool Running = false, bool Diff = false, bool Log = false);
 
     private sealed record Block(string Text, Font Font, int Indent, int Top, int Height, Color? Back = null, Color? Fore = null);
 
     private static readonly Color RemovedBack = Color.FromArgb(255, 215, 213), RemovedFore = Color.FromArgb(150, 0, 20),
                                   AddedBack = Color.FromArgb(204, 255, 212), AddedFore = Color.FromArgb(0, 110, 30),
-                                  KeptFore = Color.FromArgb(110, 110, 110);
+                                  KeptFore = Color.FromArgb(110, 110, 110),
+                                  WarnBack = Color.FromArgb(255, 238, 200), WarnFore = Color.FromArgb(120, 70, 0);
     private sealed record Run(string Text, Color Color, Point At);
     private sealed record Laid(Row Row, Rectangle Bounds, Rectangle Text, Rectangle Image, string? Age, string First, string Remainder, List<Block>? Blocks, List<Run>? Runs = null);
 
@@ -1393,9 +1425,9 @@ internal sealed class DetailPopup : Form
                 y += h + RowGap * 2;
                 continue;
             }
-            if (row.Markdown || row.Mono || row.Diff)
+            if (row.Markdown || row.Mono || row.Diff || row.Log)
             {
-                var blocks = row.Diff ? LayOutDiff(row.Text, textW) : row.Mono ? new List<Block> { Measure(row.Text, _monoFont, 0, 0, textW) } : LayOutMarkdown(row.Text, textW);
+                var blocks = row.Diff ? LayOutLines(row.Text, textW, DiffLine) : row.Log ? LayOutLines(row.Text, textW, LogLine) : row.Mono ? new List<Block> { Measure(row.Text, _monoFont, 0, 0, textW) } : LayOutMarkdown(row.Text, textW);
                 int h = blocks.Count == 0 ? 0 : blocks[^1].Top + blocks[^1].Height;
                 _laid.Add(new(row, new Rectangle(0, y - RowGap, width, h + 2 * RowGap), new Rectangle(Pad + iconW, y, textW, h), Rectangle.Empty, null, "", "", blocks));
                 y += h + RowGap * 2;
@@ -1424,13 +1456,24 @@ internal sealed class DetailPopup : Form
     private static Block Measure(string text, Font font, int indent, int top, int width) =>
         new(text, font, indent, top, TextRenderer.MeasureText(text.Length == 0 ? " " : text, font, new Size(width - indent, int.MaxValue), Wrap).Height);
 
-    private List<Block> LayOutDiff(string diff, int width)
+    private static (Color?, Color?) DiffLine(string line) =>
+        line.StartsWith("- ") ? (RemovedBack, RemovedFore) : line.StartsWith("+ ") ? (AddedBack, AddedFore) : (null, KeptFore);
+
+    // A log line reporting an error or a warning; "0 errors" and "0 failed" report none.
+    private static readonly System.Text.RegularExpressions.Regex ErrorWord = new(@"(?i)(?<!\b0 )\b(errors?|fail(ed|ure|s)?|fatal|exception|refus(ed|es)|denied|cannot)\b");
+    private static readonly System.Text.RegularExpressions.Regex WarnWord = new(@"(?i)(?<!\b0 )\bwarn(ing|ings)?\b");
+
+    private static (Color?, Color?) LogLine(string line) =>
+        ErrorWord.IsMatch(line) ? (RemovedBack, RemovedFore) : WarnWord.IsMatch(line) ? (WarnBack, WarnFore) : (null, null);
+
+    /// <summary>Text line by line in the fixed font, each line coloured by <paramref name="paint"/> (its background, its ink).</summary>
+    private List<Block> LayOutLines(string text, int width, Func<string, (Color? Back, Color? Fore)> paint)
     {
         var blocks = new List<Block>();
         int top = 0;
-        foreach (var line in diff.Split('\n'))
+        foreach (var line in text.Split('\n'))
         {
-            var (back, fore) = line.StartsWith("- ") ? (RemovedBack, RemovedFore) : line.StartsWith("+ ") ? (AddedBack, AddedFore) : ((Color?)null, KeptFore);
+            var (back, fore) = paint(line);
             var b = Measure(line, _monoFont, 0, top, width) with { Back = back, Fore = fore };
             blocks.Add(b);
             top += b.Height;
