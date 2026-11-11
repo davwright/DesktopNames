@@ -482,7 +482,7 @@ internal sealed class ProjectSwitcher : IDisposable
     /// <summary>
     /// Put VS Code windows on the desktop named like them: the desktop with exactly the workspace's
     /// name, else the closest name (<see cref="BestNamed"/>) among the desktops no window's exact
-    /// name claims. On the screen and in the snap position this screen setup remembers for the
+    /// name claims, else a new desktop named after the workspace. On the screen and in the snap position this screen setup remembers for the
     /// workspace; without one, on the screen it remembers for another workspace of that desktop;
     /// without that, on the screen the window is on. <paramref name="windows"/> null means every
     /// open VS Code window.
@@ -508,9 +508,10 @@ internal sealed class ProjectSwitcher : IDisposable
             d ??= BestNamed(desktops.Where(x => !claimed.Contains(x.Id)), w.Workspace);
             if (d == null)
             {
-                Log.Projects($"assign by name: '{w.Workspace}' matches no desktop");
-                results.Add(new { window = w.Workspace, match = "none", desktop = (int?)null, screen = (string?)null });
-                continue;
+                var created = CreateProjectDesktop(w.Workspace);
+                desktops = _desktop.GetDesktops();
+                d = desktops.First(x => x.Id == created);
+                match = "created";
             }
 
             WorkspaceLocation? loc;

@@ -936,7 +936,7 @@ internal sealed class HostForm : Form
             RefreshAllOverlays();
             return null;
         }));
-        c.Add(new("vscode.assignByName", "Put VS Code windows on the desktop named like them (exact name first, then the closest), on the screen this layout remembers",
+        c.Add(new("vscode.assignByName", "Put VS Code windows on the desktop named like them (exact name first, then the closest, else a new desktop with their name), on the screen this layout remembers",
             new[] { "window" }, "window: handle (0x1A2B) of one VS Code window, default every open one", a =>
         {
             var one = a.Str("window") is { } sel ? new[] { (IntPtr)Convert.ToInt64(_desktopService.FindWindow(sel).Hwnd[2..], 16) } : null;
