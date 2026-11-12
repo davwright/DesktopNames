@@ -452,6 +452,11 @@ internal sealed class AlertPipeServer : IDisposable
             switch (ev)
             {
                 case "SessionStart":
+                    // A started, resumed or cleared session waits for input; a prompt it was started
+                    // with arrives as UserPromptSubmit right after. Busy here left a resumed session
+                    // "Working" until its next prompt. A compaction can start one mid-turn: unchanged.
+                    t = msg.HookSource == "compact" ? new(null, AskChange.None) : new(StateKind.Ready, AskChange.Clear);
+                    return true;
                 case "UserPromptSubmit":
                     // The user engaging is itself the answer to anything pending.
                     t = new(StateKind.Busy, AskChange.Clear); return true;
