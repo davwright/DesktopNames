@@ -959,6 +959,47 @@ internal sealed class HostForm : Form
             RefreshAllOverlays();
             return null;
         }));
+        // The OSC 7501 vocabulary (idle working done blocked error clear), so any script can show
+        // on its desktop the way a Claude session does. DN has no "done" colour: done is Ready.
+        c.Add(new("status.set", "Show a script's status on its desktop, like a Claude session",
+            new[] { "app", "state", "msg", "kind", "cwd", "desktop", "pid" },
+            "app: name, one entry per app; state: idle|working|done|blocked|error|clear; msg: one line; kind: blocked only, permission|question|auth; "
+            + "cwd: folder of the script, finds the VS Code window's desktop; desktop: 1-based number instead of cwd; pid: the script's process, the entry goes when it exits", a =>
+        {
+            string app = a.RequiredStr("app"), state = a.RequiredStr("state"), msg = a.Str("msg") ?? "";
+            string? kind = a.Str("kind"), cwd = a.Str("cwd");
+            if (kind != null && state != "blocked") throw new ArgumentException("\"kind\" goes with state=blocked only");
+            if (kind is not (null or "permission" or "question" or "auth")) throw new ArgumentException("\"kind\" must be permission, question or auth");
+            (StateKind? activity, AskChange ask, bool remove) = state switch
+            {
+                "working" => ((StateKind?)StateKind.Busy, AskChange.Clear, false),
+                "idle" or "done" => (StateKind.Ready, AskChange.Clear, false),
+                "blocked" => (null, AskChange.Set, false),
+                "error" => (StateKind.Error, AskChange.Clear, false),
+                "clear" => (null, AskChange.Clear, true),
+                _ => throw new ArgumentException("\"state\" must be idle, working, done, blocked, error or clear"),
+            };
+            Guid target;
+            if (a.Int("desktop") != null)
+            {
+                if (cwd != null) throw new ArgumentException("pass \"cwd\" or \"desktop\", not both");
+                target = DesktopArg(a);
+            }
+            else
+            {
+                if (cwd == null) throw new ArgumentException("missing argument \"cwd\" or \"desktop\"");
+                target = (_alertServer ?? throw new InvalidOperationException("not ready")).ResolveCwd(cwd);
+                if (target == Guid.Empty) throw new ArgumentException($"no VS Code window on any desktop holds {cwd}; pass \"desktop\"");
+            }
+            var info = _desktopService.GetDesktops().FirstOrDefault(d => d.Id == target)
+                ?? throw new InvalidOperationException($"{cwd} resolves to desktop {target}, which no longer exists; pass \"desktop\"");
+            string body = kind != null && msg.Length > 0 ? $"{kind}: {msg}" : kind ?? msg;
+            var sessions = _sessionState ?? throw new InvalidOperationException("not ready");
+            var effective = sessions.Apply(target, "status", app, activity, ask, remove, app, body, a.Int("pid") ?? 0, 0, toolName: "status", cwd: cwd ?? "");
+            if (!remove) sessions.SetRegistryFacts("status", app, app, "user", false);
+            Log.State($"status.set app={app} state={state} -> {effective} desktop={info.Index + 1} '{body}'");
+            return new { app, state = remove ? "removed" : effective.ToString(), desktop = info.Index + 1, desktopName = info.Name };
+        }));
     }
 
     private void RegisterHotkeys()

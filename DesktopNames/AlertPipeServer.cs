@@ -565,31 +565,8 @@ internal sealed class AlertPipeServer : IDisposable
 
         if (!string.IsNullOrEmpty(msg.Cwd))
         {
-            var g = ResolveByCwdWalkUp(msg.Cwd!);
-            if (g != Guid.Empty) { Log.Resolver($"  via=cwd-walkup({msg.Cwd}) -> {g}"); return (g, null, false); }
-
-            // Workspace-folder lookup: scan %APPDATA%\Code\User\workspaceStorage on demand.
-            // Closes the .code-workspace gap where rootName ("ev.exe") differs from any
-            // folder basename in cwd ("EvolxCli"). A single folder may appear under
-            // multiple rootNames (FOLDER mode + member of a .code-workspace) — we iterate
-            // candidates and pick the first one VsCodeTracker has currently bound.
-            var candidates = _wsIndex.FindRootNameCandidates(msg.Cwd!);
-            if (candidates.Count > 0)
-            {
-                foreach (var rootName in candidates)
-                {
-                    if (_settings.Workspaces.TryGetValue(rootName, out var loc) &&
-                        loc.DesktopId != Guid.Empty)
-                    {
-                        Log.Resolver($"  via=workspace-index({msg.Cwd}) -> rootName={rootName} -> {loc.DesktopId}");
-                        return (loc.DesktopId, null, false);
-                    }
-                }
-                Log.Resolver($"  workspace-index found candidates [{string.Join(",", candidates)}] but none in the remembered layout");
-            }
-
-            if (_state.TryLookupLearnedPath(msg.Cwd!, out var lp))
-            { Log.Resolver($"  via=learned-path({msg.Cwd}) -> {lp}"); return (lp, null, false); }
+            var g = ResolveCwd(msg.Cwd!);
+            if (g != Guid.Empty) return (g, null, false);
         }
 
         // Nothing resolved. Build a hint the user can act on.
@@ -597,6 +574,38 @@ internal sealed class AlertPipeServer : IDisposable
         string hint = $"No open VSCode window matches {cwdPart}. Open the folder in VSCode to enable desktop indicators for this session.";
         Log.Resolver($"  via=NONE cwd={msg.Cwd} vscodePid={msg.VsCodePid} session={msg.SessionId} transcript={msg.TranscriptPath}");
         return (Guid.Empty, hint, false);
+    }
+
+    /// <summary>Desktop of the VS Code window whose workspace holds <paramref name="cwd"/>: folder
+    /// walk-up, then the workspace index, then folders learned from earlier sessions. Guid.Empty if none.</summary>
+    public Guid ResolveCwd(string cwd)
+    {
+        var g = ResolveByCwdWalkUp(cwd);
+        if (g != Guid.Empty) { Log.Resolver($"  via=cwd-walkup({cwd}) -> {g}"); return g; }
+
+        // Workspace-folder lookup: scan %APPDATA%\Code\User\workspaceStorage on demand.
+        // Closes the .code-workspace gap where rootName ("ev.exe") differs from any
+        // folder basename in cwd ("EvolxCli"). A single folder may appear under
+        // multiple rootNames (FOLDER mode + member of a .code-workspace) — we iterate
+        // candidates and pick the first one VsCodeTracker has currently bound.
+        var candidates = _wsIndex.FindRootNameCandidates(cwd);
+        if (candidates.Count > 0)
+        {
+            foreach (var rootName in candidates)
+            {
+                if (_settings.Workspaces.TryGetValue(rootName, out var loc) &&
+                    loc.DesktopId != Guid.Empty)
+                {
+                    Log.Resolver($"  via=workspace-index({cwd}) -> rootName={rootName} -> {loc.DesktopId}");
+                    return loc.DesktopId;
+                }
+            }
+            Log.Resolver($"  workspace-index found candidates [{string.Join(",", candidates)}] but none in the remembered layout");
+        }
+
+        if (_state.TryLookupLearnedPath(cwd, out var lp))
+        { Log.Resolver($"  via=learned-path({cwd}) -> {lp}"); return lp; }
+        return Guid.Empty;
     }
 
     /// <summary>
