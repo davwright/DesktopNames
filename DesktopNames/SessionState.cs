@@ -1170,6 +1170,10 @@ internal sealed class SessionState
             case AskChange.SetGuess:
                 // Re-notification for the same prompt is common (Claude re-emits while it
                 // waits), so only add one entry per distinct question.
+                // A permission_prompt Notification names no tool, so a tool's PostToolUse can never
+                // clear it: when its PermissionRequest is already pending, it is that question again
+                // (an AskUserQuestion prompt kept tester5-32 yellow for 15h after it was answered).
+                if (ask == AskChange.Set && toolName.Length == 0 && entry.Asks.Any(a => !a.Guess)) break;
                 if (!entry.Asks.Any(a => a.Matches(toolName, toolDescription)))
                     entry.Asks.Add(new PendingAsk
                     {
