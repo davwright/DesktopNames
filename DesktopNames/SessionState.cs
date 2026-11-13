@@ -854,8 +854,10 @@ internal sealed class SessionState
                 // after 15 min of silence (Asking must persist — the user has to act on it).
                 // Sticky bindings outlive the reap, so if the session speaks again it
                 // re-attaches to the same desktop.
-                bool staleNoPid = e.SessionPid == 0 && e.State != StateKind.Asking
-                                  && (now - e.LastSeenUtc).TotalMinutes > 15;
+                // A question keeps it for a day, not forever: void and projektron sat yellow for two months.
+                // Measured from the question, which is saved; LastSeenUtc restarts with DN.
+                bool staleNoPid = e.SessionPid == 0 && (now - e.LastSeenUtc).TotalMinutes > 15
+                                  && (e.OldestAsk is not { } q || (now - q.SinceUtc).TotalDays > 1);
                 if (!dead && !stale && !staleNoPid) continue;
 
                 string reason = dead ? "dead-pid" : stale ? "stale-busy" : "stale-nopid";
